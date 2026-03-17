@@ -1,4 +1,5 @@
 .DS_Store
 .fuse_hidden*
-
+/specworkflow
 /workspace
+test_dashboard.py
