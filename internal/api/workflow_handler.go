@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -485,6 +486,115 @@ func HandleResetWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			"status":  "reset",
 			"message": "Feature directory deleted",
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Browser — List Features
+// ---------------------------------------------------------------------------
+
+// featureInfo represents a single feature directory in the workspace browser.
+type featureInfo struct {
+	FeatureName  string   `json:"feature_name"`
+	State        string   `json:"state"`
+	Round        int      `json:"round"`
+	StartedAt    string   `json:"started_at"`
+	UpdatedAt    string   `json:"updated_at"`
+	CostUSD      float64  `json:"cost_usd"`
+	SpecVersions int      `json:"spec_versions"`
+	HasDiscovery bool     `json:"has_discovery"`
+	HasReviews   bool     `json:"has_reviews"`
+	IsTerminal   bool     `json:"is_terminal"`
+	Files        []string `json:"files"`
+}
+
+// HandleListFeatures returns an HTTP handler for GET /api/workspace/features.
+// It scans the workspace/specs/ directory for feature subdirectories and returns
+// a JSON array of feature info objects sorted by most recently updated.
+func HandleListFeatures(workspaceDir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		specsDir := filepath.Join(workspaceDir, "specs")
+		entries, err := os.ReadDir(specsDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				writeJSON(w, http.StatusOK, []featureInfo{})
+				return
+			}
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to read specs directory: %v", err))
+			return
+		}
+
+		var features []featureInfo
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+
+			featureName := entry.Name()
+			featureDir := filepath.Join(specsDir, featureName)
+			fi := featureInfo{
+				FeatureName: featureName,
+				State:       "unknown",
+				IsTerminal:  true,
+			}
+
+			// Read workflow-state.json if it exists.
+			state, stateErr := specworkflow.LoadState(featureDir)
+			if stateErr == nil && state != nil {
+				fi.State = state.State.String()
+				fi.Round = state.Round
+				fi.StartedAt = state.StartedAt
+				fi.UpdatedAt = state.UpdatedAt
+				fi.CostUSD = state.CumulativeCostUSD
+				fi.IsTerminal = isTerminalWorkflowState(state.State) || state.State == specworkflow.StateError
+			}
+
+			// Scan files in the feature directory.
+			fileEntries, _ := os.ReadDir(featureDir)
+			for _, f := range fileEntries {
+				if f.IsDir() {
+					continue
+				}
+				name := f.Name()
+				fi.Files = append(fi.Files, name)
+
+				// Count spec-v*.md files.
+				if strings.HasPrefix(name, "spec-v") && strings.HasSuffix(name, ".md") {
+					fi.SpecVersions++
+				}
+				// Check for discovery output.
+				if name == "discovery-output.json" {
+					fi.HasDiscovery = true
+				}
+				// Check for review files.
+				if strings.HasPrefix(name, "review-") && strings.HasSuffix(name, ".json") {
+					fi.HasReviews = true
+				}
+			}
+
+			features = append(features, fi)
+		}
+
+		// Sort by most recently updated (newest first), falling back to name.
+		sort.Slice(features, func(i, j int) bool {
+			if features[i].UpdatedAt != "" && features[j].UpdatedAt != "" {
+				return features[i].UpdatedAt > features[j].UpdatedAt
+			}
+			if features[i].UpdatedAt != "" {
+				return true
+			}
+			if features[j].UpdatedAt != "" {
+				return false
+			}
+			return features[i].FeatureName < features[j].FeatureName
+		})
+
+		writeJSON(w, http.StatusOK, features)
 	}
 }
 

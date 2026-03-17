@@ -548,15 +548,218 @@
         $("#tab-" + tab).classList.add("active");
 
         // Lazy-load data on tab switch
+        if (tab === "controls") { loadFeatureList(); startFeatureListPolling(); }
         if (tab === "spec") loadSpec();
         if (tab === "issues") loadIssues();
         if (tab === "convergence") loadConvergence();
         if (tab === "messages") startMessagesPolling();
 
-        // Stop messages polling when leaving the tab
+        // Stop polling when leaving tabs
         if (tab !== "messages") stopMessagesPolling();
+        if (tab !== "controls") stopFeatureListPolling();
       });
     });
+  }
+
+  // -----------------------------------------------------------------------
+  // Controls Tab — Workspace Browser (Feature List)
+  // -----------------------------------------------------------------------
+
+  var featureListTimer = null;
+
+  function getWorkflowStateBadgeClass(state) {
+    var s = (state || "").toUpperCase();
+    if (s === "FINALIZED") return "ws-finalized";
+    if (s === "ESCALATED" || s === "ERROR") return "ws-escalated";
+    if (s.indexOf("HUMAN_GATE") !== -1) return "ws-gate";
+    if (s === "UNKNOWN") return "ws-unknown";
+    // Active states: INIT, DISCOVERY, DRAFTING, REVIEWING, REVISING, JUDGING
+    return "ws-active";
+  }
+
+  function loadFeatureList() {
+    fetchJSON("/api/workspace/features").then(function (features) {
+      var container = $("#workflow-list");
+      if (!container) return;
+      clearChildren(container);
+
+      if (!features || features.length === 0) {
+        container.appendChild(el("p", { className: "workflow-empty", textContent: "No workflows yet. Start one above." }));
+        return;
+      }
+
+      features.forEach(function (f) {
+        var card = el("div", { className: "workflow-card" });
+
+        // Info section
+        var info = el("div", { className: "workflow-info" });
+
+        var nameRow = el("div", { className: "workflow-name" });
+        nameRow.appendChild(document.createTextNode(f.feature_name + " "));
+        var badge = el("span", {
+          className: "workflow-state-badge " + getWorkflowStateBadgeClass(f.state),
+          textContent: f.state
+        });
+        nameRow.appendChild(badge);
+        info.appendChild(nameRow);
+
+        var meta = el("div", { className: "workflow-meta" });
+        if (f.round > 0) {
+          meta.appendChild(el("span", { textContent: "Round " + f.round }));
+        }
+        if (f.cost_usd > 0) {
+          meta.appendChild(el("span", { textContent: "Cost " + formatCost(f.cost_usd) }));
+        }
+        if (f.started_at) {
+          meta.appendChild(el("span", { textContent: "Started: " + formatDate(f.started_at) }));
+        }
+        if (f.updated_at) {
+          meta.appendChild(el("span", { textContent: "Updated: " + formatDate(f.updated_at) }));
+        }
+        if (f.files) {
+          meta.appendChild(el("span", { textContent: f.files.length + " files" }));
+        }
+        if (f.spec_versions > 0) {
+          meta.appendChild(el("span", { textContent: f.spec_versions + " spec versions" }));
+        }
+        info.appendChild(meta);
+        card.appendChild(info);
+
+        // Actions section
+        var actions = el("div", { className: "workflow-actions" });
+
+        var stateUpper = (f.state || "").toUpperCase();
+        var isTerminal = f.is_terminal;
+        var isGate = stateUpper.indexOf("HUMAN_GATE") !== -1;
+        var isActive = !isTerminal && !isGate && stateUpper !== "UNKNOWN";
+
+        if (isTerminal && stateUpper !== "UNKNOWN") {
+          // Restart button — resets and pre-fills form
+          var restartBtn = el("button", {
+            className: "btn btn-primary btn-sm",
+            textContent: "Restart"
+          });
+          restartBtn.addEventListener("click", (function (featureName) {
+            return function () {
+              if (!confirm("Restart workflow for \"" + featureName + "\"? This will delete all previous results and start fresh.")) return;
+              restartBtn.disabled = true;
+              restartBtn.textContent = "Restarting...";
+              fetchJSON("/api/workflow/reset", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ feature_name: featureName })
+              }).then(function () {
+                // Auto-start the workflow with the same feature name.
+                return fetchJSON("/api/workflow/start", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    title: featureName,
+                    feature_name: featureName,
+                    description: "Restarted workflow"
+                  })
+                });
+              }).then(function (data) {
+                updateWorkflowStatus({
+                  state: data.state || "INIT",
+                  feature_name: data.feature_name || featureName,
+                  round: data.round || 1,
+                  cost_usd: 0,
+                  wall_clock_seconds: 0,
+                  agent_invocations: 0
+                });
+                addActivityEntry("Workflow restarted: " + featureName, "info");
+                loadFeatureList();
+              }).catch(function (err) {
+                alert("Restart failed: " + err.message);
+                restartBtn.disabled = false;
+                restartBtn.textContent = "Restart";
+              });
+            };
+          })(f.feature_name));
+          actions.appendChild(restartBtn);
+        }
+
+        if (isGate) {
+          // Resume button for gate states
+          var resumeBtn = el("button", {
+            className: "btn btn-sm",
+            textContent: "Resume",
+            style: "background:#e8d5f5;color:#6f42c1;border-color:#d5b8eb;"
+          });
+          resumeBtn.addEventListener("click", function () {
+            alert("Gate states require the orchestrator to be running. Start the workflow to resume from the gate.");
+          });
+          actions.appendChild(resumeBtn);
+        }
+
+        if (isActive) {
+          // View button — switches to messages tab
+          var viewBtn = el("button", {
+            className: "btn btn-sm",
+            textContent: "View"
+          });
+          viewBtn.addEventListener("click", function () {
+            // Switch to messages tab
+            $$(".nav-tab").forEach(function (b) { b.classList.remove("active"); });
+            $$(".tab-panel").forEach(function (p) { p.classList.remove("active"); });
+            var msgTab = $(".nav-tab[data-tab='messages']");
+            if (msgTab) msgTab.classList.add("active");
+            $("#tab-messages").classList.add("active");
+            startMessagesPolling();
+          });
+          actions.appendChild(viewBtn);
+        }
+
+        // Delete button (always shown for features with content)
+        var deleteBtn = el("button", {
+          className: "btn btn-danger btn-sm",
+          textContent: "Delete"
+        });
+        deleteBtn.addEventListener("click", (function (featureName) {
+          return function () {
+            if (!confirm("Delete all files for '" + featureName + "'? This cannot be undone.")) return;
+            fetchJSON("/api/workflow/reset", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ feature_name: featureName })
+            }).then(function () {
+              loadFeatureList();
+            }).catch(function (err) {
+              alert("Delete failed: " + err.message);
+            });
+          };
+        })(f.feature_name));
+        actions.appendChild(deleteBtn);
+
+        card.appendChild(actions);
+        container.appendChild(card);
+      });
+    }).catch(function () {
+      var container = $("#workflow-list");
+      if (container) {
+        clearChildren(container);
+        container.appendChild(el("p", { className: "workflow-empty", textContent: "Failed to load workflows." }));
+      }
+    });
+  }
+
+  function startFeatureListPolling() {
+    if (featureListTimer) clearInterval(featureListTimer);
+    featureListTimer = setInterval(function () {
+      // Only auto-refresh while Controls tab is active
+      var controlsTab = $("#tab-controls");
+      if (controlsTab && controlsTab.classList.contains("active")) {
+        loadFeatureList();
+      }
+    }, 10000);
+  }
+
+  function stopFeatureListPolling() {
+    if (featureListTimer) {
+      clearInterval(featureListTimer);
+      featureListTimer = null;
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -592,6 +795,10 @@
         });
         addActivityEntry("Workflow started: " + (data.feature_name || payload.feature_name), "info");
         form.reset();
+        // Collapse the new workflow section and refresh the list
+        var details = $("#new-workflow-section");
+        if (details) details.open = false;
+        loadFeatureList();
       }).catch(function (err) {
         var msg = err.message || "";
         if (msg.indexOf("409") !== -1) {
@@ -1552,6 +1759,7 @@
           var badge = $("#workflow-state");
           if (badge) { badge.textContent = "IDLE"; badge.className = "state-badge state-badge-idle"; }
           addActivityEntry("Workflow reset for " + featureName, "info");
+          loadFeatureList();
         }).catch(function (err) {
           alert("Reset failed: " + err.message);
         });
@@ -1586,6 +1794,9 @@
     initMessages();
     initWorkflowControls();
     wsConnect();
+    // Load workspace browser on startup and start auto-refresh
+    loadFeatureList();
+    startFeatureListPolling();
   }
 
   if (document.readyState === "loading") {

@@ -494,3 +494,217 @@ func TestHandleResetWorkflow_NonexistentDir(t *testing.T) {
 		t.Errorf("expected 200 for nonexistent dir, got %d", rec.Code)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// TestHandleListFeatures
+// ---------------------------------------------------------------------------
+
+func TestHandleListFeatures_EmptySpecs(t *testing.T) {
+	dir := t.TempDir()
+	handler := HandleListFeatures(dir)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workspace/features", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var features []featureInfo
+	if err := json.NewDecoder(rec.Body).Decode(&features); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(features) != 0 {
+		t.Errorf("expected 0 features, got %d", len(features))
+	}
+}
+
+func TestHandleListFeatures_WithFeatures(t *testing.T) {
+	dir := t.TempDir()
+	specsDir := filepath.Join(dir, "specs")
+	os.MkdirAll(specsDir, 0o755)
+
+	// Feature 1: has workflow state, spec files, discovery
+	f1Dir := filepath.Join(specsDir, "auth-flow")
+	os.MkdirAll(f1Dir, 0o755)
+	stateJSON := `{
+		"state": "FINALIZED",
+		"round": 3,
+		"feature_name": "auth-flow",
+		"started_at": "2026-03-17T05:00:00Z",
+		"updated_at": "2026-03-17T06:00:00Z",
+		"cumulative_cost_usd": 1.23
+	}`
+	os.WriteFile(filepath.Join(f1Dir, "workflow-state.json"), []byte(stateJSON), 0o644)
+	os.WriteFile(filepath.Join(f1Dir, "spec-v1.md"), []byte("# v1"), 0o644)
+	os.WriteFile(filepath.Join(f1Dir, "spec-v2.md"), []byte("# v2"), 0o644)
+	os.WriteFile(filepath.Join(f1Dir, "discovery-output.json"), []byte("{}"), 0o644)
+	os.WriteFile(filepath.Join(f1Dir, "review-round1.json"), []byte("{}"), 0o644)
+
+	// Feature 2: no workflow state (unknown)
+	f2Dir := filepath.Join(specsDir, "b4-slice")
+	os.MkdirAll(f2Dir, 0o755)
+	os.WriteFile(filepath.Join(f2Dir, "notes.md"), []byte("notes"), 0o644)
+
+	handler := HandleListFeatures(dir)
+	req := httptest.NewRequest(http.MethodGet, "/api/workspace/features", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var features []featureInfo
+	if err := json.NewDecoder(rec.Body).Decode(&features); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(features) != 2 {
+		t.Fatalf("expected 2 features, got %d", len(features))
+	}
+
+	// Should be sorted by updated_at (auth-flow has a date, b4-slice does not).
+	if features[0].FeatureName != "auth-flow" {
+		t.Errorf("expected first feature to be auth-flow, got %s", features[0].FeatureName)
+	}
+
+	// Verify auth-flow details.
+	af := features[0]
+	if af.State != "FINALIZED" {
+		t.Errorf("auth-flow state = %q, want FINALIZED", af.State)
+	}
+	if af.Round != 3 {
+		t.Errorf("auth-flow round = %d, want 3", af.Round)
+	}
+	if af.CostUSD != 1.23 {
+		t.Errorf("auth-flow cost = %f, want 1.23", af.CostUSD)
+	}
+	if af.SpecVersions != 2 {
+		t.Errorf("auth-flow spec_versions = %d, want 2", af.SpecVersions)
+	}
+	if !af.HasDiscovery {
+		t.Error("auth-flow has_discovery should be true")
+	}
+	if !af.HasReviews {
+		t.Error("auth-flow has_reviews should be true")
+	}
+	if !af.IsTerminal {
+		t.Error("auth-flow is_terminal should be true for FINALIZED")
+	}
+	if len(af.Files) != 5 {
+		t.Errorf("auth-flow files count = %d, want 5", len(af.Files))
+	}
+
+	// Verify b4-slice (unknown state).
+	bs := features[1]
+	if bs.State != "unknown" {
+		t.Errorf("b4-slice state = %q, want unknown", bs.State)
+	}
+	if !bs.IsTerminal {
+		t.Error("b4-slice is_terminal should be true for unknown")
+	}
+}
+
+func TestHandleListFeatures_MethodNotAllowed(t *testing.T) {
+	dir := t.TempDir()
+	handler := HandleListFeatures(dir)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/workspace/features", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rec.Code)
+	}
+}
+
+func TestHandleListFeatures_SortOrder(t *testing.T) {
+	dir := t.TempDir()
+	specsDir := filepath.Join(dir, "specs")
+	os.MkdirAll(specsDir, 0o755)
+
+	// Feature with older timestamp
+	oldDir := filepath.Join(specsDir, "old-feature")
+	os.MkdirAll(oldDir, 0o755)
+	os.WriteFile(filepath.Join(oldDir, "workflow-state.json"), []byte(`{
+		"state": "FINALIZED", "updated_at": "2026-03-01T00:00:00Z"
+	}`), 0o644)
+
+	// Feature with newer timestamp
+	newDir := filepath.Join(specsDir, "new-feature")
+	os.MkdirAll(newDir, 0o755)
+	os.WriteFile(filepath.Join(newDir, "workflow-state.json"), []byte(`{
+		"state": "ESCALATED", "updated_at": "2026-03-17T00:00:00Z"
+	}`), 0o644)
+
+	// Feature with no state (no timestamp) — should come last
+	noStateDir := filepath.Join(specsDir, "aaa-no-state")
+	os.MkdirAll(noStateDir, 0o755)
+	os.WriteFile(filepath.Join(noStateDir, "readme.md"), []byte("hi"), 0o644)
+
+	handler := HandleListFeatures(dir)
+	req := httptest.NewRequest(http.MethodGet, "/api/workspace/features", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	var features []featureInfo
+	json.NewDecoder(rec.Body).Decode(&features)
+
+	if len(features) != 3 {
+		t.Fatalf("expected 3 features, got %d", len(features))
+	}
+
+	names := make([]string, len(features))
+	for i, f := range features {
+		names[i] = f.FeatureName
+	}
+
+	expected := []string{"new-feature", "old-feature", "aaa-no-state"}
+	if !equalStrings(names, expected) {
+		t.Errorf("sort order = %v, want %v", names, expected)
+	}
+}
+
+func TestHandleListFeatures_ActiveWorkflowNotTerminal(t *testing.T) {
+	dir := t.TempDir()
+	specsDir := filepath.Join(dir, "specs")
+	os.MkdirAll(specsDir, 0o755)
+
+	activeDir := filepath.Join(specsDir, "active-feature")
+	os.MkdirAll(activeDir, 0o755)
+	os.WriteFile(filepath.Join(activeDir, "workflow-state.json"), []byte(`{
+		"state": "REVIEWING", "round": 2, "updated_at": "2026-03-17T00:00:00Z"
+	}`), 0o644)
+
+	handler := HandleListFeatures(dir)
+	req := httptest.NewRequest(http.MethodGet, "/api/workspace/features", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	var features []featureInfo
+	json.NewDecoder(rec.Body).Decode(&features)
+
+	if len(features) != 1 {
+		t.Fatalf("expected 1 feature, got %d", len(features))
+	}
+	if features[0].IsTerminal {
+		t.Error("REVIEWING state should not be terminal")
+	}
+	if features[0].State != "REVIEWING" {
+		t.Errorf("state = %q, want REVIEWING", features[0].State)
+	}
+}
+
+// equalStrings compares two string slices for equality.
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

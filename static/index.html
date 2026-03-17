@@ -89,27 +89,36 @@
 
       <!-- Controls Tab -->
       <section id="tab-controls" class="tab-panel active">
-        <h2>Start Workflow</h2>
-        <form id="goal-form" class="card">
-          <div class="form-group">
-            <label for="goal-title">Title</label>
-            <input type="text" id="goal-title" name="title" required placeholder="Feature title">
-          </div>
-          <div class="form-group">
-            <label for="goal-feature-name">Feature Name</label>
-            <input type="text" id="goal-feature-name" name="feature_name" required placeholder="e.g. user-auth">
-          </div>
-          <div class="form-group">
-            <label for="goal-description">Description</label>
-            <textarea id="goal-description" name="description" rows="4" required placeholder="Describe the feature..."></textarea>
-          </div>
-          <button type="submit" id="goal-submit" class="btn btn-primary">Submit Goal</button>
-        </form>
-        <div class="card" style="margin-top: 16px;">
-          <h3 style="margin-bottom: 8px;">Workflow Management</h3>
-          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-            <button id="btn-reset-workflow" class="btn btn-danger btn-sm">Reset Workflow</button>
-          </div>
+        <!-- Existing Workflows -->
+        <h2>Workflows</h2>
+        <div id="workflow-list" class="card">
+          <p class="loading-text">Loading workflows...</p>
+        </div>
+
+        <!-- Start New Workflow (collapsible) -->
+        <details id="new-workflow-section">
+          <summary><h2 style="display:inline">Start New Workflow</h2></summary>
+          <form id="goal-form" class="card">
+            <div class="form-group">
+              <label for="goal-title">Title</label>
+              <input type="text" id="goal-title" name="title" required placeholder="Feature title">
+            </div>
+            <div class="form-group">
+              <label for="goal-feature-name">Feature Name</label>
+              <input type="text" id="goal-feature-name" name="feature_name" required placeholder="e.g. user-auth">
+            </div>
+            <div class="form-group">
+              <label for="goal-description">Description</label>
+              <textarea id="goal-description" name="description" rows="4" required placeholder="Describe the feature..."></textarea>
+            </div>
+            <button type="submit" id="goal-submit" class="btn btn-primary">Submit Goal</button>
+          </form>
+        </details>
+
+        <!-- Workflow Management -->
+        <div class="card" id="workflow-management">
+          <h3>Workflow Management</h3>
+          <button id="btn-reset-workflow" class="btn btn-danger btn-sm">Reset All Workflows</button>
         </div>
 
         <h2>Document Upload</h2>
