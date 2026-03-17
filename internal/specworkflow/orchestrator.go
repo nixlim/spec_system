@@ -6,6 +6,7 @@ package specworkflow
 
 import (
 	"fmt"
+	"log"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -169,12 +170,22 @@ func (o *Orchestrator) RunWorkflow(goal GoalInput) error {
 	state := o.sm.State()
 	specDir := filepath.Join(o.workspaceDir, "specs", o.featureName)
 
+	log.Printf("[orchestrator] starting workflow: feature=%s, specDir=%s, sourceDocPaths=%v",
+		o.featureName, specDir, goal.SourceDocPaths)
+	log.Printf("[orchestrator] config: maxRounds=%d, minRounds=%d, maxCost=$%.2f, maxRetries=%d",
+		o.config.MaxRounds, o.config.MinRounds, o.config.MaxCostUSD, o.config.MaxRetries)
+	log.Printf("[orchestrator] skills loaded: planSpec=%q, grillSpec=%q",
+		o.config.SkillPaths.PlanSpec, o.config.SkillPaths.GrillSpec)
+
 	for {
 		if o.cancelled.Load() {
+			log.Printf("[orchestrator] workflow cancelled")
 			return fmt.Errorf("workflow cancelled")
 		}
 
 		current := o.sm.Current()
+		log.Printf("[orchestrator] ---- loop iteration: state=%s, round=%d, cost=$%.4f, invocations=%d ----",
+			current.String(), state.Round, state.CumulativeCostUSD, state.AgentInvocations)
 
 		// Emit a workflow_status heartbeat at the top of each iteration so
 		// the dashboard can track progress in real time.

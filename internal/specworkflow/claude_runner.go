@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,6 +89,12 @@ func (r *ClaudeRunner) Run(prompt string, outputPath string, timeoutSeconds int)
 
 	cmd := r.BuildCommand(ctx, prompt)
 
+	log.Printf("[claude-runner] dispatching: %s %v", cmd.Path, cmd.Args[1:3])
+	log.Printf("[claude-runner] working dir: %s", cmd.Dir)
+	log.Printf("[claude-runner] output path: %s", outputPath)
+	log.Printf("[claude-runner] timeout: %v", timeout)
+	log.Printf("[claude-runner] prompt length: %d chars", len(prompt))
+
 	// Capture stdout and stderr separately.
 	var stderrBuf []byte
 	stderrPipe, pipeErr := cmd.StderrPipe()
@@ -100,9 +107,12 @@ func (r *ClaudeRunner) Run(prompt string, outputPath string, timeoutSeconds int)
 		return 1, "", 0, 0, fmt.Errorf("create stdout pipe: %w", pipeErr)
 	}
 
+	startTime := time.Now()
 	if startErr := cmd.Start(); startErr != nil {
+		log.Printf("[claude-runner] FAILED to start process: %v", startErr)
 		return 1, "", 0, 0, fmt.Errorf("start claude process: %w", startErr)
 	}
+	log.Printf("[claude-runner] process started (PID %d)", cmd.Process.Pid)
 
 	// Read stdout fully.
 	stdoutData, readErr := io.ReadAll(stdoutPipe)
@@ -114,11 +124,20 @@ func (r *ClaudeRunner) Run(prompt string, outputPath string, timeoutSeconds int)
 	stderrBuf, _ = io.ReadAll(stderrPipe)
 
 	waitErr := cmd.Wait()
+	elapsed := time.Since(startTime)
 
 	stderrStr := string(stderrBuf)
 
+	log.Printf("[claude-runner] process exited after %v, stdout=%d bytes, stderr=%d bytes",
+		elapsed.Round(time.Millisecond), len(stdoutData), len(stderrBuf))
+
+	if len(stderrStr) > 0 {
+		log.Printf("[claude-runner] stderr (first 500 chars): %s", truncate(stderrStr, 500))
+	}
+
 	// Check for context timeout.
 	if ctx.Err() == context.DeadlineExceeded {
+		log.Printf("[claude-runner] TIMEOUT after %v", timeout)
 		return 1, stderrStr, 0, 0, fmt.Errorf("claude process timed out after %v", timeout)
 	}
 
@@ -127,7 +146,9 @@ func (r *ClaudeRunner) Run(prompt string, outputPath string, timeoutSeconds int)
 	if waitErr != nil {
 		if exitErr, ok := waitErr.(*exec.ExitError); ok {
 			code = exitErr.ExitCode()
+			log.Printf("[claude-runner] non-zero exit code: %d", code)
 		} else {
+			log.Printf("[claude-runner] process error: %v", waitErr)
 			return 1, stderrStr, 0, 0, fmt.Errorf("claude process error: %w", waitErr)
 		}
 	}
@@ -135,12 +156,17 @@ func (r *ClaudeRunner) Run(prompt string, outputPath string, timeoutSeconds int)
 	// Parse the JSON output.
 	parsed, parseErr := ParseOutput(stdoutData)
 	if parseErr != nil {
-		// If we can't parse output, write raw stdout to outputPath and report.
+		log.Printf("[claude-runner] FAILED to parse JSON output: %v", parseErr)
+		log.Printf("[claude-runner] raw stdout (first 500 chars): %s", truncate(string(stdoutData), 500))
 		_ = writeOutputFile(outputPath, stdoutData)
 		return code, stderrStr, 0, 0, fmt.Errorf("failed to parse claude JSON output: %w", parseErr)
 	}
 
+	log.Printf("[claude-runner] parsed: cost=$%.4f, duration=%dms, is_error=%v, result_length=%d",
+		parsed.CostUSD, parsed.DurationMS, parsed.IsError, len(parsed.Result))
+
 	if parsed.IsError {
+		log.Printf("[claude-runner] claude reported error: %s", truncate(parsed.Result, 200))
 		_ = writeOutputFile(outputPath, []byte(parsed.Result))
 		return 1, stderrStr, parsed.CostUSD, parsed.DurationMS, fmt.Errorf("claude reported error: %s", truncate(parsed.Result, 200))
 	}
@@ -150,6 +176,7 @@ func (r *ClaudeRunner) Run(prompt string, outputPath string, timeoutSeconds int)
 		return code, stderrStr, parsed.CostUSD, parsed.DurationMS, fmt.Errorf("write output file: %w", writeErr)
 	}
 
+	log.Printf("[claude-runner] SUCCESS: wrote %d bytes to %s", len(parsed.Result), outputPath)
 	return code, stderrStr, parsed.CostUSD, parsed.DurationMS, nil
 }
 

@@ -176,6 +176,14 @@ func (recv *OTELReceiver) HandleMetrics(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	metricCount := 0
+	for _, rm := range req.ResourceMetrics {
+		for _, sm := range rm.ScopeMetrics {
+			metricCount += len(sm.Metrics)
+		}
+	}
+	log.Printf("[otel] received metrics: %d bytes, %d metric series", len(body), metricCount)
+
 	recv.processMetrics(req)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -198,12 +206,20 @@ func (recv *OTELReceiver) HandleLogs(w http.ResponseWriter, r *http.Request) {
 
 	var req otlpLogsRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		log.Printf("otel: failed to parse logs JSON: %v", err)
+		log.Printf("[otel] failed to parse logs JSON (%d bytes): %v", len(body), err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("{}"))
 		return
 	}
+
+	logCount := 0
+	for _, rl := range req.ResourceLogs {
+		for _, sl := range rl.ScopeLogs {
+			logCount += len(sl.LogRecords)
+		}
+	}
+	log.Printf("[otel] received logs: %d bytes, %d log records", len(body), logCount)
 
 	recv.processLogs(req)
 
