@@ -141,12 +141,84 @@ func TestParseOutput_Error(t *testing.T) {
 	}
 }
 
+func TestParseOutput_StreamArray(t *testing.T) {
+	// Simulates the verbose JSON stream format from claude -p --output-format json --verbose
+	data := []byte(`[
+		{"type":"system","subtype":"init","session_id":"abc123"},
+		{"type":"assistant","message":{"content":[{"type":"text","text":"thinking..."}]}},
+		{"type":"result","result":"{\"schema_version\":\"1.0\"}","cost_usd":0.15,"duration_ms":30000,"is_error":false}
+	]`)
+
+	out, err := ParseOutput(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.IsError {
+		t.Error("expected is_error=false")
+	}
+	if out.CostUSD < 0.14 || out.CostUSD > 0.16 {
+		t.Errorf("expected cost ~0.15, got %f", out.CostUSD)
+	}
+	if out.DurationMS != 30000 {
+		t.Errorf("expected duration 30000, got %d", out.DurationMS)
+	}
+	if !strings.Contains(out.Result, "schema_version") {
+		t.Errorf("expected result to contain schema_version, got %q", out.Result)
+	}
+}
+
+func TestParseOutput_StreamArrayNoResultEvent(t *testing.T) {
+	// Some versions may not emit a "result" event; fall back to last assistant text.
+	data := []byte(`[
+		{"type":"system","subtype":"init"},
+		{"type":"assistant","message":{"content":[{"type":"text","text":"Here is the output: {\"data\":\"value\"}"}]},"cost_usd":0.05}
+	]`)
+
+	out, err := ParseOutput(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out.Result, "data") {
+		t.Errorf("expected result from last assistant text, got %q", out.Result)
+	}
+}
+
+func TestParseOutput_StreamArrayError(t *testing.T) {
+	data := []byte(`[
+		{"type":"system","subtype":"init"},
+		{"type":"result","result":"Rate limit exceeded","cost_usd":0.001,"duration_ms":500,"is_error":true}
+	]`)
+
+	out, err := ParseOutput(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !out.IsError {
+		t.Error("expected is_error=true")
+	}
+}
+
+func TestParseOutput_EmptyStream(t *testing.T) {
+	data := []byte(`[]`)
+	_, err := ParseOutput(data)
+	if err == nil {
+		t.Fatal("expected error for empty stream")
+	}
+}
+
 func TestParseOutput_InvalidJSON(t *testing.T) {
 	data := []byte(`not json at all`)
 
 	_, err := ParseOutput(data)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestParseOutput_EmptyInput(t *testing.T) {
+	_, err := ParseOutput([]byte(""))
+	if err == nil {
+		t.Fatal("expected error for empty input")
 	}
 }
 

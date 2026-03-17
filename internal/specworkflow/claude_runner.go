@@ -4,6 +4,7 @@
 package specworkflow
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -34,12 +35,35 @@ type ClaudeRunner struct {
 	Env map[string]string
 }
 
-// claudeOutput represents the JSON structure emitted by claude --output-format json.
+// claudeOutput is the normalised result extracted from the Claude CLI output.
 type claudeOutput struct {
 	Result     string  `json:"result"`
 	CostUSD    float64 `json:"cost_usd"`
 	DurationMS int64   `json:"duration_ms"`
 	IsError    bool    `json:"is_error"`
+}
+
+// claudeStreamEvent is a single event in the verbose JSON stream array
+// emitted by `claude -p --output-format json --verbose`.
+type claudeStreamEvent struct {
+	Type       string  `json:"type"`
+	Subtype    string  `json:"subtype,omitempty"`
+	CostUSD    float64 `json:"cost_usd,omitempty"`
+	DurationMS int64   `json:"duration_ms,omitempty"`
+	IsError    bool    `json:"is_error,omitempty"`
+	// Result message content — present on type=="result" events
+	Result string `json:"result,omitempty"`
+	// For assistant messages, content may be in a "message" sub-object
+	Message *struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text,omitempty"`
+		} `json:"content,omitempty"`
+		Usage *struct {
+			InputTokens  int `json:"input_tokens,omitempty"`
+			OutputTokens int `json:"output_tokens,omitempty"`
+		} `json:"usage,omitempty"`
+	} `json:"message,omitempty"`
 }
 
 // BuildCommand constructs the exec.Cmd for a given prompt and timeout context.
@@ -63,15 +87,88 @@ func (r *ClaudeRunner) BuildCommand(ctx context.Context, prompt string) *exec.Cm
 	return cmd
 }
 
-// ParseOutput parses the Claude CLI JSON output and extracts the result,
-// cost, duration, and error status. Exported for testing without running
-// the actual CLI.
+// ParseOutput parses the Claude CLI JSON output. It handles two formats:
+//  1. Single object: {"result":"...","cost_usd":0.12,...} (non-verbose)
+//  2. Streaming array: [{"type":"system",...},{"type":"result",...}] (verbose)
+//
+// In both cases it extracts the final result text, cost, and duration.
 func ParseOutput(data []byte) (*claudeOutput, error) {
-	var out claudeOutput
-	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, fmt.Errorf("parse claude output: %w", err)
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty output from claude")
 	}
-	return &out, nil
+
+	// Try single-object format first (non-verbose output).
+	if data[0] == '{' {
+		var out claudeOutput
+		if err := json.Unmarshal(data, &out); err != nil {
+			return nil, fmt.Errorf("parse claude JSON object: %w", err)
+		}
+		return &out, nil
+	}
+
+	// Streaming array format (verbose output).
+	if data[0] == '[' {
+		var events []claudeStreamEvent
+		if err := json.Unmarshal(data, &events); err != nil {
+			return nil, fmt.Errorf("parse claude JSON stream array: %w", err)
+		}
+		return extractFromStream(events)
+	}
+
+	return nil, fmt.Errorf("unexpected claude output format (starts with %q)", string(data[:1]))
+}
+
+// extractFromStream walks the verbose stream event array and extracts
+// the final result, cost, and error status.
+func extractFromStream(events []claudeStreamEvent) (*claudeOutput, error) {
+	if len(events) == 0 {
+		return nil, fmt.Errorf("empty event stream from claude")
+	}
+
+	out := &claudeOutput{}
+
+	// Walk events and accumulate. The "result" event at the end has the
+	// final text and cost. Fall back to the last assistant message if no
+	// explicit result event exists.
+	var lastAssistantText string
+	for _, ev := range events {
+		switch ev.Type {
+		case "result":
+			out.Result = ev.Result
+			out.CostUSD = ev.CostUSD
+			out.DurationMS = ev.DurationMS
+			out.IsError = ev.IsError
+			log.Printf("[claude-runner] found result event: cost=$%.4f, duration=%dms, is_error=%v, result_len=%d",
+				ev.CostUSD, ev.DurationMS, ev.IsError, len(ev.Result))
+
+		case "assistant":
+			// Extract text from the assistant message content blocks.
+			if ev.Message != nil {
+				for _, block := range ev.Message.Content {
+					if block.Type == "text" && block.Text != "" {
+						lastAssistantText = block.Text
+					}
+				}
+			}
+			// Accumulate cost from each assistant turn.
+			if ev.CostUSD > 0 {
+				out.CostUSD += ev.CostUSD
+			}
+		}
+	}
+
+	// If no explicit result event, use the last assistant text.
+	if out.Result == "" && lastAssistantText != "" {
+		out.Result = lastAssistantText
+		log.Printf("[claude-runner] no result event found, using last assistant text (%d chars)", len(lastAssistantText))
+	}
+
+	if out.Result == "" {
+		return nil, fmt.Errorf("no result found in %d stream events", len(events))
+	}
+
+	return out, nil
 }
 
 // Run implements AgentRunner. It launches the Claude CLI with the given
