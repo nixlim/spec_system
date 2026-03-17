@@ -48,7 +48,7 @@ func TestPromptDiscoveryNonEmpty(t *testing.T) {
 	}
 }
 
-func TestPromptDiscoveryEmbedsFileContent(t *testing.T) {
+func TestPromptDiscoveryReferencesFilePaths(t *testing.T) {
 	pb := newTestPromptBuilder(t)
 	reqContent := "# Requirements\nThe system SHALL authenticate users via OAuth2."
 	designContent := "# Design Notes\nUse JWT tokens with 1-hour expiry."
@@ -59,23 +59,23 @@ func TestPromptDiscoveryEmbedsFileContent(t *testing.T) {
 		t.Fatalf("BuildDiscoveryPrompt error: %v", err)
 	}
 
-	// Verify the actual file CONTENT is embedded, not the file paths.
-	if !strings.Contains(prompt, reqContent) {
-		t.Error("expected prompt to embed requirements.md file content")
+	// Verify file PATHS are listed (by reference, not embedded content).
+	if !strings.Contains(prompt, doc1) {
+		t.Error("expected prompt to contain file path for requirements.md")
 	}
-	if !strings.Contains(prompt, designContent) {
-		t.Error("expected prompt to embed design.md file content")
+	if !strings.Contains(prompt, doc2) {
+		t.Error("expected prompt to contain file path for design.md")
 	}
-	// The file paths themselves should NOT appear as the source_document body.
-	if strings.Contains(prompt, doc1) {
-		t.Error("prompt should NOT contain the file path as source document content")
+	// The file CONTENT should NOT be embedded in the prompt.
+	if strings.Contains(prompt, reqContent) {
+		t.Error("prompt should NOT embed raw file content — should pass by path reference")
 	}
-	if strings.Contains(prompt, doc2) {
-		t.Error("prompt should NOT contain the file path as source document content")
+	if strings.Contains(prompt, designContent) {
+		t.Error("prompt should NOT embed raw file content — should pass by path reference")
 	}
 }
 
-func TestPromptDiscoveryIncludesSourceDocumentWrapping(t *testing.T) {
+func TestPromptDiscoveryListsFilePathsNotContent(t *testing.T) {
 	pb := newTestPromptBuilder(t)
 	doc1 := writeSourceDoc(t, "requirements.md", "req content")
 	doc2 := writeSourceDoc(t, "design.pdf", "pdf content")
@@ -84,34 +84,32 @@ func TestPromptDiscoveryIncludesSourceDocumentWrapping(t *testing.T) {
 		t.Fatalf("BuildDiscoveryPrompt error: %v", err)
 	}
 
-	// Check that source documents are wrapped in XML tags.
-	if !strings.Contains(prompt, `<source_document name="requirements.md"`) {
-		t.Error("expected prompt to contain source_document tag for requirements.md")
+	// File paths should be listed as references.
+	if !strings.Contains(prompt, "requirements.md") {
+		t.Error("expected prompt to reference requirements.md")
 	}
-	if !strings.Contains(prompt, `<source_document name="design.pdf"`) {
-		t.Error("expected prompt to contain source_document tag for design.pdf")
+	if !strings.Contains(prompt, "design.pdf") {
+		t.Error("expected prompt to reference design.pdf")
 	}
-	if !strings.Contains(prompt, `type="user_uploaded"`) {
-		t.Error("expected source_document tags to include type=\"user_uploaded\"")
+	// Paths should appear as code references (backtick-wrapped).
+	if !strings.Contains(prompt, "`"+doc1+"`") {
+		t.Errorf("expected prompt to contain backtick-wrapped path %q", doc1)
 	}
-	if !strings.Contains(prompt, "</source_document>") {
-		t.Error("expected closing source_document tags")
+	// Content should NOT be embedded.
+	if strings.Contains(prompt, "req content") {
+		t.Error("prompt should not contain raw file content")
 	}
 }
 
-func TestPromptDiscoveryHandlesUnreadableFile(t *testing.T) {
+func TestPromptDiscoveryHandlesNonexistentPath(t *testing.T) {
 	pb := newTestPromptBuilder(t)
 	prompt, err := pb.BuildDiscoveryPrompt([]string{"/nonexistent/path/missing.md"})
 	if err != nil {
-		t.Fatalf("BuildDiscoveryPrompt should not return error for unreadable source doc: %v", err)
+		t.Fatalf("BuildDiscoveryPrompt should not return error for nonexistent path: %v", err)
 	}
-	// Should include an error placeholder instead of crashing.
-	if !strings.Contains(prompt, "[error reading source document:") {
-		t.Error("expected error placeholder for unreadable source document")
-	}
-	// Should still have the XML wrapper.
-	if !strings.Contains(prompt, `<source_document name="missing.md"`) {
-		t.Error("expected source_document tag even for unreadable files")
+	// The path should still be listed — the agent will handle the read error.
+	if !strings.Contains(prompt, "missing.md") {
+		t.Error("expected prompt to list the nonexistent file path")
 	}
 }
 

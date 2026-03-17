@@ -18,6 +18,8 @@ const (
 	EventConvergenceUpdate = "convergence_update"
 	// EventGateRequest is emitted when a human gate requires input.
 	EventGateRequest = "gate_request"
+	// EventGateResponse is emitted when a human responds to a gate.
+	EventGateResponse = "gate_response"
 	// EventCircuitBreaker is emitted when a circuit breaker threshold is approached or tripped.
 	EventCircuitBreaker = "circuit_breaker"
 	// EventAgentError is emitted when an agent encounters a retryable or fatal error.
@@ -302,6 +304,25 @@ func NewGateRequestEvent(gateType, taskID string, data interface{}) EventEnvelop
 			GateType: gateType,
 			TaskID:   taskID,
 			Data:     data,
+		},
+	}
+}
+
+// GateResponseEvent is the payload for EventGateResponse.
+type GateResponseEvent struct {
+	GateType string `json:"gate_type"`
+	Action   string `json:"action"`
+	Detail   string `json:"detail,omitempty"`
+}
+
+// NewGateResponseEvent creates an EventEnvelope for a human gate response.
+func NewGateResponseEvent(gateType, action, detail string) EventEnvelope {
+	return EventEnvelope{
+		Event: EventGateResponse,
+		Data: GateResponseEvent{
+			GateType: gateType,
+			Action:   action,
+			Detail:   detail,
 		},
 	}
 }

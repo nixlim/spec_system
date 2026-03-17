@@ -2,7 +2,6 @@ package specworkflow
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -61,7 +60,18 @@ func (pb *PromptBuilder) specDir() string {
 // embeds plan-spec Phase 1 instructions from the SkillCache, wraps each
 // source document in <source_document> XML tags, and specifies the expected
 // JSON output schema (DiscoveryOutput) and output file path.
-func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string) (string, error) {
+// DiscoveryContext holds optional corrections and user answers from a previous
+// discovery round (HUMAN_GATE_1 -> DISCOVERY correction loop).
+type DiscoveryContext struct {
+	// Corrections from the human reviewer (field name -> corrected text).
+	Corrections map[string]string
+	// UserAnswers from the human reviewer (open_questions and assumption answers).
+	UserAnswers map[string]interface{}
+	// PreviousOutput is the previous discovery output JSON (for context).
+	PreviousOutput *DiscoveryOutput
+}
+
+func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string, ctx ...DiscoveryContext) (string, error) {
 	specTemplate, err := pb.skills.GetSkillContent(SpecTemplate)
 	if err != nil {
 		return "", fmt.Errorf("loading spec template for discovery: %w", err)
@@ -82,21 +92,68 @@ func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string) (string, 
 	b.WriteString(specTemplate)
 	b.WriteString("\n</plan_spec_instructions>\n\n")
 
-	// Source documents.
+	// Source documents — pass by file path reference, not content.
+	// The agent has filesystem access and can read the files itself.
 	b.WriteString("## Source Documents\n\n")
-	b.WriteString("Analyse the following source documents. Each document is wrapped in XML tags.\n")
+	b.WriteString("Read and analyse the following source documents. Each file path is listed below.\n")
+	b.WriteString("Use the Read tool to read each file completely before starting your analysis.\n")
 	b.WriteString(InjectionMitigationInstruction())
 	b.WriteString("\n\n")
 
 	for _, p := range sourceDocPaths {
 		name := filepath.Base(p)
-		content, err := os.ReadFile(p)
-		if err != nil {
-			b.WriteString(WrapSourceDocument(name, fmt.Sprintf("[error reading source document: %v]", err)))
-		} else {
-			b.WriteString(WrapSourceDocument(name, string(content)))
+		fmt.Fprintf(&b, "- **%s**: `%s`\n", name, p)
+	}
+	b.WriteString("\nRead ALL of these files before producing your output.\n\n")
+
+	// Human corrections and answers from previous round (if any).
+	if len(ctx) > 0 {
+		dc := ctx[0]
+		hasFeedback := len(dc.Corrections) > 0 || dc.UserAnswers != nil
+		if hasFeedback {
+			b.WriteString("## Human Reviewer Feedback\n\n")
+			b.WriteString("A human reviewer has examined your previous discovery output and provided the following feedback.\n")
+			b.WriteString("You MUST incorporate this feedback into your revised discovery output.\n\n")
+
+			if len(dc.Corrections) > 0 {
+				b.WriteString("### Corrections\n\n")
+				b.WriteString("The reviewer made the following corrections to specific fields:\n\n")
+				for field, value := range dc.Corrections {
+					fmt.Fprintf(&b, "- **%s**: %s\n", field, value)
+				}
+				b.WriteString("\n")
+			}
+
+			if dc.UserAnswers != nil {
+				if oq, ok := dc.UserAnswers["open_questions"]; ok {
+					if answers, ok := oq.(map[string]interface{}); ok && len(answers) > 0 {
+						b.WriteString("### Answers to Open Questions\n\n")
+						b.WriteString("The reviewer answered the following open questions. Use these answers to refine your analysis.\n")
+						b.WriteString("Remove answered questions from the open_questions list and incorporate the answers into the relevant sections.\n\n")
+						for idx, answer := range answers {
+							fmt.Fprintf(&b, "- **Q%s answer**: %v\n", idx, answer)
+						}
+						b.WriteString("\n")
+					}
+				}
+				if aa, ok := dc.UserAnswers["assumptions"]; ok {
+					if answers, ok := aa.(map[string]interface{}); ok && len(answers) > 0 {
+						b.WriteString("### Answers to Assumption Questions\n\n")
+						b.WriteString("The reviewer clarified the following assumptions. Update confidence levels and remove question_for_user where answered.\n\n")
+						for idx, answer := range answers {
+							fmt.Fprintf(&b, "- **Assumption %s answer**: %v\n", idx, answer)
+						}
+						b.WriteString("\n")
+					}
+				}
+			}
+
+			if dc.PreviousOutput != nil {
+				b.WriteString("### Previous Discovery Output\n\n")
+				b.WriteString("Your previous output is available in the output file. Build on it — don't start from scratch.\n")
+				b.WriteString("Incorporate the corrections and answers above, and update any affected sections.\n\n")
+			}
 		}
-		b.WriteString("\n\n")
 	}
 
 	// Output schema.

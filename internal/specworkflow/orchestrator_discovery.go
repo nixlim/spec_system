@@ -11,7 +11,37 @@ import (
 // handleDiscovery builds the discovery prompt, dispatches the discovery agent,
 // validates the output, and transitions to HUMAN_GATE_1.
 func (o *Orchestrator) handleDiscovery(goal GoalInput, state *WorkflowStateJSON, specDir string) error {
-	prompt, err := o.promptBuilder.BuildDiscoveryPrompt(goal.SourceDocPaths)
+	// Check for corrections from a previous gate 1 correction loop.
+	var discoveryCtx []DiscoveryContext
+	corrPath := filepath.Join(specDir, "gate1-corrections.json")
+	if corrData, readErr := os.ReadFile(corrPath); readErr == nil {
+		var corrFile map[string]interface{}
+		if json.Unmarshal(corrData, &corrFile) == nil {
+			dc := DiscoveryContext{}
+			if corrections, ok := corrFile["corrections"].(map[string]interface{}); ok {
+				dc.Corrections = make(map[string]string)
+				for k, v := range corrections {
+					dc.Corrections[k] = fmt.Sprintf("%v", v)
+				}
+			}
+			if ua, ok := corrFile["user_answers"].(map[string]interface{}); ok {
+				dc.UserAnswers = ua
+			}
+			// Load previous discovery output for context.
+			outPath := filepath.Join(specDir, "discovery-output.json")
+			if prevData, prevErr := os.ReadFile(outPath); prevErr == nil {
+				var prevOutput DiscoveryOutput
+				if json.Unmarshal(prevData, &prevOutput) == nil {
+					dc.PreviousOutput = &prevOutput
+				}
+			}
+			discoveryCtx = append(discoveryCtx, dc)
+			log.Printf("[orchestrator] loaded gate 1 corrections: %d corrections, has_user_answers=%v, has_previous_output=%v",
+				len(dc.Corrections), dc.UserAnswers != nil, dc.PreviousOutput != nil)
+		}
+	}
+
+	prompt, err := o.promptBuilder.BuildDiscoveryPrompt(goal.SourceDocPaths, discoveryCtx...)
 	if err != nil {
 		return fmt.Errorf("build discovery prompt: %w", err)
 	}
@@ -72,8 +102,12 @@ func (o *Orchestrator) handleHumanGate1(state *WorkflowStateJSON, specDir string
 	// Wait for human response.
 	resp := <-o.gateCh
 
+	log.Printf("[orchestrator] gate 1 response received: action=%s", resp.Action)
+
 	switch resp.Action {
 	case "confirm":
+		o.emitter.Emit(NewGateResponseEvent("requirements_confirmation", "confirm", "Human confirmed discovery output"))
+
 		// Save user answers if provided.
 		if resp.Data != nil {
 			answersPath := filepath.Join(specDir, "user-answers.json")
@@ -81,6 +115,8 @@ func (o *Orchestrator) handleHumanGate1(state *WorkflowStateJSON, specDir string
 			if marshalErr == nil {
 				if writeErr := os.WriteFile(answersPath, answersData, 0o644); writeErr != nil {
 					log.Printf("[orchestrator] failed to write user answers: %v", writeErr)
+				} else {
+					log.Printf("[orchestrator] saved user answers to %s (%d bytes)", answersPath, len(answersData))
 				}
 			}
 		}
@@ -89,11 +125,43 @@ func (o *Orchestrator) handleHumanGate1(state *WorkflowStateJSON, specDir string
 		if err := o.sm.Transition(nextState); err != nil {
 			return fmt.Errorf("transition HUMAN_GATE_1 -> %s: %w", nextState, err)
 		}
+
 	case "correct":
+		// Save corrections and any user answers to disk so handleDiscovery
+		// can include them in the re-run prompt.
+		correctionData := map[string]interface{}{
+			"action":      "correct",
+			"corrections": resp.Data,
+		}
+
+		// Also check if user_answers was included alongside corrections.
+		if m, ok := resp.Data.(map[string]interface{}); ok {
+			if ua, exists := m["user_answers"]; exists {
+				correctionData["user_answers"] = ua
+			}
+		}
+
+		corrPath := filepath.Join(specDir, "gate1-corrections.json")
+		corrJSON, marshalErr := json.MarshalIndent(correctionData, "", "  ")
+		if marshalErr == nil {
+			if writeErr := os.WriteFile(corrPath, corrJSON, 0o644); writeErr != nil {
+				log.Printf("[orchestrator] failed to write gate 1 corrections: %v", writeErr)
+			} else {
+				log.Printf("[orchestrator] saved gate 1 corrections to %s (%d bytes)", corrPath, len(corrJSON))
+			}
+		}
+
+		nCorrections := 0
+		if corrections, ok := resp.Data.(map[string]string); ok {
+			nCorrections = len(corrections)
+		}
+		o.emitter.Emit(NewGateResponseEvent("requirements_confirmation", "correct",
+			fmt.Sprintf("Human requested corrections (%d fields), re-running discovery (attempt %d/%d)",
+				nCorrections, state.Gate1CorrectionCount+1, o.config.MaxGateCorrections)))
+
 		corrections, _ := resp.Data.(map[string]string)
 		nextState, err := gate1.HandleCorrect(corrections)
 		if err != nil {
-			// Correction limit reached, escalate.
 			o.escalateFrom(StateHumanGate1)
 			return nil
 		}
@@ -101,8 +169,11 @@ func (o *Orchestrator) handleHumanGate1(state *WorkflowStateJSON, specDir string
 		if err := o.sm.Transition(nextState); err != nil {
 			return fmt.Errorf("transition HUMAN_GATE_1 -> %s: %w", nextState, err)
 		}
+
 	case "cancel":
+		o.emitter.Emit(NewGateResponseEvent("requirements_confirmation", "cancel", "Human cancelled workflow"))
 		o.escalateFrom(StateHumanGate1)
+
 	default:
 		return fmt.Errorf("unknown gate 1 action: %q", resp.Action)
 	}

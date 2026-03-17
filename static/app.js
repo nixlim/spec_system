@@ -504,6 +504,9 @@
       case "gate_request":
         onGateRequest(envelope.data);
         break;
+      case "gate_response":
+        onGateResponse(envelope.data);
+        break;
       case "circuit_breaker":
         onCircuitBreaker(envelope.data);
         break;
@@ -1257,6 +1260,16 @@
     }
   }
 
+  function onGateResponse(data) {
+    addActivityEntry(
+      "Gate response: " + (data.action || "unknown") + " — " + (data.detail || ""),
+      data.action === "cancel" ? "error" : "success"
+    );
+    // Clear the gate panel since the response was accepted.
+    var container = $("#gate-panels");
+    if (container) clearChildren(container);
+  }
+
   // --- Gate 1: Requirements Confirmation ---
 
   function showGate1Panel(data) {
@@ -1695,6 +1708,10 @@
         break;
       case "gate_request":
         addMessage("state", "Human gate: " + (data.gate_type || "?"));
+        break;
+      case "gate_response":
+        var severity = data.action === "cancel" ? "error" : (data.action === "correct" ? "warning" : "info");
+        addMessage("state", "Gate response: " + (data.action || "?") + " — " + (data.detail || ""), severity);
         break;
     }
   }
