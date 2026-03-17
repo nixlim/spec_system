@@ -204,6 +204,15 @@ func (r *ClaudeRunner) Run(prompt string, outputPath string, timeoutSeconds int)
 		return 1, "", 0, 0, fmt.Errorf("create stdout pipe: %w", pipeErr)
 	}
 
+	// Record mtime of output file before running (if it exists) so we can
+	// detect if the agent wrote to it during execution.
+	var outputExistedBefore bool
+	var outputMtimeBefore time.Time
+	if fi, statErr := os.Stat(outputPath); statErr == nil {
+		outputExistedBefore = true
+		outputMtimeBefore = fi.ModTime()
+	}
+
 	startTime := time.Now()
 	if startErr := cmd.Start(); startErr != nil {
 		log.Printf("[claude-runner] FAILED to start process: %v", startErr)
@@ -268,18 +277,36 @@ func (r *ClaudeRunner) Run(prompt string, outputPath string, timeoutSeconds int)
 		return 1, stderrStr, parsed.CostUSD, parsed.DurationMS, fmt.Errorf("claude reported error: %s", truncate(parsed.Result, 200))
 	}
 
-	// Check if the agent already wrote the output file directly (via Write tool).
-	if existingData, readErr := os.ReadFile(outputPath); readErr == nil && len(existingData) > 0 {
-		// Validate it's JSON (starts with { or [).
-		trimmed := bytes.TrimSpace(existingData)
-		if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
-			log.Printf("[claude-runner] agent wrote output file directly, keeping it (%d bytes)", len(existingData))
-			return code, stderrStr, parsed.CostUSD, parsed.DurationMS, nil
+	// Check if the agent wrote the output file during execution (via Write tool).
+	// We compare mtime before/after to detect agent-written files.
+	agentWroteFile := false
+	if fi, statErr := os.Stat(outputPath); statErr == nil {
+		if !outputExistedBefore || fi.ModTime().After(outputMtimeBefore) {
+			agentWroteFile = true
 		}
-		// Agent wrote non-JSON; overwrite with result field.
-		log.Printf("[claude-runner] agent output file exists but is not JSON, overwriting with result field")
 	}
-	// Agent didn't write the file, or wrote non-JSON — use result field.
+
+	if agentWroteFile {
+		existingData, readErr := os.ReadFile(outputPath)
+		if readErr == nil && len(existingData) > 0 {
+			trimmed := bytes.TrimSpace(existingData)
+			if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
+				log.Printf("[claude-runner] agent wrote valid JSON output file directly, keeping it (%d bytes)", len(existingData))
+				return code, stderrStr, parsed.CostUSD, parsed.DurationMS, nil
+			}
+			log.Printf("[claude-runner] agent wrote output file but it's not JSON (starts with %q), overwriting", string(trimmed[:min(20, len(trimmed))]))
+		}
+	}
+
+	// Agent didn't write a valid JSON file — use the result field.
+	// Check if the result field itself is valid JSON.
+	trimmedResult := bytes.TrimSpace([]byte(parsed.Result))
+	if len(trimmedResult) > 0 && (trimmedResult[0] == '{' || trimmedResult[0] == '[') {
+		log.Printf("[claude-runner] result field is JSON, writing to %s (%d bytes)", outputPath, len(parsed.Result))
+	} else {
+		log.Printf("[claude-runner] WARNING: result field is not JSON (starts with %q), writing anyway (%d bytes)",
+			truncate(parsed.Result, 40), len(parsed.Result))
+	}
 	if writeErr := writeOutputFile(outputPath, []byte(parsed.Result)); writeErr != nil {
 		return code, stderrStr, parsed.CostUSD, parsed.DurationMS, fmt.Errorf("write output file: %w", writeErr)
 	}

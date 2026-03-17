@@ -3,6 +3,7 @@ package specworkflow
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 )
@@ -26,13 +27,24 @@ func (o *Orchestrator) handleDiscovery(goal GoalInput, state *WorkflowStateJSON,
 	if err != nil {
 		return fmt.Errorf("read discovery output: %w", err)
 	}
+
 	var discovery DiscoveryOutput
 	if err := json.Unmarshal(data, &discovery); err != nil {
-		return fmt.Errorf("parse discovery output: %w", err)
+		// The agent may have written a text summary instead of JSON.
+		// Log detailed error and the first 200 chars of the file content.
+		log.Printf("[orchestrator] FAILED to parse discovery output as JSON: %v", err)
+		log.Printf("[orchestrator] file content (first 200 chars): %s", truncate(string(data), 200))
+		return fmt.Errorf("parse discovery output as JSON: %w (agent may have written text instead of JSON — file starts with: %s)",
+			err, truncate(string(data), 60))
 	}
+
 	if errs := ValidateDiscoveryOutput(&discovery); len(errs) > 0 {
+		log.Printf("[orchestrator] discovery output validation failed: %v", errs)
 		return fmt.Errorf("validate discovery output: %v", errs[0])
 	}
+
+	log.Printf("[orchestrator] discovery output valid: %d actors, %d priorities, %d open questions",
+		len(discovery.Actors), len(discovery.Priorities), len(discovery.OpenQuestions))
 
 	o.logTransition(StateDiscovery, StateHumanGate1)
 	if err := o.sm.Transition(StateHumanGate1); err != nil {

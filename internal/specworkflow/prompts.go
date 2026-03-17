@@ -113,10 +113,17 @@ func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string) (string, 
 	b.WriteString("- assumptions (array of Assumption): assumption, confidence (high|medium|low), question_for_user (optional)\n")
 	b.WriteString("- open_questions (array of string)\n\n")
 
-	// Output path.
+	// Output instructions — be extremely explicit about format.
 	outPath := filepath.Join(pb.specDir(), "discovery-output.json")
-	b.WriteString("## Output File\n\n")
-	fmt.Fprintf(&b, "Write your JSON output to: %s\n", outPath)
+	b.WriteString("## CRITICAL: Output Requirements\n\n")
+	b.WriteString("You MUST write a SINGLE valid JSON object to the following file path using the Write tool.\n")
+	b.WriteString("Do NOT write markdown, text, or any non-JSON content to this file.\n")
+	b.WriteString("Do NOT include markdown code fences (```) in the file.\n")
+	b.WriteString("The file content must start with { and end with }.\n")
+	b.WriteString("The JSON must conform EXACTLY to the DiscoveryOutput schema described above.\n\n")
+	fmt.Fprintf(&b, "Output file path: %s\n\n", outPath)
+	b.WriteString("After writing the JSON file, provide a brief text summary of your findings.\n")
+	b.WriteString("The JSON file is what matters — the summary is just for human readability.\n")
 
 	return b.String(), nil
 }
