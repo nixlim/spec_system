@@ -219,12 +219,12 @@ func TestStateMachine_ErrorToErrorBlocked(t *testing.T) {
 func TestStateMachine_Gate1CorrectionGuard_Blocks(t *testing.T) {
 	cfg := StateMachineConfig{MaxGateCorrections: 2, MaxRounds: 5}
 	ws := newTestState(StateHumanGate1)
-	ws.Gate1CorrectionCount = 2 // at limit
+	ws.Gate1CorrectionCount = 3 // past limit (HandleCorrect increments before transition)
 	sm := NewStateMachine(ws, cfg, nil)
 
 	err := sm.Transition(StateDiscovery)
 	if err == nil {
-		t.Fatal("expected Gate1CorrectionGuard to block transition")
+		t.Fatal("expected Gate1CorrectionGuard to block transition when count > max")
 	}
 	if sm.Current() != StateHumanGate1 {
 		t.Fatalf("state should remain HUMAN_GATE_1, got %s", sm.Current())

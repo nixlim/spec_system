@@ -98,11 +98,13 @@ func isValidTransition(from, to WorkflowState) bool {
 // ---------------------------------------------------------------------------
 
 // Gate1CorrectionGuard blocks HUMAN_GATE_1 -> DISCOVERY when the correction
-// count has reached the configured maximum.
+// count has exceeded the configured maximum. Uses > (not >=) because
+// HandleCorrect increments the count before the transition runs, so
+// count == maxGateCorrections means "this is the last allowed correction."
 func Gate1CorrectionGuard(cfg StateMachineConfig) Guard {
 	return func(from, to WorkflowState, ws *WorkflowStateJSON) error {
 		if from == StateHumanGate1 && to == StateDiscovery {
-			if ws.Gate1CorrectionCount >= cfg.MaxGateCorrections {
+			if ws.Gate1CorrectionCount > cfg.MaxGateCorrections {
 				return fmt.Errorf(
 					"gate 1 correction limit reached (%d/%d)",
 					ws.Gate1CorrectionCount, cfg.MaxGateCorrections,
