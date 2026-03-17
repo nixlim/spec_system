@@ -8,9 +8,6 @@
 </head>
 <body>
   <div id="app">
-    <!-- Gate panels appear here when gate_request events arrive -->
-    <div id="gate-panels"></div>
-
     <!-- Circuit breaker / agent error banners -->
     <div id="alert-banners"></div>
 
@@ -32,6 +29,9 @@
     </nav>
 
     <main id="content">
+      <!-- Gate panels appear here when gate_request events arrive -->
+      <div id="gate-panels"></div>
+
       <!-- Workflow Status Panel — visible on all tabs -->
       <div id="workflow-status" class="workflow-status-panel" hidden>
         <div class="status-header">

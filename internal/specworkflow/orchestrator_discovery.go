@@ -74,6 +74,16 @@ func (o *Orchestrator) handleHumanGate1(state *WorkflowStateJSON, specDir string
 
 	switch resp.Action {
 	case "confirm":
+		// Save user answers if provided.
+		if resp.Data != nil {
+			answersPath := filepath.Join(specDir, "user-answers.json")
+			answersData, marshalErr := json.MarshalIndent(resp.Data, "", "  ")
+			if marshalErr == nil {
+				if writeErr := os.WriteFile(answersPath, answersData, 0o644); writeErr != nil {
+					log.Printf("[orchestrator] failed to write user answers: %v", writeErr)
+				}
+			}
+		}
 		nextState, _ := gate1.HandleConfirm()
 		o.logTransition(StateHumanGate1, nextState)
 		if err := o.sm.Transition(nextState); err != nil {

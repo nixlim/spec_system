@@ -1327,9 +1327,12 @@
     // Assumptions
     if (discovery.assumptions && discovery.assumptions.length > 0) {
       var aHtml = "<ul>";
-      discovery.assumptions.forEach(function (a) {
-        aHtml += "<li>" + escapeHtml(a.assumption) + " (confidence: " + escapeHtml(a.confidence) + ")";
-        if (a.question_for_user) aHtml += " — <em>" + escapeHtml(a.question_for_user) + "</em>";
+      discovery.assumptions.forEach(function (a, idx) {
+        aHtml += "<li><strong>Assumption:</strong> " + escapeHtml(a.assumption) + " (confidence: " + escapeHtml(a.confidence) + ")";
+        if (a.question_for_user) {
+          aHtml += '<br><em>Question: ' + escapeHtml(a.question_for_user) + "</em>";
+          aHtml += '<br><textarea class="gate-assumption-answer" data-assumption-idx="' + idx + '" placeholder="Your answer (optional)..."></textarea>';
+        }
         aHtml += "</li>";
       });
       aHtml += "</ul>";
@@ -1338,9 +1341,13 @@
 
     // Open questions
     if (discovery.open_questions && discovery.open_questions.length > 0) {
-      var qHtml = "<ul>";
-      discovery.open_questions.forEach(function (q) { qHtml += "<li>" + escapeHtml(q) + "</li>"; });
-      qHtml += "</ul>";
+      var qHtml = "";
+      discovery.open_questions.forEach(function (q, idx) {
+        qHtml += '<div class="gate-question">';
+        qHtml += '<div class="gate-question-text">Q' + (idx + 1) + ': ' + escapeHtml(q) + '</div>';
+        qHtml += '<textarea class="gate-answer" data-question-idx="' + idx + '" placeholder="Your answer (optional)..."></textarea>';
+        qHtml += '</div>';
+      });
       content += buildGateSectionHtml("Open Questions", qHtml);
     }
 
@@ -1371,10 +1378,34 @@
 
     // Wire actions
     $("#gate1-confirm").addEventListener("click", function () {
+      // Collect answers to open questions
+      var questionAnswers = {};
+      $$(".gate-answer", panel).forEach(function (ta) {
+        var idx = ta.dataset.questionIdx;
+        var text = ta.value.trim();
+        if (text) questionAnswers[idx] = text;
+      });
+
+      // Collect answers to assumption questions
+      var assumptionAnswers = {};
+      $$(".gate-assumption-answer", panel).forEach(function (ta) {
+        var idx = ta.dataset.assumptionIdx;
+        var text = ta.value.trim();
+        if (text) assumptionAnswers[idx] = text;
+      });
+
+      var payload = { action: "confirm" };
+      if (Object.keys(questionAnswers).length > 0 || Object.keys(assumptionAnswers).length > 0) {
+        payload.user_answers = {
+          open_questions: questionAnswers,
+          assumptions: assumptionAnswers
+        };
+      }
+
       fetchJSON("/api/tasks/" + encodeURIComponent(taskId) + "/approve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "confirm" })
+        body: JSON.stringify(payload)
       }).then(function () {
         clearChildren(container);
       }).catch(function (err) {
@@ -1797,6 +1828,28 @@
     // Load workspace browser on startup and start auto-refresh
     loadFeatureList();
     startFeatureListPolling();
+
+    // Check if we need to show a gate panel on page load (e.g. after refresh)
+    fetchJSON("/api/workflow/status").then(function (status) {
+      if (!status || !status.state) return;
+      var state = status.state.toUpperCase();
+      var feature = status.feature_name;
+      if (!feature) return;
+
+      if (state === "HUMAN_GATE_1") {
+        fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/discovery").then(function (discovery) {
+          if (discovery) {
+            showGate1Panel({ gate_type: "requirements_confirmation", data: discovery, task_id: feature });
+          }
+        }).catch(function () {});
+      } else if (state === "HUMAN_GATE_2") {
+        fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/files/drafter-output.json").then(function (drafter) {
+          if (drafter) {
+            showGate2Panel({ gate_type: "ambiguity_resolution", data: drafter, task_id: feature });
+          }
+        }).catch(function () {});
+      }
+    }).catch(function () {});
   }
 
   if (document.readyState === "loading") {

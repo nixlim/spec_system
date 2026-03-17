@@ -150,23 +150,18 @@ html, body {
   max-width: 1200px;
 }
 
-/* Gate panels and alert banners sit above the sidebar+content flow */
-#gate-panels, #alert-banners {
+/* Alert banners sit above the sidebar+content flow */
+#alert-banners {
   position: fixed;
   top: 0;
   left: var(--sidebar-width);
   right: 0;
-  z-index: 200;
-}
-
-#alert-banners {
   z-index: 190;
 }
 
-/* Push content down when gate/alert panels are visible */
-#gate-panels:not(:empty) ~ #content,
-#alert-banners:not(:empty) ~ #content {
-  padding-top: 24px;
+/* Gate panels live inside <main> now — no fixed positioning */
+#gate-panels {
+  margin-bottom: 16px;
 }
 
 /* --- WebSocket Indicator --- */
@@ -772,56 +767,92 @@ html, body {
 
 .gate-panel {
   background: var(--color-surface);
-  border-bottom: 3px solid var(--color-primary);
-  padding: 20px 32px;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+  border: 1px solid var(--color-border);
+  border-left: 4px solid #9333ea;
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 16px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.10);
 }
 
 .gate-panel h3 {
   font-size: 16px;
-  margin-bottom: 12px;
+  margin-bottom: 16px;
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.gate-panel h3 .gate-badge {
+.gate-badge {
+  display: inline-block;
   font-size: 11px;
-  background: var(--color-primary);
+  background: #9333ea;
   color: #fff;
-  padding: 2px 8px;
+  padding: 2px 10px;
   border-radius: 10px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  font-weight: 600;
 }
 
 .gate-section {
-  margin-bottom: 12px;
+  margin-bottom: 16px;
 }
 
 .gate-section-label {
-  font-weight: 600;
-  font-size: 12px;
+  font-weight: 700;
+  font-size: 0.9em;
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  color: var(--color-text-muted);
+  color: #666;
   margin-bottom: 4px;
 }
 
 .gate-section-value {
   padding: 6px 0;
+  line-height: 1.6;
 }
 
 .gate-section-value ul {
   padding-left: 20px;
 }
 
+.gate-question {
+  margin-bottom: 12px;
+}
+
+.gate-question-text {
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.gate-answer,
+.gate-assumption-answer {
+  width: 100%;
+  min-height: 60px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 8px;
+  font-family: inherit;
+  font-size: 13px;
+  resize: vertical;
+  color: var(--color-text);
+  background: var(--color-surface);
+}
+
+.gate-answer:focus,
+.gate-assumption-answer:focus {
+  outline: none;
+  border-color: #9333ea;
+  box-shadow: 0 0 0 2px rgba(147, 51, 234, 0.15);
+}
+
 .gate-actions {
   display: flex;
   gap: 8px;
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid var(--color-border);
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #eee;
 }
 
 /* Editable fields in gate 1 */
@@ -1284,7 +1315,7 @@ html, body {
     margin-left: 0;
   }
 
-  #gate-panels, #alert-banners {
+   #alert-banners {
     left: 0;
   }
 

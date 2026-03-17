@@ -128,6 +128,7 @@ type gateApproveRequest struct {
 	Action      string                             `json:"action"`
 	Corrections map[string]string                  `json:"corrections,omitempty"`
 	Resolutions []specworkflow.AmbiguityResolution `json:"resolutions,omitempty"`
+	UserAnswers map[string]interface{}             `json:"user_answers,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +263,7 @@ func HandleGateApprove(manager *WorkflowManager) http.HandlerFunc {
 		var gateResp specworkflow.GateResponse
 		switch req.Action {
 		case "confirm":
-			gateResp = specworkflow.GateResponse{Action: "confirm"}
+			gateResp = specworkflow.GateResponse{Action: "confirm", Data: req.UserAnswers}
 		case "correct":
 			gateResp = specworkflow.GateResponse{
 				Action: "correct",
@@ -353,6 +354,22 @@ func HandleGetWorkflowStatus(manager *WorkflowManager) http.HandlerFunc {
 
 		orch := manager.GetOrchestrator()
 		if orch == nil {
+			// No orchestrator running — check for on-disk workflow state
+			// so that gate states survive server restarts.
+			diskState := findLatestDiskState(manager.workspaceDir)
+			if diskState != nil && !isTerminalWorkflowState(diskState.State) {
+				writeJSON(w, http.StatusOK, map[string]interface{}{
+					"state":              diskState.State.String(),
+					"round":              diskState.Round,
+					"feature_name":       diskState.FeatureName,
+					"cost_usd":           diskState.CumulativeCostUSD,
+					"wall_clock_seconds": diskState.CumulativeWallClockSeconds,
+					"agent_invocations":  diskState.AgentInvocations,
+					"message":            StatusMessage(diskState.State, diskState.Round) + " (server restarted — workflow paused)",
+					"paused":             true,
+				})
+				return
+			}
 			writeJSON(w, http.StatusOK, map[string]interface{}{
 				"state":   "idle",
 				"message": "No workflow running",
@@ -599,6 +616,90 @@ func HandleListFeatures(workspaceDir string) http.HandlerFunc {
 }
 
 // ---------------------------------------------------------------------------
+// Feature File Endpoints
+// ---------------------------------------------------------------------------
+
+// HandleFeatureFiles returns an HTTP handler that serves files from a feature's
+// spec directory. It routes based on the URL path suffix:
+//   - /api/workspace/features/{name}/discovery → discovery-output.json
+//   - /api/workspace/features/{name}/state → workflow-state.json
+//   - /api/workspace/features/{name}/files/{filename} → any file in the spec dir
+func HandleFeatureFiles(workspaceDir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Parse path: /api/workspace/features/{name}/...
+		const prefix = "/api/workspace/features/"
+		path := r.URL.Path
+		if !strings.HasPrefix(path, prefix) {
+			http.NotFound(w, r)
+			return
+		}
+		rest := path[len(prefix):]
+		// rest is e.g. "my-feature/discovery" or "my-feature/state" or "my-feature/files/foo.json"
+
+		// Split into feature name and sub-path.
+		slashIdx := strings.Index(rest, "/")
+		if slashIdx < 0 {
+			http.NotFound(w, r)
+			return
+		}
+		featureName := rest[:slashIdx]
+		subPath := rest[slashIdx+1:]
+
+		if featureName == "" {
+			http.NotFound(w, r)
+			return
+		}
+
+		specDir := filepath.Join(workspaceDir, "specs", featureName)
+
+		switch {
+		case subPath == "discovery":
+			serveJSONFile(w, filepath.Join(specDir, "discovery-output.json"))
+		case subPath == "state":
+			serveJSONFile(w, filepath.Join(specDir, "workflow-state.json"))
+		case strings.HasPrefix(subPath, "files/"):
+			filename := subPath[len("files/"):]
+			if filename == "" || strings.Contains(filename, "/") || strings.Contains(filename, "..") {
+				http.NotFound(w, r)
+				return
+			}
+			serveJSONFile(w, filepath.Join(specDir, filename))
+		default:
+			http.NotFound(w, r)
+		}
+	}
+}
+
+// serveJSONFile reads a file from disk and writes it as a JSON response.
+func serveJSONFile(w http.ResponseWriter, filePath string) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, "file not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to read file: %v", err))
+		return
+	}
+
+	// Validate it's valid JSON; if not, wrap it as a string.
+	var js json.RawMessage
+	if json.Unmarshal(data, &js) == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(data)
+	} else {
+		// Not valid JSON — return as a content wrapper.
+		writeJSON(w, http.StatusOK, map[string]string{"content": string(data)})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -656,4 +757,33 @@ func hasAnswerResolution(resolutions []specworkflow.AmbiguityResolution) bool {
 		}
 	}
 	return false
+}
+
+// findLatestDiskState scans workspace/specs/ for the most recently updated
+// non-terminal workflow-state.json. This allows the status endpoint to show
+// gate states even after a server restart when no orchestrator is running.
+func findLatestDiskState(workspaceDir string) *specworkflow.WorkflowStateJSON {
+	specsDir := filepath.Join(workspaceDir, "specs")
+	entries, err := os.ReadDir(specsDir)
+	if err != nil {
+		return nil
+	}
+
+	var latest *specworkflow.WorkflowStateJSON
+	var latestTime string
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		state, err := specworkflow.LoadState(filepath.Join(specsDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		if state.UpdatedAt > latestTime {
+			latestTime = state.UpdatedAt
+			latest = state
+		}
+	}
+	return latest
 }

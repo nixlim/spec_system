@@ -118,6 +118,7 @@ func main() {
 	mux.HandleFunc("/api/workspace/uploads", api.HandleListUploads(uploadConfig))
 
 	// --- Workspace browser endpoints ---
+	mux.HandleFunc("/api/workspace/features/", api.HandleFeatureFiles(absWorkspace))
 	mux.HandleFunc("/api/workspace/features", api.HandleListFeatures(absWorkspace))
 
 	// --- Workflow control endpoints (NEW) ---
@@ -188,7 +189,10 @@ func main() {
 		fmt.Printf("  OTLP:      http://localhost:%d\n", *otelPort)
 	}
 	fmt.Printf("\nEndpoints:\n")
-	fmt.Printf("  GET  /api/workspace/features   List workspace features\n")
+	fmt.Printf("  GET  /api/workspace/features           List workspace features\n")
+	fmt.Printf("  GET  /api/workspace/features/{n}/discovery  Feature discovery output\n")
+	fmt.Printf("  GET  /api/workspace/features/{n}/state      Feature workflow state\n")
+	fmt.Printf("  GET  /api/workspace/features/{n}/files/{f}  Feature file by name\n")
 	fmt.Printf("  POST /api/workflow/start      Start a new workflow\n")
 	fmt.Printf("  POST /api/workflow/cancel      Cancel running workflow\n")
 	fmt.Printf("  GET  /api/workflow/status      Poll workflow status\n")
