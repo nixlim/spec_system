@@ -340,9 +340,17 @@ func HandleGateApprove(manager *WorkflowManager) http.HandlerFunc {
 		case "confirm":
 			gateResp = specworkflow.GateResponse{Action: "confirm", Data: req.UserAnswers}
 		case "correct":
+			// Bundle corrections and user_answers together so the orchestrator
+			// can save both to gate1-corrections.json.
+			corrData := map[string]interface{}{
+				"corrections": req.Corrections,
+			}
+			if req.UserAnswers != nil {
+				corrData["user_answers"] = req.UserAnswers
+			}
 			gateResp = specworkflow.GateResponse{
 				Action: "correct",
-				Data:   req.Corrections,
+				Data:   corrData,
 			}
 		case "accept":
 			gateResp = specworkflow.GateResponse{Action: "accept"}

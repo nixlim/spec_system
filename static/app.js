@@ -684,15 +684,74 @@
         }
 
         if (isGate) {
-          // Resume button for gate states
+          // Resume button for gate states — starts orchestrator and shows gate panel
           var resumeBtn = el("button", {
             className: "btn btn-sm",
             textContent: "Resume",
             style: "background:#e8d5f5;color:#6f42c1;border-color:#d5b8eb;"
           });
-          resumeBtn.addEventListener("click", function () {
-            alert("Gate states require the orchestrator to be running. Start the workflow to resume from the gate.");
-          });
+          resumeBtn.addEventListener("click", (function (featureName, stateStr) {
+            return function () {
+              resumeBtn.disabled = true;
+              resumeBtn.textContent = "Resuming...";
+
+              // Send a dummy confirm to trigger auto-resume of the orchestrator,
+              // then immediately cancel the gate response so the orchestrator
+              // re-enters the gate wait. Actually — better approach: just start
+              // a new workflow which will auto-restore from disk state.
+              fetchJSON("/api/workflow/start", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  title: featureName,
+                  feature_name: featureName,
+                  description: "Resumed from " + stateStr
+                })
+              }).then(function (data) {
+                // Orchestrator is now running and waiting at the gate.
+                updateWorkflowStatus({
+                  state: data.state || stateStr,
+                  feature_name: data.feature_name || featureName,
+                  round: data.round || 1,
+                  cost_usd: 0,
+                  wall_clock_seconds: 0,
+                  agent_invocations: 0
+                });
+                addActivityEntry("Workflow resumed: " + featureName + " at " + stateStr, "info");
+                loadFeatureList();
+
+                // Fetch the gate data (and previous corrections) and show the gate panel.
+                if (stateStr.indexOf("HUMAN_GATE_1") !== -1) {
+                  Promise.all([
+                    fetchJSON("/api/workspace/features/" + encodeURIComponent(featureName) + "/discovery").catch(function () { return null; }),
+                    fetchJSON("/api/workspace/features/" + encodeURIComponent(featureName) + "/files/gate1-corrections.json").catch(function () { return null; })
+                  ]).then(function (results) {
+                    if (results[0]) showGate1Panel({ gate_type: "requirements_confirmation", data: results[0], task_id: featureName }, results[1]);
+                  });
+                } else if (stateStr.indexOf("HUMAN_GATE_2") !== -1) {
+                  fetchJSON("/api/workspace/features/" + encodeURIComponent(featureName) + "/files/drafter-output.json").then(function (drafter) {
+                    showGate2Panel({ gate_type: "ambiguity_resolution", data: drafter, task_id: featureName });
+                  });
+                }
+              }).catch(function (err) {
+                // If 409, orchestrator may already be running — just show the gate panel.
+                if (String(err.message).indexOf("409") !== -1) {
+                  if (stateStr.indexOf("HUMAN_GATE_1") !== -1) {
+                    Promise.all([
+                      fetchJSON("/api/workspace/features/" + encodeURIComponent(featureName) + "/discovery").catch(function () { return null; }),
+                      fetchJSON("/api/workspace/features/" + encodeURIComponent(featureName) + "/files/gate1-corrections.json").catch(function () { return null; })
+                    ]).then(function (results) {
+                      if (results[0]) showGate1Panel({ gate_type: "requirements_confirmation", data: results[0], task_id: featureName }, results[1]);
+                    });
+                  }
+                } else {
+                  alert("Resume failed: " + err.message);
+                }
+                resumeBtn.disabled = false;
+                resumeBtn.textContent = "Resume";
+              });
+            };
+          })(f.feature_name, f.state));
           actions.appendChild(resumeBtn);
         }
 
@@ -1272,7 +1331,7 @@
 
   // --- Gate 1: Requirements Confirmation ---
 
-  function showGate1Panel(data) {
+  function showGate1Panel(data, previousCorrections) {
     var container = $("#gate-panels");
     clearChildren(container);
 
@@ -1378,6 +1437,21 @@
     panel.innerHTML = header + content;
     container.appendChild(panel);
 
+    // Pre-fill textareas with previous corrections if available.
+    if (previousCorrections) {
+      var ua = previousCorrections.user_answers || {};
+      var oqAnswers = ua.open_questions || {};
+      Object.keys(oqAnswers).forEach(function (idx) {
+        var ta = panel.querySelector('.gate-answer[data-question-idx="' + idx + '"]');
+        if (ta) ta.value = oqAnswers[idx];
+      });
+      var asAnswers = ua.assumptions || {};
+      Object.keys(asAnswers).forEach(function (idx) {
+        var ta = panel.querySelector('.gate-assumption-answer[data-assumption-idx="' + idx + '"]');
+        if (ta) ta.value = asAnswers[idx];
+      });
+    }
+
     // Enable inline editing on editable fields
     $$(".gate-editable", panel).forEach(function (field) {
       field.addEventListener("dblclick", function () {
@@ -1427,17 +1501,41 @@
     });
 
     $("#gate1-correct").addEventListener("click", function () {
-      // Collect any edited fields
+      // Collect inline-edited fields
       var corrections = {};
       $$(".gate-editable", panel).forEach(function (field) {
         var key = field.dataset.field;
         if (key) corrections[key] = field.textContent;
       });
 
+      // Collect answers to open questions (same as confirm)
+      var questionAnswers = {};
+      $$(".gate-answer", panel).forEach(function (ta) {
+        var idx = ta.dataset.questionIdx;
+        var text = ta.value.trim();
+        if (text) questionAnswers[idx] = text;
+      });
+
+      // Collect answers to assumption questions
+      var assumptionAnswers = {};
+      $$(".gate-assumption-answer", panel).forEach(function (ta) {
+        var idx = ta.dataset.assumptionIdx;
+        var text = ta.value.trim();
+        if (text) assumptionAnswers[idx] = text;
+      });
+
+      var payload = { action: "correct", corrections: corrections };
+      if (Object.keys(questionAnswers).length > 0 || Object.keys(assumptionAnswers).length > 0) {
+        payload.user_answers = {
+          open_questions: questionAnswers,
+          assumptions: assumptionAnswers
+        };
+      }
+
       fetchJSON("/api/tasks/" + encodeURIComponent(taskId) + "/approve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "correct", corrections: corrections })
+        body: JSON.stringify(payload)
       }).then(function () {
         gate1CorrectionCount++;
         clearChildren(container);
@@ -1854,11 +1952,17 @@
       if (!feature) return;
 
       if (state === "HUMAN_GATE_1") {
-        fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/discovery").then(function (discovery) {
+        // Fetch discovery output and any previous corrections in parallel.
+        Promise.all([
+          fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/discovery").catch(function () { return null; }),
+          fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/files/gate1-corrections.json").catch(function () { return null; })
+        ]).then(function (results) {
+          var discovery = results[0];
+          var corrections = results[1];
           if (discovery) {
-            showGate1Panel({ gate_type: "requirements_confirmation", data: discovery, task_id: feature });
+            showGate1Panel({ gate_type: "requirements_confirmation", data: discovery, task_id: feature }, corrections);
           }
-        }).catch(function () {});
+        });
       } else if (state === "HUMAN_GATE_2") {
         fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/files/drafter-output.json").then(function (drafter) {
           if (drafter) {

@@ -127,18 +127,22 @@ func (o *Orchestrator) handleHumanGate1(state *WorkflowStateJSON, specDir string
 		}
 
 	case "correct":
-		// Save corrections and any user answers to disk so handleDiscovery
-		// can include them in the re-run prompt.
+		// resp.Data is a map[string]interface{} with "corrections" and optionally "user_answers".
+		// Save the full structure to disk so handleDiscovery can include it in the re-run prompt.
 		correctionData := map[string]interface{}{
-			"action":      "correct",
-			"corrections": resp.Data,
+			"action": "correct",
 		}
 
-		// Also check if user_answers was included alongside corrections.
 		if m, ok := resp.Data.(map[string]interface{}); ok {
+			if corr, exists := m["corrections"]; exists {
+				correctionData["corrections"] = corr
+			}
 			if ua, exists := m["user_answers"]; exists {
 				correctionData["user_answers"] = ua
 			}
+		} else {
+			// Fallback: treat the whole Data as corrections.
+			correctionData["corrections"] = resp.Data
 		}
 
 		corrPath := filepath.Join(specDir, "gate1-corrections.json")
@@ -159,10 +163,40 @@ func (o *Orchestrator) handleHumanGate1(state *WorkflowStateJSON, specDir string
 			fmt.Sprintf("Human requested corrections (%d fields), re-running discovery (attempt %d/%d)",
 				nCorrections, state.Gate1CorrectionCount+1, o.config.MaxGateCorrections)))
 
-		corrections, _ := resp.Data.(map[string]string)
+		// Extract corrections map for the gate handler (just the corrections,
+		// not user_answers — those are already saved to disk).
+		var corrections map[string]string
+		if m, ok := resp.Data.(map[string]interface{}); ok {
+			if corr, exists := m["corrections"]; exists {
+				if cm, ok := corr.(map[string]interface{}); ok {
+					corrections = make(map[string]string)
+					for k, v := range cm {
+						corrections[k] = fmt.Sprintf("%v", v)
+					}
+				}
+			}
+		}
 		nextState, err := gate1.HandleCorrect(corrections)
 		if err != nil {
-			o.escalateFrom(StateHumanGate1)
+			// Correction limit reached. Don't escalate — the user's answers
+			// are already saved to gate1-corrections.json. Treat this as a
+			// confirm with corrections: proceed to DRAFTING so the drafter
+			// can use the saved answers.
+			log.Printf("[orchestrator] correction limit reached (%d/%d), proceeding to DRAFTING with saved corrections",
+				state.Gate1CorrectionCount, o.config.MaxGateCorrections)
+			o.emitter.Emit(NewGateResponseEvent("requirements_confirmation", "confirm",
+				"Correction limit reached — proceeding to drafting with saved feedback"))
+
+			// Also save as user-answers.json so the drafter picks them up.
+			answersPath := filepath.Join(specDir, "user-answers.json")
+			if answersData, marshalErr := json.MarshalIndent(correctionData, "", "  "); marshalErr == nil {
+				os.WriteFile(answersPath, answersData, 0o644)
+			}
+
+			o.logTransition(StateHumanGate1, StateDrafting)
+			if transErr := o.sm.Transition(StateDrafting); transErr != nil {
+				return fmt.Errorf("transition HUMAN_GATE_1 -> DRAFTING (after correction limit): %w", transErr)
+			}
 			return nil
 		}
 		o.logTransition(StateHumanGate1, nextState)
