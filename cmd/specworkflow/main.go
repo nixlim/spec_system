@@ -17,6 +17,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -32,6 +33,10 @@ func main() {
 	configPath := flag.String("config", "", "path to YAML configuration file (optional)")
 	otelPort := flag.Int("otel-port", 4318, "OTLP HTTP receiver port for child process telemetry (0 to disable)")
 	flag.Parse()
+
+	// Set up server log ring buffer so all log.Printf output is captured.
+	logBuffer := api.NewLogBuffer(500)
+	log.SetOutput(io.MultiWriter(os.Stderr, logBuffer))
 
 	// Resolve workspace to absolute path.
 	absWorkspace, err := filepath.Abs(*workspace)
@@ -112,6 +117,14 @@ func main() {
 	mux.HandleFunc("/api/workflow/status", api.HandleGetWorkflowStatus(workflowManager))
 	mux.HandleFunc("/api/tasks/", handleTaskRouting(workflowManager))
 
+	// --- Workflow control endpoints (retry/reset) ---
+	mux.HandleFunc("/api/workflow/retry", api.HandleRetryWorkflow(workflowManager))
+	mux.HandleFunc("/api/workflow/reset", api.HandleResetWorkflow(workflowManager))
+
+	// --- Log / message streaming endpoints ---
+	mux.HandleFunc("/api/messages", api.HandleGetMessages(absWorkspace))
+	mux.HandleFunc("/api/logs/server", api.HandleGetServerLogs(logBuffer))
+
 	// --- WebSocket endpoint ---
 	mux.Handle("/ws", api.HandleWebSocket(wsHub))
 
@@ -169,9 +182,13 @@ func main() {
 	fmt.Printf("  POST /api/workflow/start      Start a new workflow\n")
 	fmt.Printf("  POST /api/workflow/cancel      Cancel running workflow\n")
 	fmt.Printf("  GET  /api/workflow/status      Poll workflow status\n")
+	fmt.Printf("  POST /api/workflow/retry       Clear stale workflow state\n")
+	fmt.Printf("  POST /api/workflow/reset       Delete feature directory\n")
 	fmt.Printf("  POST /api/tasks/{id}/approve   Approve a gate task\n")
 	fmt.Printf("  POST /api/tasks/{id}/reject    Reject a gate task\n")
 	fmt.Printf("  GET  /ws                       WebSocket event stream\n")
+	fmt.Printf("  GET  /api/messages             Workflow log messages\n")
+	fmt.Printf("  GET  /api/logs/server          Server log (ring buffer)\n")
 	fmt.Printf("  POST /api/upload               Upload source documents\n")
 	fmt.Printf("  GET  /api/uploads              List uploaded files\n")
 	fmt.Printf("  GET  /api/spec/current         Current spec version\n")

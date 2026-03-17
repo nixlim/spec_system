@@ -24,6 +24,7 @@
         <li><button class="nav-tab" data-tab="spec">Spec</button></li>
         <li><button class="nav-tab" data-tab="issues">Issues</button></li>
         <li><button class="nav-tab" data-tab="convergence">Convergence</button></li>
+        <li><button class="nav-tab" data-tab="messages">Messages</button></li>
       </ul>
       <div class="sidebar-footer">
         <button id="btn-cancel-workflow" class="btn btn-danger btn-sm">Cancel Workflow</button>
@@ -104,6 +105,12 @@
           </div>
           <button type="submit" id="goal-submit" class="btn btn-primary">Submit Goal</button>
         </form>
+        <div class="card" style="margin-top: 16px;">
+          <h3 style="margin-bottom: 8px;">Workflow Management</h3>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <button id="btn-reset-workflow" class="btn btn-danger btn-sm">Reset Workflow</button>
+          </div>
+        </div>
 
         <h2>Document Upload</h2>
         <div class="card">
@@ -240,6 +247,28 @@
         <div id="stale-warnings" class="card" hidden>
           <h3>Stale Issue Warnings</h3>
           <ul id="stale-list"></ul>
+        </div>
+      </section>
+
+      <!-- Messages Tab -->
+      <section id="tab-messages" class="tab-panel">
+        <div class="messages-toolbar">
+          <h2>Messages</h2>
+          <div class="messages-controls">
+            <label><input type="checkbox" id="msg-auto-scroll" checked> Auto-scroll</label>
+            <button id="msg-clear" class="btn btn-sm">Clear</button>
+            <select id="msg-filter">
+              <option value="">All</option>
+              <option value="otel">OTEL</option>
+              <option value="orchestrator">Orchestrator</option>
+              <option value="claude-runner">Claude Runner</option>
+              <option value="agent">Agent Events</option>
+              <option value="state">State Transitions</option>
+            </select>
+          </div>
+        </div>
+        <div id="messages-container" class="messages-log">
+          <!-- Message entries rendered here -->
         </div>
       </section>
     </main>

@@ -1088,6 +1088,100 @@ html, body {
   color: #ea580c;
 }
 
+/* --- Messages Tab --- */
+
+.messages-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.messages-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.messages-controls label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.messages-controls select {
+  padding: 4px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  background: var(--color-surface);
+}
+
+.messages-log {
+  font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  border-radius: var(--radius);
+  padding: 8px 0;
+  max-height: calc(100vh - 200px);
+  overflow-y: auto;
+  border: 1px solid #2a2a4a;
+}
+
+.msg-entry {
+  padding: 3px 12px;
+  border-bottom: 1px solid #2a2a4a;
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.msg-entry:last-child {
+  border-bottom: none;
+}
+
+.msg-entry.msg-hidden {
+  display: none;
+}
+
+.msg-timestamp {
+  color: #888;
+  font-size: 0.85em;
+  flex-shrink: 0;
+  min-width: 60px;
+}
+
+.msg-source {
+  font-size: 0.85em;
+  font-weight: 600;
+  flex-shrink: 0;
+  min-width: 100px;
+  padding: 0 4px;
+  border-radius: 3px;
+}
+
+.msg-source-otel { color: #22d3ee; }
+.msg-source-orchestrator { color: #facc15; }
+.msg-source-claude-runner { color: #4ade80; }
+.msg-source-agent { color: #c084fc; }
+.msg-source-state { color: #60a5fa; }
+.msg-source-server { color: #94a3b8; }
+
+.msg-content {
+  flex: 1;
+  word-break: break-word;
+}
+
+.msg-entry.msg-error .msg-content { color: #f87171; }
+.msg-entry.msg-warning .msg-content { color: #fb923c; }
+.msg-entry.msg-success .msg-content { color: #4ade80; }
+
 /* --- Responsive --- */
 
 @media (max-width: 900px) {

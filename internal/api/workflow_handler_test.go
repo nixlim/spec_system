@@ -375,3 +375,122 @@ func TestStatusMessage(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// TestHandleRetryWorkflow
+// ---------------------------------------------------------------------------
+
+func TestHandleRetryWorkflow_ClearsState(t *testing.T) {
+	manager, dir := setupWorkflowManager(t)
+
+	// Create a workflow-state.json file.
+	featureDir := filepath.Join(dir, "specs", "test-feature")
+	os.MkdirAll(featureDir, 0o755)
+	statePath := filepath.Join(featureDir, "workflow-state.json")
+	os.WriteFile(statePath, []byte(`{"state":"ESCALATED"}`), 0o644)
+
+	handler := HandleRetryWorkflow(manager)
+	body := `{"feature_name":"test-feature"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflow/retry", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// State file should be gone.
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Error("expected workflow-state.json to be deleted")
+	}
+}
+
+func TestHandleRetryWorkflow_MissingFeatureName(t *testing.T) {
+	manager, _ := setupWorkflowManager(t)
+	handler := HandleRetryWorkflow(manager)
+
+	body := `{}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflow/retry", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleRetryWorkflow_MethodNotAllowed(t *testing.T) {
+	manager, _ := setupWorkflowManager(t)
+	handler := HandleRetryWorkflow(manager)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workflow/retry", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rec.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestHandleResetWorkflow
+// ---------------------------------------------------------------------------
+
+func TestHandleResetWorkflow_DeletesDirectory(t *testing.T) {
+	manager, dir := setupWorkflowManager(t)
+
+	// Create feature directory with files.
+	featureDir := filepath.Join(dir, "specs", "test-feature")
+	os.MkdirAll(featureDir, 0o755)
+	os.WriteFile(filepath.Join(featureDir, "spec-v1.md"), []byte("# Spec"), 0o644)
+	os.WriteFile(filepath.Join(featureDir, "workflow-state.json"), []byte(`{}`), 0o644)
+
+	handler := HandleResetWorkflow(manager)
+	body := `{"feature_name":"test-feature"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflow/reset", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Directory should be gone.
+	if _, err := os.Stat(featureDir); !os.IsNotExist(err) {
+		t.Error("expected feature directory to be deleted")
+	}
+}
+
+func TestHandleResetWorkflow_MissingFeatureName(t *testing.T) {
+	manager, _ := setupWorkflowManager(t)
+	handler := HandleResetWorkflow(manager)
+
+	body := `{}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflow/reset", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleResetWorkflow_NonexistentDir(t *testing.T) {
+	manager, _ := setupWorkflowManager(t)
+	handler := HandleResetWorkflow(manager)
+
+	body := `{"feature_name":"nonexistent"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflow/reset", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	// RemoveAll on nonexistent path succeeds.
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for nonexistent dir, got %d", rec.Code)
+	}
+}

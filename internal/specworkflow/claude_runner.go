@@ -268,7 +268,18 @@ func (r *ClaudeRunner) Run(prompt string, outputPath string, timeoutSeconds int)
 		return 1, stderrStr, parsed.CostUSD, parsed.DurationMS, fmt.Errorf("claude reported error: %s", truncate(parsed.Result, 200))
 	}
 
-	// Write the result field content to the output path.
+	// Check if the agent already wrote the output file directly (via Write tool).
+	if existingData, readErr := os.ReadFile(outputPath); readErr == nil && len(existingData) > 0 {
+		// Validate it's JSON (starts with { or [).
+		trimmed := bytes.TrimSpace(existingData)
+		if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
+			log.Printf("[claude-runner] agent wrote output file directly, keeping it (%d bytes)", len(existingData))
+			return code, stderrStr, parsed.CostUSD, parsed.DurationMS, nil
+		}
+		// Agent wrote non-JSON; overwrite with result field.
+		log.Printf("[claude-runner] agent output file exists but is not JSON, overwriting with result field")
+	}
+	// Agent didn't write the file, or wrote non-JSON — use result field.
 	if writeErr := writeOutputFile(outputPath, []byte(parsed.Result)); writeErr != nil {
 		return code, stderrStr, parsed.CostUSD, parsed.DurationMS, fmt.Errorf("write output file: %w", writeErr)
 	}

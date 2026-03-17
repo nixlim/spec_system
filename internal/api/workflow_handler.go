@@ -415,6 +415,79 @@ func StatusMessage(state specworkflow.WorkflowState, round int) string {
 	}
 }
 
+// HandleRetryWorkflow returns an HTTP handler for POST /api/workflow/retry.
+// It clears the stale workflow-state.json for the given feature so a new
+// workflow can be started.
+func HandleRetryWorkflow(manager *WorkflowManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			FeatureName string `json:"feature_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+			return
+		}
+		if req.FeatureName == "" {
+			writeError(w, http.StatusBadRequest, "feature_name is required")
+			return
+		}
+
+		// Remove the workflow-state.json file.
+		statePath := filepath.Join(manager.workspaceDir, "specs", req.FeatureName, "workflow-state.json")
+		if err := os.Remove(statePath); err != nil && !os.IsNotExist(err) {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to remove state file: %v", err))
+			return
+		}
+
+		log.Printf("[workflow] cleared workflow state for feature %q", req.FeatureName)
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":  "cleared",
+			"message": "Ready to start a new workflow",
+		})
+	}
+}
+
+// HandleResetWorkflow returns an HTTP handler for POST /api/workflow/reset.
+// It deletes the entire workspace/specs/{feature}/ directory so the feature
+// can be started completely fresh.
+func HandleResetWorkflow(manager *WorkflowManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			FeatureName string `json:"feature_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+			return
+		}
+		if req.FeatureName == "" {
+			writeError(w, http.StatusBadRequest, "feature_name is required")
+			return
+		}
+
+		featureDir := filepath.Join(manager.workspaceDir, "specs", req.FeatureName)
+		if err := os.RemoveAll(featureDir); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to remove feature directory: %v", err))
+			return
+		}
+
+		log.Printf("[workflow] reset feature %q — deleted %s", req.FeatureName, featureDir)
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":  "reset",
+			"message": "Feature directory deleted",
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

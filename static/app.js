@@ -32,6 +32,10 @@
   var gate1CorrectionCount = 0;
   var gate2AnswerDisabled = false;
 
+  // Messages tab state
+  var messagesPollingTimer = null;
+  var lastServerLogCount = 0;
+
   // -----------------------------------------------------------------------
   // DOM helpers
   // -----------------------------------------------------------------------
@@ -484,6 +488,9 @@
   // -----------------------------------------------------------------------
 
   function handleEvent(envelope) {
+    // Add ALL WebSocket events to the Messages tab log.
+    addWsEventToMessages(envelope);
+
     switch (envelope.event) {
       case "spec_version":
         onSpecVersion(envelope.data);
@@ -544,6 +551,10 @@
         if (tab === "spec") loadSpec();
         if (tab === "issues") loadIssues();
         if (tab === "convergence") loadConvergence();
+        if (tab === "messages") startMessagesPolling();
+
+        // Stop messages polling when leaving the tab
+        if (tab !== "messages") stopMessagesPolling();
       });
     });
   }
@@ -1347,6 +1358,208 @@
   }
 
   // -----------------------------------------------------------------------
+  // Messages Tab
+  // -----------------------------------------------------------------------
+
+  function addMessage(source, content, severity) {
+    var container = $("#messages-container");
+    if (!container) return;
+
+    var now = new Date();
+    var timestamp = String(now.getHours()).padStart(2, "0") + ":" +
+                    String(now.getMinutes()).padStart(2, "0") + ":" +
+                    String(now.getSeconds()).padStart(2, "0");
+
+    var sevClass = severity ? " msg-" + severity : "";
+    var sourceClass = "msg-source-" + source.replace(/[\[\]]/g, "");
+
+    var entry = el("div", { className: "msg-entry" + sevClass, "data-source": source }, [
+      el("span", { className: "msg-timestamp", textContent: timestamp }),
+      el("span", { className: "msg-source " + sourceClass, textContent: "[" + source + "]" }),
+      el("span", { className: "msg-content", textContent: content })
+    ]);
+
+    container.appendChild(entry);
+
+    // Apply current filter
+    applyMessagesFilter(entry);
+
+    // Auto-scroll
+    var autoScroll = $("#msg-auto-scroll");
+    if (autoScroll && autoScroll.checked) {
+      container.scrollTop = container.scrollHeight;
+    }
+  }
+
+  function applyMessagesFilter(entry) {
+    var filterSelect = $("#msg-filter");
+    var filterVal = filterSelect ? filterSelect.value : "";
+    if (!filterVal) {
+      entry.classList.remove("msg-hidden");
+      return;
+    }
+    var entrySource = entry.getAttribute("data-source") || "";
+    if (entrySource === filterVal || entrySource.indexOf(filterVal) !== -1) {
+      entry.classList.remove("msg-hidden");
+    } else {
+      entry.classList.add("msg-hidden");
+    }
+  }
+
+  function applyAllMessagesFilter() {
+    var container = $("#messages-container");
+    if (!container) return;
+    $$(".msg-entry", container).forEach(applyMessagesFilter);
+  }
+
+  function addWsEventToMessages(envelope) {
+    var data = envelope.data || {};
+    switch (envelope.event) {
+      case "state_transition":
+        addMessage("state", (data.from || "?") + " -> " + (data.to || "?") + " (round " + (data.round || "?") + ")");
+        break;
+      case "agent_dispatch":
+        addMessage("agent", "Dispatching " + (data.agent || "?") + " agent");
+        break;
+      case "agent_complete":
+        if (data.success) {
+          var details = [];
+          if (data.duration_ms != null) details.push((data.duration_ms / 1000).toFixed(1) + "s");
+          if (data.cost_usd != null) details.push(formatCost(data.cost_usd));
+          addMessage("agent", (data.agent || "?") + " completed" + (details.length ? " (" + details.join(", ") + ")" : ""), "success");
+        } else {
+          addMessage("agent", (data.agent || "?") + " FAILED", "error");
+        }
+        break;
+      case "agent_metrics":
+        addMessage("otel", "Tokens: in=" + (data.input_tokens || 0) + " out=" + (data.output_tokens || 0) + " cache=" + (data.cache_read_tokens || 0) + " | Cost: " + formatCost(data.total_cost_usd) + " | API calls: " + (data.total_api_calls || 0));
+        break;
+      case "agent_tool_event":
+        var toolStatus = data.success ? "success" : "error";
+        var toolMsg = "Tool: " + (data.tool_name || "?") + " (" + Math.round(data.duration_ms || 0) + "ms) " + (data.success ? "OK" : "FAILED");
+        addMessage("otel", toolMsg, toolStatus);
+        break;
+      case "agent_api_event":
+        var apiDetails = [];
+        if (data.duration_ms) apiDetails.push((data.duration_ms / 1000).toFixed(1) + "s");
+        if (data.cost_usd) apiDetails.push(formatCost(data.cost_usd));
+        if (data.input_tokens || data.output_tokens) apiDetails.push((data.input_tokens || 0) + " in / " + (data.output_tokens || 0) + " out");
+        addMessage("otel", "API: " + (data.model || "?") + (apiDetails.length ? " (" + apiDetails.join(", ") + ")" : ""));
+        break;
+      case "workflow_status":
+        addMessage("orchestrator", "State: " + (data.state || "?") + " | Round " + (data.round || "?") + " | Cost " + formatCost(data.cost_usd) + " | " + (data.agent_invocations || 0) + " agents");
+        break;
+      case "circuit_breaker":
+        addMessage("orchestrator", "Circuit breaker: " + (data.breaker || "?") + " (value=" + data.value + ", limit=" + data.limit + ")", "warning");
+        break;
+      case "agent_error":
+        addMessage("agent", "Error: " + (data.agent || "?") + " - " + (data.error_type || "?") + " (retry " + (data.retry_count || 0) + "/" + (data.max_retries || 0) + ")", "error");
+        break;
+      case "gate_request":
+        addMessage("state", "Human gate: " + (data.gate_type || "?"));
+        break;
+    }
+  }
+
+  function loadServerLogs() {
+    fetch("/api/logs/server").then(function (resp) {
+      if (!resp.ok) return;
+      return resp.json();
+    }).then(function (lines) {
+      if (!lines || !Array.isArray(lines)) return;
+      // Only add new lines since last fetch
+      var newLines = lines.slice(lastServerLogCount);
+      lastServerLogCount = lines.length;
+
+      newLines.forEach(function (line) {
+        var source = "server";
+        var severity = "";
+
+        // Parse [tag] prefix to assign source coloring
+        var tagMatch = line.match(/^\[([^\]]+)\]/);
+        if (tagMatch) {
+          var tag = tagMatch[1].toLowerCase();
+          if (tag === "claude-runner") source = "claude-runner";
+          else if (tag === "orchestrator" || tag === "workflow") source = "orchestrator";
+          else if (tag.indexOf("otel") !== -1 || tag.indexOf("otlp") !== -1) source = "otel";
+          else if (tag.indexOf("agent") !== -1) source = "agent";
+        }
+
+        // Detect severity from content
+        if (/error|fail|fatal/i.test(line)) severity = "error";
+        else if (/warn/i.test(line)) severity = "warning";
+
+        addMessage(source, line, severity);
+      });
+    }).catch(function () {});
+  }
+
+  function startMessagesPolling() {
+    // Load initial server logs
+    loadServerLogs();
+    // Poll every 2s
+    if (messagesPollingTimer) clearInterval(messagesPollingTimer);
+    messagesPollingTimer = setInterval(loadServerLogs, 2000);
+  }
+
+  function stopMessagesPolling() {
+    if (messagesPollingTimer) {
+      clearInterval(messagesPollingTimer);
+      messagesPollingTimer = null;
+    }
+  }
+
+  function initMessages() {
+    // Clear button
+    var clearBtn = $("#msg-clear");
+    if (clearBtn) {
+      clearBtn.addEventListener("click", function () {
+        var container = $("#messages-container");
+        clearChildren(container);
+        lastServerLogCount = 0;
+      });
+    }
+
+    // Filter dropdown
+    var filterSelect = $("#msg-filter");
+    if (filterSelect) {
+      filterSelect.addEventListener("change", applyAllMessagesFilter);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Workflow Control Buttons (Reset)
+  // -----------------------------------------------------------------------
+
+  function initWorkflowControls() {
+    var resetBtn = $("#btn-reset-workflow");
+    if (resetBtn) {
+      resetBtn.addEventListener("click", function () {
+        var featureName = $("#goal-feature-name").value.trim();
+        if (!featureName) {
+          alert("Enter a feature name in the form above first.");
+          return;
+        }
+        if (!confirm("Reset workflow for '" + featureName + "'? This deletes all spec files and state.")) return;
+        fetchJSON("/api/workflow/reset", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ feature_name: featureName })
+        }).then(function () {
+          // Clear the workflow status panel
+          var panel = $("#workflow-status");
+          if (panel) panel.hidden = true;
+          var badge = $("#workflow-state");
+          if (badge) { badge.textContent = "IDLE"; badge.className = "state-badge state-badge-idle"; }
+          addActivityEntry("Workflow reset for " + featureName, "info");
+        }).catch(function (err) {
+          alert("Reset failed: " + err.message);
+        });
+      });
+    }
+  }
+
+  // -----------------------------------------------------------------------
   // Cancel Workflow
   // -----------------------------------------------------------------------
 
@@ -1370,6 +1583,8 @@
     initSpecControls();
     initIssueFilters();
     initCancelButton();
+    initMessages();
+    initWorkflowControls();
     wsConnect();
   }
 
