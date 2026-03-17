@@ -696,6 +696,92 @@ func TestHandleListFeatures_ActiveWorkflowNotTerminal(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// TestHandleGetWorkflowStatus_DiskState
+// ---------------------------------------------------------------------------
+
+func TestHandleGetWorkflowStatus_DiskGateState(t *testing.T) {
+	manager, dir := setupWorkflowManager(t)
+
+	// Create a gate state on disk.
+	featureDir := filepath.Join(dir, "specs", "gate-feature")
+	os.MkdirAll(featureDir, 0o755)
+	stateJSON := `{
+		"state": "HUMAN_GATE_1",
+		"round": 1,
+		"feature_name": "gate-feature",
+		"started_at": "2026-03-17T05:00:00Z",
+		"updated_at": "2026-03-17T06:00:00Z"
+	}`
+	os.WriteFile(filepath.Join(featureDir, "workflow-state.json"), []byte(stateJSON), 0o644)
+
+	handler := HandleGetWorkflowStatus(manager)
+	req := httptest.NewRequest(http.MethodGet, "/api/workflow/status", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	// Should show the on-disk gate state, not "idle".
+	if resp["state"] != "HUMAN_GATE_1" {
+		t.Errorf("state = %q, want HUMAN_GATE_1", resp["state"])
+	}
+	if resp["paused"] != true {
+		t.Error("expected paused=true for disk-only gate state")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestTryResumeFromDiskState
+// ---------------------------------------------------------------------------
+
+func TestTryResumeFromDiskState_NoState(t *testing.T) {
+	manager, _ := setupWorkflowManager(t)
+
+	rec := httptest.NewRecorder()
+	orch := tryResumeFromDiskState(manager, rec)
+
+	if orch != nil {
+		t.Error("expected nil orchestrator when no disk state")
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestTryResumeFromDiskState_NonGateState(t *testing.T) {
+	manager, dir := setupWorkflowManager(t)
+
+	// Create a non-gate state on disk (REVIEWING).
+	featureDir := filepath.Join(dir, "specs", "reviewing-feature")
+	os.MkdirAll(featureDir, 0o755)
+	stateJSON := `{
+		"state": "REVIEWING",
+		"round": 2,
+		"feature_name": "reviewing-feature",
+		"started_at": "2026-03-17T05:00:00Z",
+		"updated_at": "2026-03-17T06:00:00Z"
+	}`
+	os.WriteFile(filepath.Join(featureDir, "workflow-state.json"), []byte(stateJSON), 0o644)
+
+	rec := httptest.NewRecorder()
+	orch := tryResumeFromDiskState(manager, rec)
+
+	if orch != nil {
+		t.Error("expected nil orchestrator for non-gate state")
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rec.Code)
+	}
+}
+
 // equalStrings compares two string slices for equality.
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {

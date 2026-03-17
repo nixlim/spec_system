@@ -47,6 +47,12 @@ var gateStates = map[WorkflowState]bool{
 	StateHumanGateFinal: true,
 }
 
+// IsGateState reports whether the given state is a human gate state
+// (HUMAN_GATE_1, HUMAN_GATE_2, or HUMAN_GATE_FINAL).
+func IsGateState(s WorkflowState) bool {
+	return gateStates[s]
+}
+
 // agentStates is the set of WorkflowState values that represent active agent
 // phases — phases where an agent is expected to produce an output file.
 var agentStates = map[WorkflowState]bool{

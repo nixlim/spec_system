@@ -377,3 +377,36 @@ func TestResumeExpectedOutputFile(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// IsGateState
+// ---------------------------------------------------------------------------
+
+func TestIsGateState(t *testing.T) {
+	gateTests := []struct {
+		state WorkflowState
+		want  bool
+	}{
+		{StateInit, false},
+		{StateDiscovery, false},
+		{StateHumanGate1, true},
+		{StateDrafting, false},
+		{StateHumanGate2, true},
+		{StateReviewing, false},
+		{StateRevising, false},
+		{StateJudging, false},
+		{StateHumanGateFinal, true},
+		{StateFinalized, false},
+		{StateEscalated, false},
+		{StateError, false},
+	}
+
+	for _, tt := range gateTests {
+		t.Run(tt.state.String(), func(t *testing.T) {
+			got := IsGateState(tt.state)
+			if got != tt.want {
+				t.Errorf("IsGateState(%s) = %v, want %v", tt.state, got, tt.want)
+			}
+		})
+	}
+}

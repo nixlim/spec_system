@@ -826,3 +826,236 @@ func TestOrchestratorGateCorrect(t *testing.T) {
 		t.Errorf("expected Gate1CorrectionCount=1, got %d", orch.sm.State().Gate1CorrectionCount)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Resume from gate state tests
+// ---------------------------------------------------------------------------
+
+func TestOrchestratorResumeFromGate1(t *testing.T) {
+	// Simulate: a workflow ran discovery, reached HUMAN_GATE_1, then the
+	// server restarted. A new orchestrator should restore the persisted
+	// state and resume from HUMAN_GATE_1, accepting a gate response.
+	workspace := t.TempDir()
+	feature := "test-feature"
+	specDir := filepath.Join(workspace, "specs", feature)
+	os.MkdirAll(specDir, 0o755)
+
+	// Write discovery output (required for gate 1).
+	disco := orchDiscoveryOutput()
+	discoData, _ := json.MarshalIndent(disco, "", "  ")
+	os.WriteFile(filepath.Join(specDir, "discovery-output.json"), discoData, 0o644)
+
+	// Write persisted state at HUMAN_GATE_1.
+	now := time.Now().UTC().Format(time.RFC3339)
+	persistedState := &WorkflowStateJSON{
+		State:       StateHumanGate1,
+		Round:       1,
+		FeatureName: feature,
+		StartedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := SaveState(specDir, persistedState); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	// Create a new orchestrator — it should restore from disk.
+	config := orchTestConfig()
+	runner := newOrchMockRunner()
+	emitter := NewChannelEmitter(64)
+
+	// Set up outputs for post-gate stages.
+	runner.SetOutput("Drafter Agent", orchDrafterOutput(specDir))
+	runner.SetOutput("Reviewer Agent", orchReviewerOutputWith("reviewer", 1, nil))
+	runner.SetOutput("Judge Agent", &JudgeOutput{
+		SchemaVersion:   "1.0",
+		Agent:           "judge",
+		Round:           1,
+		Verdict:         VerdictPass,
+		Rationale:       "All good",
+		StructuralDelta: StructuralDelta{RegressionsFound: false},
+	})
+
+	orch, err := NewOrchestrator(OrchestratorConfig{
+		WorkspaceDir: workspace,
+		FeatureName:  feature,
+		Config:       config,
+		Runner:       runner,
+		Emitter:      emitter,
+	})
+	if err != nil {
+		t.Fatalf("NewOrchestrator: %v", err)
+	}
+
+	// Inject dummy skills.
+	orch.skills = &SkillCache{
+		contents: map[string]string{
+			SpecTemplate:        "# Spec Template\nDummy.",
+			BDDTemplate:         "# BDD Template\nDummy.",
+			TestDatasetTemplate: "# Test Dataset Template\nDummy.",
+			ReviewConstitution:  "# Review Constitution\nDummy.",
+			ReportTemplate:      "# Report Template\nDummy.",
+		},
+		checksums: map[string]string{
+			"plan_spec":  "sha256:test",
+			"grill_spec": "sha256:test",
+		},
+		loaded: true,
+	}
+	orch.promptBuilder = NewPromptBuilder(orch.skills, workspace, feature)
+	os.WriteFile(filepath.Join(specDir, "spec-v0.md"), []byte("# Test Spec\n"), 0o644)
+
+	// Verify the orchestrator restored the gate state.
+	if orch.sm.Current() != StateHumanGate1 {
+		t.Fatalf("expected restored state HUMAN_GATE_1, got %s", orch.sm.Current())
+	}
+
+	// Run workflow — it should enter handleHumanGate1 and wait on gateCh.
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- orch.RunWorkflow(GoalInput{
+			Title:       feature,
+			Description: "Resumed from gate",
+		})
+	}()
+
+	// Gate 1: confirm.
+	sendGateResponse(orch, GateResponse{Action: "confirm"})
+
+	// Gate 2: confirm.
+	sendGateResponse(orch, GateResponse{Action: "confirm"})
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("RunWorkflow returned error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunWorkflow timed out")
+	}
+
+	if orch.sm.State().State != StateFinalized {
+		t.Errorf("expected FINALIZED, got %s", orch.sm.State().State)
+	}
+}
+
+func TestOrchestratorResumeFromGate2(t *testing.T) {
+	// Simulate: workflow reached HUMAN_GATE_2, server restarted.
+	workspace := t.TempDir()
+	feature := "test-feature"
+	specDir := filepath.Join(workspace, "specs", feature)
+	os.MkdirAll(specDir, 0o755)
+
+	// Write drafter output (required for gate 2).
+	drafter := orchDrafterOutput(specDir)
+	drafterData, _ := json.MarshalIndent(drafter, "", "  ")
+	os.WriteFile(filepath.Join(specDir, "drafter-output.json"), drafterData, 0o644)
+	os.WriteFile(filepath.Join(specDir, "spec-v0.md"), []byte("# Test Spec\n"), 0o644)
+
+	// Write persisted state at HUMAN_GATE_2.
+	now := time.Now().UTC().Format(time.RFC3339)
+	persistedState := &WorkflowStateJSON{
+		State:       StateHumanGate2,
+		Round:       1,
+		FeatureName: feature,
+		StartedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := SaveState(specDir, persistedState); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	config := orchTestConfig()
+	runner := newOrchMockRunner()
+	emitter := NewChannelEmitter(64)
+
+	runner.SetOutput("Reviewer Agent", orchReviewerOutputWith("reviewer", 1, nil))
+	runner.SetOutput("Judge Agent", &JudgeOutput{
+		SchemaVersion:   "1.0",
+		Agent:           "judge",
+		Round:           1,
+		Verdict:         VerdictPass,
+		Rationale:       "All good",
+		StructuralDelta: StructuralDelta{RegressionsFound: false},
+	})
+
+	orch, err := NewOrchestrator(OrchestratorConfig{
+		WorkspaceDir: workspace,
+		FeatureName:  feature,
+		Config:       config,
+		Runner:       runner,
+		Emitter:      emitter,
+	})
+	if err != nil {
+		t.Fatalf("NewOrchestrator: %v", err)
+	}
+
+	orch.skills = &SkillCache{
+		contents: map[string]string{
+			SpecTemplate:        "# Spec Template\nDummy.",
+			BDDTemplate:         "# BDD Template\nDummy.",
+			TestDatasetTemplate: "# Test Dataset Template\nDummy.",
+			ReviewConstitution:  "# Review Constitution\nDummy.",
+			ReportTemplate:      "# Report Template\nDummy.",
+		},
+		checksums: map[string]string{
+			"plan_spec":  "sha256:test",
+			"grill_spec": "sha256:test",
+		},
+		loaded: true,
+	}
+	orch.promptBuilder = NewPromptBuilder(orch.skills, workspace, feature)
+
+	// Verify the orchestrator restored the gate state.
+	if orch.sm.Current() != StateHumanGate2 {
+		t.Fatalf("expected restored state HUMAN_GATE_2, got %s", orch.sm.Current())
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- orch.RunWorkflow(GoalInput{
+			Title:       feature,
+			Description: "Resumed from gate 2",
+		})
+	}()
+
+	// Gate 2: confirm — should proceed to REVIEWING.
+	sendGateResponse(orch, GateResponse{Action: "confirm"})
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("RunWorkflow returned error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunWorkflow timed out")
+	}
+
+	if orch.sm.State().State != StateFinalized {
+		t.Errorf("expected FINALIZED, got %s", orch.sm.State().State)
+	}
+}
+
+func TestOrchestratorNoStateFile_StartsFromInit(t *testing.T) {
+	// When no workflow-state.json exists, orchestrator should start from INIT.
+	workspace := t.TempDir()
+	feature := "fresh-feature"
+
+	config := orchTestConfig()
+	runner := newOrchMockRunner()
+	emitter := NewChannelEmitter(64)
+
+	orch, err := NewOrchestrator(OrchestratorConfig{
+		WorkspaceDir: workspace,
+		FeatureName:  feature,
+		Config:       config,
+		Runner:       runner,
+		Emitter:      emitter,
+	})
+	if err != nil {
+		t.Fatalf("NewOrchestrator: %v", err)
+	}
+
+	if orch.sm.Current() != StateInit {
+		t.Errorf("expected INIT for fresh feature, got %s", orch.sm.Current())
+	}
+}

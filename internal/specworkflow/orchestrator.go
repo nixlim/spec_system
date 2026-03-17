@@ -295,15 +295,26 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 		return nil, fmt.Errorf("create logger: %w", err)
 	}
 
-	// Initialise workflow state.
-	now := time.Now().UTC().Format(time.RFC3339)
-	ws := &WorkflowStateJSON{
-		State:          StateInit,
-		Round:          1,
-		FeatureName:    cfg.FeatureName,
-		StartedAt:      now,
-		UpdatedAt:      now,
-		SkillChecksums: skills.GetChecksums(),
+	// Try to load existing state from disk for crash/restart recovery.
+	// If a persisted state exists, the orchestrator will resume from that
+	// state instead of starting fresh.
+	var ws *WorkflowStateJSON
+	existingState, loadErr := LoadState(specDir)
+	if loadErr == nil && existingState != nil {
+		ws = existingState
+		log.Printf("[orchestrator] restored persisted state: feature=%s, state=%s, round=%d",
+			cfg.FeatureName, ws.State, ws.Round)
+	} else {
+		// Initialise fresh workflow state.
+		now := time.Now().UTC().Format(time.RFC3339)
+		ws = &WorkflowStateJSON{
+			State:          StateInit,
+			Round:          1,
+			FeatureName:    cfg.FeatureName,
+			StartedAt:      now,
+			UpdatedAt:      now,
+			SkillChecksums: skills.GetChecksums(),
+		}
 	}
 
 	// Create state machine with persistence callback.
@@ -317,6 +328,12 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 	}
 
 	sm := NewStateMachine(ws, smConfig, onTransition)
+
+	// If we loaded an existing state, restore it on the state machine so
+	// the main loop starts from the persisted state rather than INIT.
+	if existingState != nil {
+		sm.RestoreState(ws)
+	}
 
 	// Create prompt builder.
 	promptBuilder := NewPromptBuilder(skills, cfg.WorkspaceDir, cfg.FeatureName)

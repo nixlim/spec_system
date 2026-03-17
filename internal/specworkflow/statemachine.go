@@ -223,6 +223,13 @@ func (sm *StateMachine) AddGuard(g Guard) {
 	sm.guards = append(sm.guards, g)
 }
 
+// RestoreState sets the current state without validating transitions.
+// This is used when resuming from persisted state after a crash or server
+// restart. It bypasses both the transition table and guards.
+func (sm *StateMachine) RestoreState(ws *WorkflowStateJSON) {
+	sm.state = ws
+}
+
 // Current returns the current workflow state value.
 func (sm *StateMachine) Current() WorkflowState {
 	return sm.state.State

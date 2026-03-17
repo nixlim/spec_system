@@ -494,3 +494,63 @@ func TestStateMachine_FullPathWithCriticalFindings(t *testing.T) {
 		t.Fatalf("expected FINALIZED, got %s", sm.Current())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// RestoreState
+// ---------------------------------------------------------------------------
+
+func TestStateMachine_RestoreState(t *testing.T) {
+	// Start at INIT.
+	ws := newTestState(StateInit)
+	sm := newSM(ws)
+
+	if sm.Current() != StateInit {
+		t.Fatalf("expected INIT, got %s", sm.Current())
+	}
+
+	// Restore to HUMAN_GATE_1 — bypasses transition validation.
+	restoredState := &WorkflowStateJSON{
+		State:       StateHumanGate1,
+		Round:       1,
+		FeatureName: "test-feature",
+		StartedAt:   ws.StartedAt,
+		UpdatedAt:   ws.UpdatedAt,
+	}
+	sm.RestoreState(restoredState)
+
+	if sm.Current() != StateHumanGate1 {
+		t.Fatalf("expected HUMAN_GATE_1 after restore, got %s", sm.Current())
+	}
+
+	// Verify the state object is the one we passed in.
+	if sm.State() != restoredState {
+		t.Fatal("State() should return the restored state object")
+	}
+
+	// Now a normal transition from HUMAN_GATE_1 -> DRAFTING should work.
+	if err := sm.Transition(StateDrafting); err != nil {
+		t.Fatalf("transition HUMAN_GATE_1 -> DRAFTING after restore failed: %v", err)
+	}
+	if sm.Current() != StateDrafting {
+		t.Fatalf("expected DRAFTING, got %s", sm.Current())
+	}
+}
+
+func TestStateMachine_RestoreState_InvalidTransitionBefore(t *testing.T) {
+	// Start at INIT.
+	ws := newTestState(StateInit)
+	sm := newSM(ws)
+
+	// Restore directly to REVIEWING — skipping DISCOVERY, gates, etc.
+	restoredState := &WorkflowStateJSON{
+		State:     StateReviewing,
+		Round:     2,
+		StartedAt: ws.StartedAt,
+		UpdatedAt: ws.UpdatedAt,
+	}
+	sm.RestoreState(restoredState)
+
+	if sm.Current() != StateReviewing {
+		t.Fatalf("expected REVIEWING after restore, got %s", sm.Current())
+	}
+}

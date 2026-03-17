@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/foundry-zero/adversarial-spec-system/internal/specworkflow"
 )
@@ -109,6 +110,73 @@ func (m *WorkflowManager) CancelWorkflow() error {
 	}
 	orch.Cancel()
 	return nil
+}
+
+// ResumeFromGate re-creates the orchestrator and resumes the workflow when the
+// server has restarted while in a gate state. It loads the persisted state from
+// disk, verifies it is a gate state, creates a new orchestrator (which will
+// restore the persisted state), and runs the workflow in a background goroutine.
+// The workflow loop will enter the gate handler and wait on gateCh, ready to
+// receive the gate response from the HTTP handler.
+//
+// Returns the resumed orchestrator, or an error if resumption is not possible.
+func (m *WorkflowManager) ResumeFromGate(featureName string) (*specworkflow.Orchestrator, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// If there's already a running orchestrator, return it directly.
+	if m.orchestrator != nil && m.orchestrator.IsRunning() {
+		return m.orchestrator, nil
+	}
+
+	// Load state from disk to verify it's a gate state.
+	absWorkspace, _ := filepath.Abs(m.workspaceDir)
+	state, err := specworkflow.LoadState(filepath.Join(absWorkspace, "specs", featureName))
+	if err != nil {
+		return nil, fmt.Errorf("load state: %w", err)
+	}
+
+	if !specworkflow.IsGateState(state.State) {
+		return nil, fmt.Errorf("workflow is in %s, not a gate state", state.State)
+	}
+
+	// Create orchestrator — it will restore the persisted state from disk.
+	sourcePaths := discoverSourceDocs(m.workspaceDir)
+	orchConfig := specworkflow.OrchestratorConfig{
+		WorkspaceDir:   m.workspaceDir,
+		FeatureName:    featureName,
+		SourceDocPaths: sourcePaths,
+		Config:         m.config,
+		Runner:         specworkflow.DefaultClaudeRunner(m.workspaceDir, m.otelPort),
+		Emitter:        m.emitter,
+	}
+
+	orch, err := specworkflow.NewOrchestrator(orchConfig)
+	if err != nil {
+		return nil, fmt.Errorf("create orchestrator: %w", err)
+	}
+
+	m.orchestrator = orch
+
+	// Run workflow in background — it will resume from the gate state and
+	// block waiting on gateCh for the human response.
+	go func() {
+		goal := specworkflow.GoalInput{
+			Title:          featureName,
+			Description:    "Resumed from gate after server restart",
+			SourceDocPaths: sourcePaths,
+		}
+		if err := orch.RunWorkflow(goal); err != nil {
+			log.Printf("[workflow] resumed workflow completed with error: %v", err)
+		} else {
+			log.Printf("[workflow] resumed workflow completed successfully")
+		}
+	}()
+
+	// Brief pause to let the goroutine start and reach the gate wait point.
+	time.Sleep(500 * time.Millisecond)
+
+	return orch, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +308,10 @@ func HandleStartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 // HandleGateApprove returns an HTTP handler for POST /api/tasks/{id}/approve.
 // It delivers a gate approval response to the running orchestrator. The
 // request body may contain corrections (gate 1) or resolutions (gate 2).
+//
+// If no orchestrator is running but on-disk state shows a gate state (e.g.
+// after a server restart), the handler automatically resumes the workflow
+// before delivering the gate response.
 func HandleGateApprove(manager *WorkflowManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -249,8 +321,11 @@ func HandleGateApprove(manager *WorkflowManager) http.HandlerFunc {
 
 		orch := manager.GetOrchestrator()
 		if orch == nil {
-			writeError(w, http.StatusNotFound, "no active workflow")
-			return
+			// No orchestrator running — try to resume from on-disk gate state.
+			orch = tryResumeFromDiskState(manager, w)
+			if orch == nil {
+				return // error already written to response
+			}
 		}
 
 		var req gateApproveRequest
@@ -300,6 +375,10 @@ func HandleGateApprove(manager *WorkflowManager) http.HandlerFunc {
 
 // HandleGateReject returns an HTTP handler for POST /api/tasks/{id}/reject.
 // It delivers a cancellation/rejection gate response to the orchestrator.
+//
+// If no orchestrator is running but on-disk state shows a gate state (e.g.
+// after a server restart), the handler automatically resumes the workflow
+// before delivering the rejection.
 func HandleGateReject(manager *WorkflowManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -309,8 +388,11 @@ func HandleGateReject(manager *WorkflowManager) http.HandlerFunc {
 
 		orch := manager.GetOrchestrator()
 		if orch == nil {
-			writeError(w, http.StatusNotFound, "no active workflow")
-			return
+			// No orchestrator running — try to resume from on-disk gate state.
+			orch = tryResumeFromDiskState(manager, w)
+			if orch == nil {
+				return // error already written to response
+			}
 		}
 
 		gateResp := specworkflow.GateResponse{Action: "cancel"}
@@ -757,6 +839,32 @@ func hasAnswerResolution(resolutions []specworkflow.AmbiguityResolution) bool {
 		}
 	}
 	return false
+}
+
+// tryResumeFromDiskState attempts to find a gate-state workflow on disk and
+// resume it. If successful, it returns the resumed orchestrator. If not (no
+// gate state found, or resume fails), it writes an error to the response and
+// returns nil.
+func tryResumeFromDiskState(manager *WorkflowManager, w http.ResponseWriter) *specworkflow.Orchestrator {
+	diskState := findLatestDiskState(manager.workspaceDir)
+	if diskState == nil || !specworkflow.IsGateState(diskState.State) {
+		writeError(w, http.StatusNotFound, "no active workflow")
+		return nil
+	}
+
+	featureName := diskState.FeatureName
+	if featureName == "" {
+		writeError(w, http.StatusNotFound, "no active workflow")
+		return nil
+	}
+
+	orch, err := manager.ResumeFromGate(featureName)
+	if err != nil {
+		writeError(w, http.StatusConflict, fmt.Sprintf("failed to resume workflow: %v", err))
+		return nil
+	}
+
+	return orch
 }
 
 // findLatestDiskState scans workspace/specs/ for the most recently updated
