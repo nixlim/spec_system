@@ -1,0 +1,11 @@
+{
+  "skill_name": "data-model-audit",
+  "evals": [
+    {
+      "id": 0,
+      "prompt": "audit the data model",
+      "expected_output": "A structured report evaluating the project's data model across 5 maturity levels with evidence from git history, schema files, and code analysis",
+      "files": []
+    }
+  ]
+}

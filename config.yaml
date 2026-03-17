@@ -1,0 +1,17 @@
+# Adversarial Spec System configuration
+# See internal/specworkflow/config.go for all available fields.
+
+# Skill directory paths (required for workflow execution)
+skill_paths:
+  plan_spec: "/Users/nixlim/.claude/skills/plan-spec"
+  grill_spec: "/Users/nixlim/.claude/skills/grill-spec"
+
+# Workflow limits (defaults shown — uncomment to override)
+# max_rounds: 5
+# min_rounds: 2
+# max_total_findings: 60
+# staleness_threshold: 2
+# max_wall_clock_minutes: 60
+# max_cost_usd: 50.0
+# max_gate_corrections: 3
+# max_retries: 2

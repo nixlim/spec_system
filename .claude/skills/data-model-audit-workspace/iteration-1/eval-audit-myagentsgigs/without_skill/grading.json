@@ -1,0 +1,14 @@
+{
+  "eval_id": 0,
+  "eval_name": "audit-myagentsgigs",
+  "configuration": "without_skill",
+  "expectations": [
+    {"text": "has-5-levels", "passed": false, "evidence": "Uses its own structure (Overview, Strengths, Issues, Alignment Matrix, Summary) — does not use the 5-level maturity framework"},
+    {"text": "uses-git-evidence", "passed": false, "evidence": "Mentions B0/B1 phases but does not reference any specific git dates, commit hashes, or commit counts"},
+    {"text": "finds-schema-files", "passed": true, "evidence": "Identifies all migrations 000001-000007 and references OpenAPI spec, though does not list commit dates"},
+    {"text": "per-level-scoring", "passed": false, "evidence": "Uses Medium/Low/Informational severity on issues, not a maturity-level Pass/Partial/Fail framework"},
+    {"text": "has-recommendations", "passed": true, "evidence": "Each issue includes a Recommendation section with specific fixes"},
+    {"text": "churn-analysis", "passed": false, "evidence": "No git churn analysis — does not compare schema change frequency to code change frequency"},
+    {"text": "structured-report", "passed": true, "evidence": "Well-structured with headings, tables (overview, alignment matrix, summary assessment), clear sections"}
+  ]
+}

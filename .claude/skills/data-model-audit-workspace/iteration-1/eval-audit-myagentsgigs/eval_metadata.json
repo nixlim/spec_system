@@ -1,0 +1,14 @@
+{
+  "eval_id": 0,
+  "eval_name": "audit-myagentsgigs",
+  "prompt": "audit the data model",
+  "assertions": [
+    {"id": "has-5-levels", "text": "Report evaluates all 5 maturity levels (Existence, Completeness, Stability, Correspondence, Sufficiency)"},
+    {"id": "uses-git-evidence", "text": "Report references actual git history (dates, commit hashes, or commit counts) as evidence"},
+    {"id": "finds-schema-files", "text": "Report identifies SQL migrations in db/migrations/ and openapi.yaml"},
+    {"id": "per-level-scoring", "text": "Each evaluated level has an explicit Pass/Partial/Fail score"},
+    {"id": "has-recommendations", "text": "Report includes actionable recommendations for improvement"},
+    {"id": "churn-analysis", "text": "Report includes quantitative schema-vs-code churn data"},
+    {"id": "structured-report", "text": "Output follows a clear structured format with headings, tables, and sections"}
+  ]
+}

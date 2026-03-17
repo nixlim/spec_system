@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Adversarial Spec System</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Gate panels appear here when gate_request events arrive -->
+    <div id="gate-panels"></div>
+
+    <!-- Circuit breaker / agent error banners -->
+    <div id="alert-banners"></div>
+
+    <nav id="sidebar">
+      <div class="sidebar-header">
+        <h1>Spec System</h1>
+        <span id="ws-indicator" class="ws-indicator ws-disconnected" title="WebSocket disconnected">&#x25CF;</span>
+      </div>
+      <ul class="nav-tabs">
+        <li><button class="nav-tab active" data-tab="controls">Controls</button></li>
+        <li><button class="nav-tab" data-tab="spec">Spec</button></li>
+        <li><button class="nav-tab" data-tab="issues">Issues</button></li>
+        <li><button class="nav-tab" data-tab="convergence">Convergence</button></li>
+      </ul>
+      <div class="sidebar-footer">
+        <button id="btn-cancel-workflow" class="btn btn-danger btn-sm">Cancel Workflow</button>
+      </div>
+    </nav>
+
+    <main id="content">
+      <!-- Workflow Status Panel — visible on all tabs -->
+      <div id="workflow-status" class="workflow-status-panel" hidden>
+        <div class="status-header">
+          <h3>Workflow Status</h3>
+          <span id="workflow-state" class="state-badge">IDLE</span>
+        </div>
+        <div class="status-details">
+          <div class="status-metric">
+            <span class="metric-label">Feature</span>
+            <span id="status-feature" class="metric-value">-</span>
+          </div>
+          <div class="status-metric">
+            <span class="metric-label">Round</span>
+            <span id="status-round" class="metric-value">-</span>
+          </div>
+          <div class="status-metric">
+            <span class="metric-label">Cost</span>
+            <span id="status-cost" class="metric-value">$0.00</span>
+          </div>
+          <div class="status-metric">
+            <span class="metric-label">Time</span>
+            <span id="status-time" class="metric-value">0s</span>
+          </div>
+          <div class="status-metric">
+            <span class="metric-label">Agents</span>
+            <span id="status-invocations" class="metric-value">0</span>
+          </div>
+        </div>
+        <div class="status-agent-metrics" id="agent-metrics" hidden>
+          <div class="status-metric">
+            <span class="metric-label">Tokens In</span>
+            <span id="metric-tokens-in" class="metric-value">0</span>
+          </div>
+          <div class="status-metric">
+            <span class="metric-label">Tokens Out</span>
+            <span id="metric-tokens-out" class="metric-value">0</span>
+          </div>
+          <div class="status-metric">
+            <span class="metric-label">Cache Read</span>
+            <span id="metric-tokens-cache" class="metric-value">0</span>
+          </div>
+          <div class="status-metric">
+            <span class="metric-label">API Calls</span>
+            <span id="metric-api-calls" class="metric-value">0</span>
+          </div>
+          <div class="status-metric">
+            <span class="metric-label">Agent Cost</span>
+            <span id="metric-agent-cost" class="metric-value">$0.00</span>
+          </div>
+        </div>
+        <div id="status-activity" class="status-activity">
+          <!-- Recent activity log entries appear here -->
+        </div>
+      </div>
+
+      <!-- Controls Tab -->
+      <section id="tab-controls" class="tab-panel active">
+        <h2>Start Workflow</h2>
+        <form id="goal-form" class="card">
+          <div class="form-group">
+            <label for="goal-title">Title</label>
+            <input type="text" id="goal-title" name="title" required placeholder="Feature title">
+          </div>
+          <div class="form-group">
+            <label for="goal-feature-name">Feature Name</label>
+            <input type="text" id="goal-feature-name" name="feature_name" required placeholder="e.g. user-auth">
+          </div>
+          <div class="form-group">
+            <label for="goal-description">Description</label>
+            <textarea id="goal-description" name="description" rows="4" required placeholder="Describe the feature..."></textarea>
+          </div>
+          <button type="submit" id="goal-submit" class="btn btn-primary">Submit Goal</button>
+        </form>
+
+        <h2>Document Upload</h2>
+        <div class="card">
+          <div id="upload-zone" class="upload-zone" tabindex="0" role="button" aria-label="Click or drag files to upload">
+            <p class="upload-zone-text">Drag &amp; drop files here, or click to select</p>
+            <p class="upload-zone-hint">Allowed: .md, .txt, .pdf, .go, .ts, .py, .js, .yaml, .json</p>
+            <input type="file" id="upload-input" multiple hidden
+                   accept=".md,.txt,.pdf,.go,.ts,.py,.js,.yaml,.json">
+          </div>
+          <div id="upload-progress"></div>
+          <table id="upload-file-list" class="table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Size</th>
+                <th>Modified</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Spec Tab -->
+      <section id="tab-spec" class="tab-panel">
+        <div class="spec-toolbar">
+          <h2>Specification</h2>
+          <div class="spec-controls">
+            <label for="spec-version-select">Version:</label>
+            <select id="spec-version-select"><option value="">--</option></select>
+            <button id="btn-diff" class="btn btn-sm" disabled>Diff with previous</button>
+          </div>
+        </div>
+        <div id="spec-diff-view" class="diff-view" hidden></div>
+        <div id="spec-content" class="card spec-rendered"></div>
+      </section>
+
+      <!-- Issues Tab -->
+      <section id="tab-issues" class="tab-panel">
+        <h2>Issue Tracker</h2>
+        <div class="issue-summary card">
+          <span class="summary-stat"><strong id="stat-open-critical">0</strong> Open Critical</span>
+          <span class="summary-stat"><strong id="stat-open-major">0</strong> Open Major</span>
+          <span class="summary-stat"><strong id="stat-total-raised">0</strong> Total Raised</span>
+          <span class="summary-stat"><strong id="stat-total-closed">0</strong> Total Closed</span>
+        </div>
+        <div class="issue-filters card">
+          <label>Severity:
+            <select id="filter-severity">
+              <option value="">All</option>
+              <option value="CRITICAL">Critical</option>
+              <option value="MAJOR">Major</option>
+              <option value="MINOR">Minor</option>
+              <option value="OBSERVATION">Observation</option>
+            </select>
+          </label>
+          <label>Status:
+            <select id="filter-status">
+              <option value="">All</option>
+              <option value="raised">Raised</option>
+              <option value="addressed">Addressed</option>
+              <option value="verified">Verified</option>
+              <option value="closed">Closed</option>
+              <option value="reopened">Reopened</option>
+              <option value="dismissed">Dismissed</option>
+              <option value="acknowledged">Acknowledged</option>
+            </select>
+          </label>
+          <label>Lens:
+            <select id="filter-lens">
+              <option value="">All</option>
+            </select>
+          </label>
+        </div>
+        <table id="issue-table" class="table card">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Severity</th>
+              <th>Lens</th>
+              <th>Section</th>
+              <th>Status</th>
+              <th>Round Raised</th>
+              <th>Round Closed</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <!-- Convergence Tab -->
+      <section id="tab-convergence" class="tab-panel">
+        <h2>Convergence Dashboard</h2>
+        <div id="convergence-metrics" class="convergence-grid">
+          <div class="card metric-card">
+            <div class="metric-label">Round</div>
+            <div class="metric-value" id="conv-round">-</div>
+          </div>
+          <div class="card metric-card">
+            <div class="metric-label">Verdict</div>
+            <div class="metric-value" id="conv-verdict">-</div>
+          </div>
+          <div class="card metric-card">
+            <div class="metric-label">Progress</div>
+            <div class="metric-value" id="conv-progress">-</div>
+          </div>
+          <div class="card metric-card">
+            <div class="metric-label">Open Critical</div>
+            <div class="metric-value" id="conv-open-critical">0</div>
+          </div>
+          <div class="card metric-card">
+            <div class="metric-label">Open Major</div>
+            <div class="metric-value" id="conv-open-major">0</div>
+          </div>
+          <div class="card metric-card">
+            <div class="metric-label">Open Minor</div>
+            <div class="metric-value" id="conv-open-minor">0</div>
+          </div>
+        </div>
+        <div id="convergence-detail" class="card">
+          <h3>Rationale</h3>
+          <p id="conv-rationale">No convergence data yet.</p>
+        </div>
+        <div id="convergence-history" class="card">
+          <h3>Round History</h3>
+          <table class="table">
+            <thead>
+              <tr><th>Round</th><th>Verdict</th><th>Critical</th><th>Major</th><th>Minor</th><th>Trend</th></tr>
+            </thead>
+            <tbody id="conv-history-body"></tbody>
+          </table>
+        </div>
+        <div id="stale-warnings" class="card" hidden>
+          <h3>Stale Issue Warnings</h3>
+          <ul id="stale-list"></ul>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
