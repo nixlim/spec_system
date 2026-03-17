@@ -89,6 +89,12 @@ func main() {
 		otelMux := http.NewServeMux()
 		otelMux.HandleFunc("/v1/metrics", otelReceiver.HandleMetrics)
 		otelMux.HandleFunc("/v1/logs", otelReceiver.HandleLogs)
+		otelMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			log.Printf("[otel] catch-all: %s %s (content-type: %s)", r.Method, r.URL.Path, r.Header.Get("Content-Type"))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("{}"))
+		})
 		go func() {
 			otelAddr := fmt.Sprintf(":%d", *otelPort)
 			log.Printf("OTLP receiver listening on %s", otelAddr)

@@ -155,6 +155,9 @@ type otlpLogRecord struct {
 
 // HandleMetrics processes OTLP metric export requests (POST /v1/metrics).
 func (recv *OTELReceiver) HandleMetrics(w http.ResponseWriter, r *http.Request) {
+	log.Printf("[otel] /v1/metrics hit: method=%s, content-type=%s, content-length=%s",
+		r.Method, r.Header.Get("Content-Type"), r.Header.Get("Content-Length"))
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -165,6 +168,8 @@ func (recv *OTELReceiver) HandleMetrics(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
 	}
+
+	log.Printf("[otel] /v1/metrics body: %d bytes", len(body))
 
 	var req otlpMetricsRequest
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -193,6 +198,9 @@ func (recv *OTELReceiver) HandleMetrics(w http.ResponseWriter, r *http.Request) 
 
 // HandleLogs processes OTLP log export requests (POST /v1/logs).
 func (recv *OTELReceiver) HandleLogs(w http.ResponseWriter, r *http.Request) {
+	log.Printf("[otel] /v1/logs hit: method=%s, content-type=%s, content-length=%s",
+		r.Method, r.Header.Get("Content-Type"), r.Header.Get("Content-Length"))
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return

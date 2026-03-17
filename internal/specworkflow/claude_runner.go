@@ -347,6 +347,8 @@ func DefaultClaudeRunner(workspaceDir string, otelPort int) *ClaudeRunner {
 		env["OTEL_EXPORTER_OTLP_ENDPOINT"] = fmt.Sprintf("http://localhost:%d", otelPort)
 		env["OTEL_METRIC_EXPORT_INTERVAL"] = "10000"
 		env["OTEL_LOGS_EXPORT_INTERVAL"] = "5000"
+		env["OTEL_LOG_TOOL_DETAILS"] = "1"
+		env["OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE"] = "cumulative"
 	}
 
 	return &ClaudeRunner{
