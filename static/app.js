@@ -956,6 +956,44 @@
         var isActive = !isTerminal && !isGate && stateUpper !== "UNKNOWN";
 
         if (isTerminal && stateUpper !== "UNKNOWN") {
+          // Resume button — continues from where it left off
+          if (stateUpper === "ESCALATED" || stateUpper === "ERROR") {
+            var termResumeBtn = el("button", {
+              className: "btn btn-sm",
+              textContent: "Resume",
+              style: "background:#d4edda;color:#155724;border-color:#c3e6cb;"
+            });
+            termResumeBtn.addEventListener("click", (function (featureName) {
+              return function () {
+                if (!confirm("Resume workflow \"" + featureName + "\" from where it left off? The wall clock timer will be reset.")) return;
+                termResumeBtn.disabled = true;
+                termResumeBtn.textContent = "Resuming...";
+                fetchJSON("/api/workflow/resume", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ feature_name: featureName })
+                }).then(function (data) {
+                  updateWorkflowStatus({
+                    state: data.resume_state || "REVIEWING",
+                    feature_name: featureName,
+                    round: 1,
+                    cost_usd: 0,
+                    wall_clock_seconds: 0,
+                    agent_invocations: 0
+                  });
+                  addActivityEntry("Workflow resumed: " + featureName + " from " + (data.resume_state || "?"), "info");
+                  startWorkflowPoller();
+                  loadFeatureList();
+                }).catch(function (err) {
+                  alert("Resume failed: " + err.message);
+                  termResumeBtn.disabled = false;
+                  termResumeBtn.textContent = "Resume";
+                });
+              };
+            })(f.feature_name));
+            actions.appendChild(termResumeBtn);
+          }
+
           // Restart button — resets and pre-fills form
           var restartBtn = el("button", {
             className: "btn btn-primary btn-sm",

@@ -799,6 +799,143 @@ func HandleRetryWorkflow(manager *WorkflowManager) http.HandlerFunc {
 	}
 }
 
+// HandleResumeWorkflow returns an HTTP handler for POST /api/workflow/resume.
+// It resumes a workflow from ESCALATED, ERROR, or any paused state by
+// determining the best state to resume from based on existing artefacts,
+// resetting the wall clock timer, and starting a new orchestrator.
+func HandleResumeWorkflow(manager *WorkflowManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			FeatureName string `json:"feature_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+			return
+		}
+		if req.FeatureName == "" {
+			writeError(w, http.StatusBadRequest, "feature_name is required")
+			return
+		}
+
+		manager.mu.Lock()
+		// Cancel existing orchestrator if any.
+		if orch := manager.orchestrator; orch != nil && orch.IsRunning() {
+			orch.Cancel()
+			manager.orchestrator = nil
+			time.Sleep(500 * time.Millisecond)
+		}
+		manager.mu.Unlock()
+
+		// Load persisted state.
+		specDir := filepath.Join(manager.workspaceDir, "specs", req.FeatureName)
+		state, err := specworkflow.LoadState(specDir)
+		if err != nil {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("no workflow state found for %q", req.FeatureName))
+			return
+		}
+
+		// Determine the best state to resume from based on artefacts on disk.
+		resumeState := determineResumeState(state, manager.workspaceDir, req.FeatureName)
+
+		// Update the persisted state: reset timer, set resumable state.
+		state.State = resumeState
+		state.StartedAt = time.Now().UTC().Format(time.RFC3339)
+		if err := specworkflow.SaveState(specDir, state); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save state: %v", err))
+			return
+		}
+
+		log.Printf("[workflow] resuming %q from %s (was %s, started_at reset)", req.FeatureName, resumeState, state.State)
+
+		// Create and start a new orchestrator.
+		sourcePaths := discoverSourceDocs(manager.workspaceDir)
+		// Also check per-workflow source docs.
+		featureSourceDir := filepath.Join(specDir, "source-docs")
+		if entries, err := os.ReadDir(featureSourceDir); err == nil {
+			for _, e := range entries {
+				if !e.IsDir() {
+					sourcePaths = append(sourcePaths, filepath.Join(featureSourceDir, e.Name()))
+				}
+			}
+		}
+
+		orchConfig := specworkflow.OrchestratorConfig{
+			WorkspaceDir:   manager.workspaceDir,
+			FeatureName:    req.FeatureName,
+			SourceDocPaths: sourcePaths,
+			Config:         manager.config,
+			Runner:         specworkflow.DefaultClaudeRunner(manager.workspaceDir, manager.otelPort),
+			Emitter:        manager.emitter,
+		}
+		if manager.metricsStore != nil {
+			orchConfig.CostProvider = NewMetricsCostProvider(manager.metricsStore, req.FeatureName)
+		}
+
+		orch, err := specworkflow.NewOrchestrator(orchConfig)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create orchestrator: %v", err))
+			return
+		}
+
+		manager.mu.Lock()
+		manager.orchestrator = orch
+		manager.mu.Unlock()
+
+		go func() {
+			goal := specworkflow.GoalInput{
+				Title:          req.FeatureName,
+				Description:    "Resumed workflow",
+				SourceDocPaths: sourcePaths,
+			}
+			if err := orch.RunWorkflow(goal); err != nil {
+				log.Printf("[workflow] resumed workflow %q completed with error: %v", req.FeatureName, err)
+			} else {
+				log.Printf("[workflow] resumed workflow %q completed successfully", req.FeatureName)
+			}
+		}()
+
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":       "resumed",
+			"resume_state": resumeState.String(),
+			"message":      fmt.Sprintf("Workflow resumed from %s", resumeState),
+		})
+	}
+}
+
+// determineResumeState figures out the best state to resume a workflow from
+// based on what artefacts exist on disk. It works backward from the most
+// advanced state that has its prerequisites met.
+func determineResumeState(state *specworkflow.WorkflowStateJSON, workspaceDir, featureName string) specworkflow.WorkflowState {
+	specDir := filepath.Join(workspaceDir, "specs", featureName)
+
+	// If drafter output exists, we can go to REVIEWING (or HUMAN_GATE_2).
+	drafterPath := filepath.Join(specDir, "drafter-output.json")
+	if _, err := os.Stat(drafterPath); err == nil {
+		// Drafter output exists. Check if spec-v0.md exists too.
+		specPath := filepath.Join(specDir, "spec-v0.md")
+		if _, err := os.Stat(specPath); err == nil {
+			// Both exist — resume into REVIEWING.
+			return specworkflow.StateReviewing
+		}
+		// Drafter output but no spec — resume into HUMAN_GATE_2.
+		return specworkflow.StateHumanGate2
+	}
+
+	// If discovery output exists, we can go to DRAFTING (or HUMAN_GATE_1).
+	discoveryPath := filepath.Join(specDir, "discovery-output.json")
+	if _, err := os.Stat(discoveryPath); err == nil {
+		return specworkflow.StateDrafting
+	}
+
+	// Nothing useful on disk — start from discovery.
+	return specworkflow.StateDiscovery
+}
+
 // HandleRestartWorkflow returns an HTTP handler for POST /api/workflow/restart.
 // It stops any running workflow, deletes the feature's spec directory so the
 // workflow starts completely fresh, resets persisted metrics, and starts a
