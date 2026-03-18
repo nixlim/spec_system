@@ -284,6 +284,26 @@
     }
   }
 
+  // Client-side wall clock timer — ticks every second so the TIME display
+  // updates live without needing a server round-trip.
+  var wallClockTimer = null;
+  var wallClockSeconds = 0;
+
+  function startWallClockTimer() {
+    if (wallClockTimer) return; // already running
+    wallClockTimer = setInterval(function () {
+      wallClockSeconds++;
+      $("#status-time").textContent = formatDuration(wallClockSeconds);
+    }, 1000);
+  }
+
+  function stopWallClockTimer() {
+    if (wallClockTimer) {
+      clearInterval(wallClockTimer);
+      wallClockTimer = null;
+    }
+  }
+
   function updateWorkflowStatus(data) {
     var panel = $("#workflow-status");
     panel.hidden = false;
@@ -307,10 +327,19 @@
       $("#status-cost").textContent = formatCost(data.cost_usd);
     }
     if (data.wall_clock_seconds != null) {
-      $("#status-time").textContent = formatDuration(data.wall_clock_seconds);
+      wallClockSeconds = Math.round(data.wall_clock_seconds);
+      $("#status-time").textContent = formatDuration(wallClockSeconds);
     }
     if (data.agent_invocations != null) {
       $("#status-invocations").textContent = data.agent_invocations;
+    }
+
+    // Start or stop the client-side timer based on workflow state.
+    var upper = state.toUpperCase();
+    if (upper !== "IDLE" && upper !== "FINALIZED" && upper !== "ESCALATED") {
+      startWallClockTimer();
+    } else {
+      stopWallClockTimer();
     }
   }
 
