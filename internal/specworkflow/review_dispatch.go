@@ -30,6 +30,15 @@ type AgentRunner interface {
 	Run(prompt string, outputPath string, timeoutSeconds int) (exitCode int, stderr string, costUSD float64, durationMS int64, err error)
 }
 
+// CostProvider abstracts read access to cumulative cost data from an external
+// telemetry source (e.g. the OTEL receiver). The orchestrator uses this to
+// sync authoritative cost data into workflow state, since the Claude CLI may
+// report zero cost while OTEL telemetry captures the real cost.
+type CostProvider interface {
+	// GetCostUSD returns the cumulative cost in USD tracked by the provider.
+	GetCostUSD() float64
+}
+
 // ---------------------------------------------------------------------------
 // Result types
 // ---------------------------------------------------------------------------

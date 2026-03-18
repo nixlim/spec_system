@@ -55,6 +55,18 @@ func specFilePath(workspaceDir, featureName string, version int) string {
 	return filepath.Join(specVersionsDir(workspaceDir, featureName), fmt.Sprintf("spec-v%d.md", version))
 }
 
+// resolveFeatureName returns the dynamic feature name from the running
+// workflow state, falling back to the static config value. This ensures
+// spec endpoints work with any feature name, not just a hardcoded default.
+func resolveFeatureName(config SpecAPIConfig) string {
+	if config.GetState != nil {
+		if state := config.GetState(); state != nil && state.FeatureName != "" {
+			return state.FeatureName
+		}
+	}
+	return config.FeatureName
+}
+
 // listSpecFiles returns all spec-v*.md entries in the spec versions directory,
 // sorted by version number ascending.
 func listSpecFiles(workspaceDir, featureName string) ([]specVersionInfo, error) {
@@ -129,7 +141,7 @@ func HandleGetCurrentSpec(config SpecAPIConfig) http.HandlerFunc {
 			return
 		}
 
-		path := specFilePath(config.WorkspaceDir, config.FeatureName, version)
+		path := specFilePath(config.WorkspaceDir, resolveFeatureName(config), version)
 		content, err := os.ReadFile(path)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -154,7 +166,7 @@ func HandleListSpecVersions(config SpecAPIConfig) http.HandlerFunc {
 			return
 		}
 
-		versions, err := listSpecFiles(config.WorkspaceDir, config.FeatureName)
+		versions, err := listSpecFiles(config.WorkspaceDir, resolveFeatureName(config))
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to list spec versions")
 			return
@@ -189,7 +201,7 @@ func HandleGetSpecVersion(config SpecAPIConfig) http.HandlerFunc {
 			return
 		}
 
-		path := specFilePath(config.WorkspaceDir, config.FeatureName, n)
+		path := specFilePath(config.WorkspaceDir, resolveFeatureName(config), n)
 		content, err := os.ReadFile(path)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -232,7 +244,8 @@ func HandleGetSpecDiff(config SpecAPIConfig) http.HandlerFunc {
 			return
 		}
 
-		contentA, err := os.ReadFile(specFilePath(config.WorkspaceDir, config.FeatureName, a))
+		feature := resolveFeatureName(config)
+		contentA, err := os.ReadFile(specFilePath(config.WorkspaceDir, feature, a))
 		if err != nil {
 			if os.IsNotExist(err) {
 				writeError(w, http.StatusNotFound, fmt.Sprintf("spec-v%d.md not found", a))
@@ -242,7 +255,7 @@ func HandleGetSpecDiff(config SpecAPIConfig) http.HandlerFunc {
 			return
 		}
 
-		contentB, err := os.ReadFile(specFilePath(config.WorkspaceDir, config.FeatureName, b))
+		contentB, err := os.ReadFile(specFilePath(config.WorkspaceDir, feature, b))
 		if err != nil {
 			if os.IsNotExist(err) {
 				writeError(w, http.StatusNotFound, fmt.Sprintf("spec-v%d.md not found", b))

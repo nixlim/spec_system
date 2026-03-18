@@ -47,6 +47,14 @@ type OTELReceiver struct {
 	totalAPICalls     int
 	toolResults       []ToolResultEvent
 	broadcastCount    int
+
+	// metricsStore persists telemetry to SQLite so data survives
+	// browser refreshes and server restarts. Nil if not configured.
+	metricsStore *MetricsStore
+	// featureNameFn returns the current workflow's feature name.
+	// Used to associate metrics with the correct workflow run.
+	// Nil if not configured (metrics won't be persisted).
+	featureNameFn func() string
 }
 
 // otelLogsHandler implements LogsServiceServer separately from OTELReceiver.
@@ -100,6 +108,38 @@ func NewOTELReceiver(hub *WebSocketHub, emitter specworkflow.EventEmitter) *OTEL
 		hub:     hub,
 		emitter: emitter,
 	}
+}
+
+// SetMetricsStore configures SQLite persistence for telemetry data.
+// Must be called before Start. The featureNameFn callback returns the
+// current workflow's feature name so metrics can be associated with the
+// correct workflow run.
+func (recv *OTELReceiver) SetMetricsStore(store *MetricsStore, featureNameFn func() string) {
+	recv.metricsStore = store
+	recv.featureNameFn = featureNameFn
+}
+
+// RestoreFromStore loads persisted aggregate metrics from SQLite into
+// the in-memory accumulators so the OTEL receiver continues from where
+// it left off after a server restart. Call after SetMetricsStore and
+// before Start.
+func (recv *OTELReceiver) RestoreFromStore(featureName string) {
+	if recv.metricsStore == nil || featureName == "" {
+		return
+	}
+	m, err := recv.metricsStore.GetWorkflowMetrics(featureName)
+	if err != nil || m == nil {
+		return
+	}
+	recv.mu.Lock()
+	defer recv.mu.Unlock()
+	recv.inputTokens = m.InputTokens
+	recv.outputTokens = m.OutputTokens
+	recv.cacheReadTokens = m.CacheReadTokens
+	recv.totalCostUSD = m.TotalCostUSD
+	recv.totalAPICalls = m.TotalAPICalls
+	log.Printf("[otel] restored metrics from store: feature=%s cost=$%.4f api_calls=%d",
+		featureName, m.TotalCostUSD, m.TotalAPICalls)
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +339,15 @@ func (recv *OTELReceiver) processLogRecord(lr *logspb.LogRecord) {
 			},
 		})
 
+		// Persist tool event to SQLite.
+		recv.persistEvent(MetricEvent{
+			EventType:  "tool",
+			ToolName:   toolName,
+			Success:    success,
+			DurationMS: durationMS,
+			Timestamp:  now,
+		})
+
 	case "claude_code.api_request", "api_request":
 		model := attrString(attrs, "model")
 		costUSD := attrFloat(attrs, "cost_usd")
@@ -331,6 +380,16 @@ func (recv *OTELReceiver) processLogRecord(lr *logspb.LogRecord) {
 				DurationMS: durationMS,
 				Timestamp:  now,
 			},
+		})
+
+		// Persist API event to SQLite.
+		recv.persistEvent(MetricEvent{
+			EventType:  "api",
+			Model:      model,
+			Success:    true,
+			DurationMS: durationMS,
+			CostUSD:    costUSD,
+			Timestamp:  now,
 		})
 
 	case "claude_code.api_error", "api_error":
@@ -381,6 +440,52 @@ func (recv *OTELReceiver) emitMetricsEvent() {
 		Data:  payload,
 	}
 	recv.hub.Broadcast(event)
+
+	// Persist aggregate metrics to SQLite.
+	recv.persistAggregateMetrics(payload)
+}
+
+// persistAggregateMetrics writes the current aggregate counters to SQLite.
+// Runs asynchronously to avoid blocking the gRPC handler.
+func (recv *OTELReceiver) persistAggregateMetrics(p AgentMetricsPayload) {
+	if recv.metricsStore == nil || recv.featureNameFn == nil {
+		return
+	}
+	feature := recv.featureNameFn()
+	if feature == "" {
+		return
+	}
+	go func() {
+		if err := recv.metricsStore.UpsertWorkflowMetrics(WorkflowMetrics{
+			FeatureName:     feature,
+			InputTokens:     p.InputTokens,
+			OutputTokens:    p.OutputTokens,
+			CacheReadTokens: p.CacheReadTokens,
+			TotalCostUSD:    p.TotalCostUSD,
+			TotalAPICalls:   p.TotalAPICalls,
+			UpdatedAt:       p.Timestamp,
+		}); err != nil {
+			log.Printf("[otel] persist aggregate metrics: %v", err)
+		}
+	}()
+}
+
+// persistEvent writes a single tool or API event to SQLite.
+// Runs asynchronously to avoid blocking the gRPC handler.
+func (recv *OTELReceiver) persistEvent(e MetricEvent) {
+	if recv.metricsStore == nil || recv.featureNameFn == nil {
+		return
+	}
+	feature := recv.featureNameFn()
+	if feature == "" {
+		return
+	}
+	e.FeatureName = feature
+	go func() {
+		if err := recv.metricsStore.RecordEvent(e); err != nil {
+			log.Printf("[otel] persist event: %v", err)
+		}
+	}()
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +585,15 @@ func attrFloat(attrs map[string]interface{}, key string) float64 {
 // ---------------------------------------------------------------------------
 
 // ResetMetrics resets accumulated metrics. Useful when a new workflow starts.
+// GetCostUSD returns the cumulative cost in USD tracked by the receiver.
+// It implements the specworkflow.CostProvider interface so the orchestrator
+// can sync authoritative OTEL cost data into workflow state.
+func (recv *OTELReceiver) GetCostUSD() float64 {
+	recv.mu.Lock()
+	defer recv.mu.Unlock()
+	return recv.totalCostUSD
+}
+
 func (recv *OTELReceiver) ResetMetrics() {
 	recv.mu.Lock()
 	defer recv.mu.Unlock()

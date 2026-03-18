@@ -415,6 +415,57 @@
     addActivityEntry(msg, "info");
   }
 
+  // -----------------------------------------------------------------------
+  // Persisted Metrics Restoration
+  // -----------------------------------------------------------------------
+
+  /**
+   * Loads persisted OTEL metrics and events from SQLite via the HTTP API.
+   * Called on page load and WebSocket reconnect to restore dashboard state
+   * that would otherwise be lost on browser refresh.
+   */
+  function restorePersistedMetrics(featureName) {
+    if (!featureName) return;
+    fetchJSON("/api/metrics?feature=" + encodeURIComponent(featureName)).then(function (data) {
+      if (!data) return;
+
+      // Restore aggregate metrics panel (row 2)
+      if (data.metrics) {
+        onAgentMetrics({
+          input_tokens: data.metrics.input_tokens || 0,
+          output_tokens: data.metrics.output_tokens || 0,
+          cache_read_tokens: data.metrics.cache_read_tokens || 0,
+          total_api_calls: data.metrics.total_api_calls || 0,
+          total_cost_usd: data.metrics.total_cost_usd || 0
+        });
+      }
+
+      // Restore activity feed from persisted events (newest first from API,
+      // but we add oldest first so newest ends up on top).
+      if (data.events && data.events.length > 0) {
+        var events = data.events.slice().reverse(); // oldest first
+        for (var i = 0; i < events.length; i++) {
+          var evt = events[i];
+          if (evt.event_type === "tool") {
+            var toolMsg = "Tool: " + (evt.tool_name || "?");
+            if (evt.duration_ms) toolMsg += " (" + Math.round(evt.duration_ms) + "ms)";
+            if (!evt.success) toolMsg += " FAILED";
+            addActivityEntry(toolMsg, evt.success ? "success" : "error");
+          } else if (evt.event_type === "api") {
+            var apiMsg = "API: " + (evt.model || "?");
+            var apiDetails = [];
+            if (evt.duration_ms) apiDetails.push(Math.round(evt.duration_ms) + "ms");
+            if (evt.cost_usd) apiDetails.push(formatCost(evt.cost_usd));
+            if (apiDetails.length > 0) apiMsg += " (" + apiDetails.join(", ") + ")";
+            addActivityEntry(apiMsg, "info");
+          }
+        }
+      }
+    }).catch(function (err) {
+      console.warn("Failed to restore persisted metrics:", err);
+    });
+  }
+
   function pollWorkflowStatus() {
     fetchJSON("/api/workflow/status").then(function (data) {
       if (!data || !data.state) return;
@@ -500,10 +551,19 @@
     ws = new WebSocket(url);
 
     ws.onopen = function () {
+      var wasReconnect = reconnectAttempt > 0;
       reconnectAttempt = 0;
       setWsStatus("connected");
       // Poll current workflow status to initialize panel if already running
       pollWorkflowStatus();
+      // On reconnect, restore persisted metrics that may have been missed.
+      if (wasReconnect) {
+        fetchJSON("/api/workflow/status").then(function (status) {
+          if (status && status.feature_name && status.state && status.state.toUpperCase() !== "IDLE") {
+            restorePersistedMetrics(status.feature_name);
+          }
+        }).catch(function () {});
+      }
     };
 
     ws.onclose = function () {
@@ -2077,12 +2137,18 @@
     loadFeatureList();
     startFeatureListPolling();
 
-    // Check if we need to show a gate panel on page load (e.g. after refresh)
+    // Check if we need to show a gate panel on page load (e.g. after refresh).
+    // Also restore persisted OTEL metrics so dashboard data survives refresh.
     fetchJSON("/api/workflow/status").then(function (status) {
       if (!status || !status.state) return;
       var state = status.state.toUpperCase();
       var feature = status.feature_name;
       if (!feature) return;
+
+      // Restore persisted metrics for the active workflow.
+      if (state !== "IDLE") {
+        restorePersistedMetrics(feature);
+      }
 
       if (state === "HUMAN_GATE_1") {
         // Fetch discovery output and any previous corrections in parallel.

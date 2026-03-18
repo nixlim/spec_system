@@ -79,6 +79,16 @@ func main() {
 		workflowManager.SetOTELPort(*otelPort)
 	}
 
+	// --- Open SQLite metrics store for persistent telemetry ---
+	metricsDBPath := filepath.Join(absWorkspace, "metrics.db")
+	metricsStore, err := api.NewMetricsStore(metricsDBPath)
+	if err != nil {
+		log.Fatalf("failed to open metrics store: %v", err)
+	}
+	defer metricsStore.Close()
+	workflowManager.SetMetricsStore(metricsStore)
+	log.Printf("[main] metrics store opened at %s", metricsDBPath)
+
 	// Start WebSocket broadcast goroutine.
 	go wsHub.StartBroadcasting(emitter)
 
@@ -86,6 +96,7 @@ func main() {
 	var otelReceiver *api.OTELReceiver
 	if *otelPort > 0 {
 		otelReceiver = api.NewOTELReceiver(wsHub, emitter)
+		otelReceiver.SetMetricsStore(metricsStore, workflowManager.GetCurrentFeatureName)
 		if err := otelReceiver.Start(*otelPort); err != nil {
 			log.Fatalf("failed to start OTEL gRPC receiver: %v", err)
 		}
@@ -118,6 +129,9 @@ func main() {
 	// --- Workflow control endpoints (retry/reset) ---
 	mux.HandleFunc("/api/workflow/retry", api.HandleRetryWorkflow(workflowManager))
 	mux.HandleFunc("/api/workflow/reset", api.HandleResetWorkflow(workflowManager))
+
+	// --- Metrics endpoint (persisted OTEL telemetry) ---
+	mux.HandleFunc("/api/metrics", api.HandleGetMetrics(metricsStore))
 
 	// --- Log / message streaming endpoints ---
 	mux.HandleFunc("/api/messages", api.HandleGetMessages(absWorkspace))

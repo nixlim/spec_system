@@ -61,6 +61,11 @@ type OrchestratorConfig struct {
 	Runner AgentRunner
 	// Emitter broadcasts workflow events to subscribers.
 	Emitter EventEmitter
+	// CostProvider supplies authoritative cost data from external telemetry
+	// (e.g. OTEL receiver). When set, the orchestrator syncs this cost into
+	// workflow state so the dashboard reflects real cost even when the CLI
+	// reports zero. Optional — if nil, only CLI-reported cost is used.
+	CostProvider CostProvider
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +94,9 @@ type Orchestrator struct {
 
 	// Gate channel for human gate responses.
 	gateCh chan GateResponse
+
+	// costProvider supplies authoritative cost from external telemetry (e.g. OTEL).
+	costProvider CostProvider
 
 	// Cumulative authority-limit tracking across rounds.
 	cumulativeDowngrades int
@@ -187,12 +195,25 @@ func (o *Orchestrator) RunWorkflow(goal GoalInput) error {
 		log.Printf("[orchestrator] ---- loop iteration: state=%s, round=%d, cost=$%.4f, invocations=%d ----",
 			current.String(), state.Round, state.CumulativeCostUSD, state.AgentInvocations)
 
-		// Emit a workflow_status heartbeat at the top of each iteration so
-		// the dashboard can track progress in real time.
+		// Sync authoritative cost from OTEL telemetry if available.
+		// The CLI may report zero cost while OTEL captures real cost, so
+		// we use the greater of the two to avoid losing data.
+		if o.costProvider != nil {
+			if otelCost := o.costProvider.GetCostUSD(); otelCost > state.CumulativeCostUSD {
+				state.CumulativeCostUSD = otelCost
+			}
+		}
+
+		// Compute wall-clock seconds and store in state for persistence
+		// and HTTP API access.
 		var wallClockSec float64
 		if startTime, parseErr := time.Parse(time.RFC3339, state.StartedAt); parseErr == nil {
 			wallClockSec = time.Since(startTime).Seconds()
+			state.CumulativeWallClockSeconds = wallClockSec
 		}
+
+		// Emit a workflow_status heartbeat at the top of each iteration so
+		// the dashboard can track progress in real time.
 		o.emitter.Emit(NewWorkflowStatusEvent(
 			current.String(),
 			state.Round,
@@ -353,6 +374,7 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 		skills:          skills,
 		progressTracker: NewProgressTracker(),
 		runner:          cfg.Runner,
+		costProvider:    cfg.CostProvider,
 		workspaceDir:    cfg.WorkspaceDir,
 		featureName:     cfg.FeatureName,
 		gateCh:          make(chan GateResponse, 1),

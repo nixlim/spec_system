@@ -39,6 +39,7 @@ type WorkflowManager struct {
 	workspaceDir string
 	config       specworkflow.SpecWorkflowConfig
 	otelPort     int
+	metricsStore *MetricsStore
 	mu           sync.Mutex
 }
 
@@ -63,6 +64,31 @@ func (m *WorkflowManager) SetOTELPort(port int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.otelPort = port
+}
+
+// SetMetricsStore configures the SQLite metrics store for persisting
+// telemetry data. Must be called before starting any workflows.
+func (m *WorkflowManager) SetMetricsStore(store *MetricsStore) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.metricsStore = store
+}
+
+// GetCurrentFeatureName returns the feature name of the currently running
+// workflow, or empty string if no workflow is active. Used as a callback
+// by the OTELReceiver to associate metrics with the correct workflow.
+func (m *WorkflowManager) GetCurrentFeatureName() string {
+	m.mu.Lock()
+	orch := m.orchestrator
+	m.mu.Unlock()
+	if orch == nil {
+		return ""
+	}
+	state := orch.State()
+	if state == nil {
+		return ""
+	}
+	return state.FeatureName
 }
 
 // GetOrchestrator returns the current orchestrator, or nil if no workflow
@@ -149,6 +175,10 @@ func (m *WorkflowManager) ResumeFromGate(featureName string) (*specworkflow.Orch
 		Config:         m.config,
 		Runner:         specworkflow.DefaultClaudeRunner(m.workspaceDir, m.otelPort),
 		Emitter:        m.emitter,
+	}
+	// Wire cost provider if metrics store is available.
+	if m.metricsStore != nil {
+		orchConfig.CostProvider = NewMetricsCostProvider(m.metricsStore, featureName)
 	}
 
 	orch, err := specworkflow.NewOrchestrator(orchConfig)
@@ -269,6 +299,15 @@ func HandleStartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			Config:         manager.config,
 			Runner:         specworkflow.DefaultClaudeRunner(manager.workspaceDir, manager.otelPort),
 			Emitter:        manager.emitter,
+		}
+
+		// Wire cost provider if metrics store is available.
+		if manager.metricsStore != nil {
+			orchConfig.CostProvider = NewMetricsCostProvider(manager.metricsStore, req.FeatureName)
+			// Reset persisted metrics for a fresh workflow run.
+			if err := manager.metricsStore.ResetForFeature(req.FeatureName); err != nil {
+				log.Printf("[workflow] warning: failed to reset metrics for %q: %v", req.FeatureName, err)
+			}
 		}
 
 		orch, err := specworkflow.NewOrchestrator(orchConfig)
@@ -478,14 +517,79 @@ func HandleGetWorkflowStatus(manager *WorkflowManager) http.HandlerFunc {
 			return
 		}
 
+		// Compute wall clock dynamically from StartedAt so the HTTP
+		// endpoint returns real elapsed time (not the stale struct field).
+		var wallClockSec float64
+		if startTime, parseErr := time.Parse(time.RFC3339, state.StartedAt); parseErr == nil {
+			wallClockSec = time.Since(startTime).Seconds()
+		}
+
+		// Use the greater of orchestrator cost and OTEL-persisted cost
+		// since the CLI may report zero while OTEL captures real cost.
+		costUSD := state.CumulativeCostUSD
+		if manager.metricsStore != nil && state.FeatureName != "" {
+			if otelCost := manager.metricsStore.GetCurrentCostUSD(state.FeatureName); otelCost > costUSD {
+				costUSD = otelCost
+			}
+		}
+
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"state":              state.State.String(),
 			"round":              state.Round,
 			"feature_name":       state.FeatureName,
-			"cost_usd":           state.CumulativeCostUSD,
-			"wall_clock_seconds": state.CumulativeWallClockSeconds,
+			"cost_usd":           costUSD,
+			"wall_clock_seconds": wallClockSec,
 			"agent_invocations":  state.AgentInvocations,
 			"message":            StatusMessage(state.State, state.Round),
+		})
+	}
+}
+
+// HandleGetMetrics returns an HTTP handler for GET /api/metrics.
+// It serves persisted OTEL metrics and events from SQLite so the dashboard
+// can restore data after browser refresh or server restart.
+// Query parameters:
+//   - feature: the feature name to query metrics for (required)
+func HandleGetMetrics(store *MetricsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		if store == nil {
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"metrics": nil,
+				"events":  []MetricEvent{},
+			})
+			return
+		}
+
+		feature := r.URL.Query().Get("feature")
+		if feature == "" {
+			writeError(w, http.StatusBadRequest, "feature query parameter is required")
+			return
+		}
+
+		metrics, err := store.GetWorkflowMetrics(feature)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("get metrics: %v", err))
+			return
+		}
+
+		events, err := store.GetEvents(feature)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("get events: %v", err))
+			return
+		}
+
+		if events == nil {
+			events = []MetricEvent{}
+		}
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"metrics": metrics,
+			"events":  events,
 		})
 	}
 }
