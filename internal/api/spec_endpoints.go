@@ -235,7 +235,7 @@ func HandleGetSpecDiff(config SpecAPIConfig) http.HandlerFunc {
 
 		a, errA := strconv.Atoi(aStr)
 		b, errB := strconv.Atoi(bStr)
-		if errA != nil || errB != nil || a < 1 || b < 1 {
+		if errA != nil || errB != nil || a < 0 || b < 0 {
 			writeError(w, http.StatusBadRequest, "invalid version numbers")
 			return
 		}

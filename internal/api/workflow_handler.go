@@ -1110,13 +1110,16 @@ type featureInfo struct {
 	HasDiscovery bool     `json:"has_discovery"`
 	HasReviews   bool     `json:"has_reviews"`
 	IsTerminal   bool     `json:"is_terminal"`
+	IsPaused     bool     `json:"is_paused"`
 	Files        []string `json:"files"`
 }
 
 // HandleListFeatures returns an HTTP handler for GET /api/workspace/features.
 // It scans the workspace/specs/ directory for feature subdirectories and returns
 // a JSON array of feature info objects sorted by most recently updated.
-func HandleListFeatures(workspaceDir string) http.HandlerFunc {
+// The optional manager parameter is used to detect whether the orchestrator is
+// actually running, so orphaned agent states can be marked as paused.
+func HandleListFeatures(workspaceDir string, manager ...*WorkflowManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1157,6 +1160,23 @@ func HandleListFeatures(workspaceDir string) http.HandlerFunc {
 				fi.UpdatedAt = state.UpdatedAt
 				fi.CostUSD = state.CumulativeCostUSD
 				fi.IsTerminal = isTerminalWorkflowState(state.State) || state.State == specworkflow.StateError
+
+				// Detect paused: state is an active agent state but no
+				// orchestrator is running (e.g. after server restart).
+				if !fi.IsTerminal && !specworkflow.IsGateState(state.State) {
+					orchestratorRunning := false
+					if len(manager) > 0 && manager[0] != nil {
+						mgr := manager[0]
+						mgr.mu.Lock()
+						if mgr.orchestrator != nil && mgr.orchestrator.IsRunning() {
+							orchestratorRunning = true
+						}
+						mgr.mu.Unlock()
+					}
+					if !orchestratorRunning {
+						fi.IsPaused = true
+					}
+				}
 			}
 
 			// Scan files in the feature directory.

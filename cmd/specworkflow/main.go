@@ -122,7 +122,7 @@ func main() {
 
 	// --- Workspace browser endpoints ---
 	mux.HandleFunc("/api/workspace/features/", api.HandleFeatureFiles(absWorkspace))
-	mux.HandleFunc("/api/workspace/features", api.HandleListFeatures(absWorkspace))
+	mux.HandleFunc("/api/workspace/features", api.HandleListFeatures(absWorkspace, workflowManager))
 
 	// --- Workflow control endpoints (NEW) ---
 	mux.HandleFunc("/api/workflow/start", api.HandleStartWorkflow(workflowManager))
@@ -162,7 +162,7 @@ func main() {
 	mux.HandleFunc("/api/spec/current", api.HandleGetCurrentSpec(specConfig))
 	mux.HandleFunc("/api/spec/versions", api.HandleListSpecVersions(specConfig))
 	mux.HandleFunc("/api/spec/version/", api.HandleGetSpecVersion(specConfig))
-	mux.HandleFunc("/api/spec/diff", api.HandleGetSpecDiff(specConfig))
+	mux.HandleFunc("/api/spec/diff/", api.HandleGetSpecDiff(specConfig))
 	mux.HandleFunc("/api/spec/issues", api.HandleGetIssues(specConfig))
 	mux.HandleFunc("/api/spec/issues/", api.HandleGetIssue(specConfig))
 	mux.HandleFunc("/api/spec/convergence", api.HandleGetConvergence(specConfig))

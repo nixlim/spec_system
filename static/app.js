@@ -952,12 +952,13 @@
 
         var stateUpper = (f.state || "").toUpperCase();
         var isTerminal = f.is_terminal;
+        var isPaused = f.is_paused;
         var isGate = stateUpper.indexOf("HUMAN_GATE") !== -1;
-        var isActive = !isTerminal && !isGate && stateUpper !== "UNKNOWN";
+        var isActive = !isTerminal && !isGate && !isPaused && stateUpper !== "UNKNOWN";
 
-        if (isTerminal && stateUpper !== "UNKNOWN") {
+        if ((isTerminal || isPaused) && stateUpper !== "UNKNOWN") {
           // Resume button — continues from where it left off
-          if (stateUpper === "ESCALATED" || stateUpper === "ERROR") {
+          if (stateUpper === "ESCALATED" || stateUpper === "ERROR" || isPaused) {
             var termResumeBtn = el("button", {
               className: "btn btn-sm",
               textContent: "Resume",
