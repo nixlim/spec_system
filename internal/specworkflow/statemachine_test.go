@@ -248,7 +248,7 @@ func TestStateMachine_Gate1CorrectionGuard_Allows(t *testing.T) {
 
 func TestStateMachine_Gate2RedraftGuard_Blocks(t *testing.T) {
 	ws := newTestState(StateHumanGate2)
-	ws.Gate2RedraftCount = 1 // at limit
+	ws.Gate2RedraftCount = 2 // past limit (handler increments before transition)
 	sm := newSM(ws)
 
 	err := sm.Transition(StateDrafting)

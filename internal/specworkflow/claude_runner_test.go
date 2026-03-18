@@ -321,7 +321,7 @@ func TestDefaultClaudeRunner(t *testing.T) {
 }
 
 func TestDefaultClaudeRunner_WithOTELPort(t *testing.T) {
-	runner := DefaultClaudeRunner("/tmp/workspace", 4318)
+	runner := DefaultClaudeRunner("/tmp/workspace", 4317)
 
 	if runner.Env["OTEL_METRICS_EXPORTER"] != "otlp" {
 		t.Errorf("expected OTEL_METRICS_EXPORTER=otlp, got %q", runner.Env["OTEL_METRICS_EXPORTER"])
@@ -329,10 +329,10 @@ func TestDefaultClaudeRunner_WithOTELPort(t *testing.T) {
 	if runner.Env["OTEL_LOGS_EXPORTER"] != "otlp" {
 		t.Errorf("expected OTEL_LOGS_EXPORTER=otlp, got %q", runner.Env["OTEL_LOGS_EXPORTER"])
 	}
-	if runner.Env["OTEL_EXPORTER_OTLP_PROTOCOL"] != "http/json" {
-		t.Errorf("expected OTEL_EXPORTER_OTLP_PROTOCOL=http/json, got %q", runner.Env["OTEL_EXPORTER_OTLP_PROTOCOL"])
+	if runner.Env["OTEL_EXPORTER_OTLP_PROTOCOL"] != "grpc" {
+		t.Errorf("expected OTEL_EXPORTER_OTLP_PROTOCOL=grpc, got %q", runner.Env["OTEL_EXPORTER_OTLP_PROTOCOL"])
 	}
-	want := "http://localhost:4318"
+	want := "http://localhost:4317"
 	if runner.Env["OTEL_EXPORTER_OTLP_ENDPOINT"] != want {
 		t.Errorf("expected OTEL_EXPORTER_OTLP_ENDPOINT=%q, got %q", want, runner.Env["OTEL_EXPORTER_OTLP_ENDPOINT"])
 	}

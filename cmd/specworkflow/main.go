@@ -31,7 +31,7 @@ func main() {
 	port := flag.Int("port", 8080, "HTTP listen port")
 	workspace := flag.String("workspace", "./workspace", "workspace directory for spec files and uploads")
 	configPath := flag.String("config", "", "path to YAML configuration file (optional)")
-	otelPort := flag.Int("otel-port", 4318, "OTLP HTTP receiver port for child process telemetry (0 to disable)")
+	otelPort := flag.Int("otel-port", 4317, "gRPC OTLP receiver port for Claude Code telemetry (0 to disable)")
 	flag.Parse()
 
 	// Set up server log ring buffer so all log.Printf output is captured.
@@ -82,26 +82,14 @@ func main() {
 	// Start WebSocket broadcast goroutine.
 	go wsHub.StartBroadcasting(emitter)
 
-	// --- Start OTLP HTTP receiver (for child Claude process telemetry) ---
+	// --- Start OTLP gRPC receiver (for Claude Code telemetry) ---
 	var otelReceiver *api.OTELReceiver
 	if *otelPort > 0 {
 		otelReceiver = api.NewOTELReceiver(wsHub, emitter)
-		otelMux := http.NewServeMux()
-		otelMux.HandleFunc("/v1/metrics", otelReceiver.HandleMetrics)
-		otelMux.HandleFunc("/v1/logs", otelReceiver.HandleLogs)
-		otelMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			log.Printf("[otel] catch-all: %s %s (content-type: %s)", r.Method, r.URL.Path, r.Header.Get("Content-Type"))
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("{}"))
-		})
-		go func() {
-			otelAddr := fmt.Sprintf(":%d", *otelPort)
-			log.Printf("OTLP receiver listening on %s", otelAddr)
-			if err := http.ListenAndServe(otelAddr, otelMux); err != nil {
-				log.Printf("OTLP receiver error: %v", err)
-			}
-		}()
+		if err := otelReceiver.Start(*otelPort); err != nil {
+			log.Fatalf("failed to start OTEL gRPC receiver: %v", err)
+		}
+		defer otelReceiver.Stop()
 	}
 
 	mux := http.NewServeMux()
@@ -186,7 +174,7 @@ func main() {
 		fmt.Printf("  Config:    %s\n", *configPath)
 	}
 	if *otelPort > 0 {
-		fmt.Printf("  OTLP:      http://localhost:%d\n", *otelPort)
+		fmt.Printf("  OTLP gRPC: localhost:%d\n", *otelPort)
 	}
 	fmt.Printf("\nEndpoints:\n")
 	fmt.Printf("  GET  /api/workspace/features           List workspace features\n")

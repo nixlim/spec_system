@@ -116,11 +116,12 @@ func Gate1CorrectionGuard(cfg StateMachineConfig) Guard {
 }
 
 // Gate2RedraftGuard blocks HUMAN_GATE_2 -> DRAFTING when the redraft count
-// has reached 1 (only a single redraft is allowed).
+// has exceeded 1 (only a single redraft is allowed). Uses > (not >=) because
+// the gate handler increments the count before the transition runs.
 func Gate2RedraftGuard() Guard {
 	return func(from, to WorkflowState, ws *WorkflowStateJSON) error {
 		if from == StateHumanGate2 && to == StateDrafting {
-			if ws.Gate2RedraftCount >= 1 {
+			if ws.Gate2RedraftCount > 1 {
 				return fmt.Errorf(
 					"gate 2 redraft limit reached (%d/1)",
 					ws.Gate2RedraftCount,

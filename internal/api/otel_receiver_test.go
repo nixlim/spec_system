@@ -1,11 +1,18 @@
 package api
 
 import (
-	"bytes"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"context"
+	"net"
 	"testing"
+	"time"
+
+	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/foundry-zero/adversarial-spec-system/internal/specworkflow"
 )
@@ -22,88 +29,121 @@ func setupOTELReceiver(t *testing.T) (*OTELReceiver, *WebSocketHub) {
 	return recv, hub
 }
 
+// grpcTestClients holds both metric and log gRPC clients for testing.
+type grpcTestClients struct {
+	metrics colmetricspb.MetricsServiceClient
+	logs    collogspb.LogsServiceClient
+}
+
+// startTestGRPC creates a gRPC receiver on an ephemeral port and returns
+// the receiver, connected clients, and the client connection for cleanup.
+func startTestGRPC(t *testing.T) (*OTELReceiver, grpcTestClients, *grpc.ClientConn) {
+	t.Helper()
+
+	hub := NewWebSocketHub()
+	emitter := specworkflow.NewChannelEmitter(64)
+	recv := NewOTELReceiver(hub, emitter)
+
+	// Manually bind to an ephemeral port.
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+
+	recv.server = grpc.NewServer()
+	colmetricspb.RegisterMetricsServiceServer(recv.server, recv)
+	collogspb.RegisterLogsServiceServer(recv.server, &otelLogsHandler{recv: recv})
+
+	go func() {
+		_ = recv.server.Serve(lis)
+	}()
+
+	// Connect a client.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := grpc.DialContext(ctx, lis.Addr().String(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+	)
+	if err != nil {
+		recv.Stop()
+		t.Fatalf("failed to connect gRPC client: %v", err)
+	}
+
+	clients := grpcTestClients{
+		metrics: colmetricspb.NewMetricsServiceClient(conn),
+		logs:    collogspb.NewLogsServiceClient(conn),
+	}
+	return recv, clients, conn
+}
+
 // ---------------------------------------------------------------------------
-// TestHandleMetrics
+// TestExportMetrics via gRPC
 // ---------------------------------------------------------------------------
 
-func TestHandleMetrics_EmptyBody(t *testing.T) {
-	recv, _ := setupOTELReceiver(t)
+func TestGRPCMetrics_EmptyRequest(t *testing.T) {
+	recv, clients, conn := startTestGRPC(t)
+	defer func() {
+		conn.Close()
+		recv.Stop()
+	}()
 
-	body := `{"resourceMetrics": []}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/metrics", bytes.NewBufferString(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	recv.HandleMetrics(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", rec.Code)
+	resp, err := clients.metrics.Export(context.Background(), &colmetricspb.ExportMetricsServiceRequest{})
+	if err != nil {
+		t.Fatalf("empty request should succeed: %v", err)
 	}
-
-	var resp map[string]interface{}
-	json.NewDecoder(rec.Body).Decode(&resp)
-	// Should return empty JSON object.
-	if len(resp) != 0 {
-		t.Errorf("expected empty JSON response, got %v", resp)
+	if resp == nil {
+		t.Fatal("expected non-nil response")
 	}
 }
 
-func TestHandleMetrics_MethodNotAllowed(t *testing.T) {
-	recv, _ := setupOTELReceiver(t)
+func TestGRPCMetrics_TokenUsage(t *testing.T) {
+	recv, clients, conn := startTestGRPC(t)
+	defer func() {
+		conn.Close()
+		recv.Stop()
+	}()
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/metrics", nil)
-	rec := httptest.NewRecorder()
-	recv.HandleMetrics(rec, req)
-
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405, got %d", rec.Code)
-	}
-}
-
-func TestHandleMetrics_InvalidJSON(t *testing.T) {
-	recv, _ := setupOTELReceiver(t)
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/metrics", bytes.NewBufferString("not json"))
-	rec := httptest.NewRecorder()
-	recv.HandleMetrics(rec, req)
-
-	// Should still return 200 per OTLP protocol.
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200 for invalid JSON, got %d", rec.Code)
-	}
-}
-
-func TestHandleMetrics_TokenUsage(t *testing.T) {
-	recv, _ := setupOTELReceiver(t)
-
-	asInt := int64(1000)
-	strInput := "input"
-	body := otlpMetricsRequest{
-		ResourceMetrics: []otlpResourceMetrics{{
-			ScopeMetrics: []otlpScopeMetrics{{
-				Metrics: []otlpMetric{{
-					Name: "claude_code.token.usage",
-					Sum: &otlpSum{
-						DataPoints: []otlpDataPoint{{
-							AsInt: &asInt,
-							Attributes: []otlpKeyValue{{
-								Key:   "type",
-								Value: otlpAnyValue{StringValue: &strInput},
-							}},
-						}},
+	ts := uint64(time.Now().UnixNano())
+	req := &colmetricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricspb.ResourceMetrics{
+			{
+				ScopeMetrics: []*metricspb.ScopeMetrics{
+					{
+						Metrics: []*metricspb.Metric{
+							{
+								Name: "claude_code.token.usage",
+								Data: &metricspb.Metric_Sum{
+									Sum: &metricspb.Sum{
+										DataPoints: []*metricspb.NumberDataPoint{
+											{
+												TimeUnixNano: ts,
+												Value:        &metricspb.NumberDataPoint_AsInt{AsInt: 1000},
+												Attributes: []*commonpb.KeyValue{
+													{
+														Key:   "type",
+														Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "input"}},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
 					},
-				}},
-			}},
-		}},
+				},
+			},
+		},
 	}
 
-	data, _ := json.Marshal(body)
-	req := httptest.NewRequest(http.MethodPost, "/v1/metrics", bytes.NewReader(data))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	recv.HandleMetrics(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", rec.Code)
+	resp, err := clients.metrics.Export(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Export failed: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
 	}
 
 	recv.mu.Lock()
@@ -113,29 +153,44 @@ func TestHandleMetrics_TokenUsage(t *testing.T) {
 	}
 }
 
-func TestHandleMetrics_CostUsage(t *testing.T) {
-	recv, _ := setupOTELReceiver(t)
+func TestGRPCMetrics_CostUsage(t *testing.T) {
+	recv, clients, conn := startTestGRPC(t)
+	defer func() {
+		conn.Close()
+		recv.Stop()
+	}()
 
-	cost := 0.05
-	body := otlpMetricsRequest{
-		ResourceMetrics: []otlpResourceMetrics{{
-			ScopeMetrics: []otlpScopeMetrics{{
-				Metrics: []otlpMetric{{
-					Name: "claude_code.cost.usage",
-					Sum: &otlpSum{
-						DataPoints: []otlpDataPoint{{
-							AsDouble: &cost,
-						}},
+	ts := uint64(time.Now().UnixNano())
+	req := &colmetricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricspb.ResourceMetrics{
+			{
+				ScopeMetrics: []*metricspb.ScopeMetrics{
+					{
+						Metrics: []*metricspb.Metric{
+							{
+								Name: "claude_code.cost.usage",
+								Data: &metricspb.Metric_Sum{
+									Sum: &metricspb.Sum{
+										DataPoints: []*metricspb.NumberDataPoint{
+											{
+												TimeUnixNano: ts,
+												Value:        &metricspb.NumberDataPoint_AsDouble{AsDouble: 0.05},
+											},
+										},
+									},
+								},
+							},
+						},
 					},
-				}},
-			}},
-		}},
+				},
+			},
+		},
 	}
 
-	data, _ := json.Marshal(body)
-	req := httptest.NewRequest(http.MethodPost, "/v1/metrics", bytes.NewReader(data))
-	rec := httptest.NewRecorder()
-	recv.HandleMetrics(rec, req)
+	_, err := clients.metrics.Export(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Export failed: %v", err)
+	}
 
 	recv.mu.Lock()
 	defer recv.mu.Unlock()
@@ -144,65 +199,186 @@ func TestHandleMetrics_CostUsage(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// TestHandleLogs
-// ---------------------------------------------------------------------------
+func TestGRPCMetrics_MultipleTokenTypes(t *testing.T) {
+	recv, clients, conn := startTestGRPC(t)
+	defer func() {
+		conn.Close()
+		recv.Stop()
+	}()
 
-func TestHandleLogs_EmptyBody(t *testing.T) {
-	recv, _ := setupOTELReceiver(t)
-
-	body := `{"resourceLogs": []}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/logs", bytes.NewBufferString(body))
-	rec := httptest.NewRecorder()
-	recv.HandleLogs(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", rec.Code)
-	}
-}
-
-func TestHandleLogs_MethodNotAllowed(t *testing.T) {
-	recv, _ := setupOTELReceiver(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/v1/logs", nil)
-	rec := httptest.NewRecorder()
-	recv.HandleLogs(rec, req)
-
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405, got %d", rec.Code)
-	}
-}
-
-func TestHandleLogs_ToolResult(t *testing.T) {
-	recv, _ := setupOTELReceiver(t)
-
-	eventName := "claude_code.tool_result"
-	toolName := "Read"
-	durMS := float64(150)
-	successStr := "true"
-
-	body := otlpLogsRequest{
-		ResourceLogs: []otlpResourceLogs{{
-			ScopeLogs: []otlpScopeLogs{{
-				LogRecords: []otlpLogRecord{{
-					Attributes: []otlpKeyValue{
-						{Key: "event.name", Value: otlpAnyValue{StringValue: &eventName}},
-						{Key: "tool_name", Value: otlpAnyValue{StringValue: &toolName}},
-						{Key: "success", Value: otlpAnyValue{StringValue: &successStr}},
-						{Key: "duration_ms", Value: otlpAnyValue{DoubleValue: &durMS}},
+	ts := uint64(time.Now().UnixNano())
+	req := &colmetricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricspb.ResourceMetrics{
+			{
+				ScopeMetrics: []*metricspb.ScopeMetrics{
+					{
+						Metrics: []*metricspb.Metric{
+							{
+								Name: "claude_code.token.usage",
+								Data: &metricspb.Metric_Sum{
+									Sum: &metricspb.Sum{
+										DataPoints: []*metricspb.NumberDataPoint{
+											{
+												TimeUnixNano: ts,
+												Value:        &metricspb.NumberDataPoint_AsInt{AsInt: 500},
+												Attributes: []*commonpb.KeyValue{
+													{Key: "type", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "input"}}},
+												},
+											},
+											{
+												TimeUnixNano: ts,
+												Value:        &metricspb.NumberDataPoint_AsInt{AsInt: 200},
+												Attributes: []*commonpb.KeyValue{
+													{Key: "type", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "output"}}},
+												},
+											},
+											{
+												TimeUnixNano: ts,
+												Value:        &metricspb.NumberDataPoint_AsInt{AsInt: 300},
+												Attributes: []*commonpb.KeyValue{
+													{Key: "type", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "cacheRead"}}},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
 					},
-				}},
-			}},
-		}},
+				},
+			},
+		},
 	}
 
-	data, _ := json.Marshal(body)
-	req := httptest.NewRequest(http.MethodPost, "/v1/logs", bytes.NewReader(data))
-	rec := httptest.NewRecorder()
-	recv.HandleLogs(rec, req)
+	_, err := clients.metrics.Export(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Export failed: %v", err)
+	}
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", rec.Code)
+	recv.mu.Lock()
+	defer recv.mu.Unlock()
+	if recv.inputTokens != 500 {
+		t.Errorf("expected inputTokens=500, got %d", recv.inputTokens)
+	}
+	if recv.outputTokens != 200 {
+		t.Errorf("expected outputTokens=200, got %d", recv.outputTokens)
+	}
+	if recv.cacheReadTokens != 300 {
+		t.Errorf("expected cacheReadTokens=300, got %d", recv.cacheReadTokens)
+	}
+}
+
+func TestGRPCMetrics_ServerSurvivesAfterEmptyRequest(t *testing.T) {
+	recv, clients, conn := startTestGRPC(t)
+	defer func() {
+		conn.Close()
+		recv.Stop()
+	}()
+
+	ctx := context.Background()
+
+	// Empty request first.
+	_, err := clients.metrics.Export(ctx, &colmetricspb.ExportMetricsServiceRequest{})
+	if err != nil {
+		t.Fatalf("empty request should succeed: %v", err)
+	}
+
+	// Then a real metric.
+	ts := uint64(time.Now().UnixNano())
+	req := &colmetricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricspb.ResourceMetrics{
+			{
+				ScopeMetrics: []*metricspb.ScopeMetrics{
+					{
+						Metrics: []*metricspb.Metric{
+							{
+								Name: "claude_code.cost.usage",
+								Data: &metricspb.Metric_Sum{
+									Sum: &metricspb.Sum{
+										DataPoints: []*metricspb.NumberDataPoint{
+											{
+												TimeUnixNano: ts,
+												Value:        &metricspb.NumberDataPoint_AsDouble{AsDouble: 0.10},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, err = clients.metrics.Export(ctx, req)
+	if err != nil {
+		t.Fatalf("Export after empty request failed: %v", err)
+	}
+
+	recv.mu.Lock()
+	defer recv.mu.Unlock()
+	if recv.totalCostUSD != 0.10 {
+		t.Errorf("expected totalCostUSD=0.10, got %f", recv.totalCostUSD)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestExportLogs via gRPC
+// ---------------------------------------------------------------------------
+
+func TestGRPCLogs_EmptyRequest(t *testing.T) {
+	recv, clients, conn := startTestGRPC(t)
+	defer func() {
+		conn.Close()
+		recv.Stop()
+	}()
+
+	resp, err := clients.logs.Export(context.Background(), &collogspb.ExportLogsServiceRequest{})
+	if err != nil {
+		t.Fatalf("empty request should succeed: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+}
+
+func TestGRPCLogs_ToolResult(t *testing.T) {
+	recv, clients, conn := startTestGRPC(t)
+	defer func() {
+		conn.Close()
+		recv.Stop()
+	}()
+
+	ts := uint64(time.Now().UnixNano())
+	req := &collogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{
+			{
+				ScopeLogs: []*logspb.ScopeLogs{
+					{
+						LogRecords: []*logspb.LogRecord{
+							{
+								TimeUnixNano: ts,
+								EventName:    "claude_code.tool_result",
+								Attributes: []*commonpb.KeyValue{
+									{Key: "tool_name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "Read"}}},
+									{Key: "success", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "true"}}},
+									{Key: "duration_ms", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_DoubleValue{DoubleValue: 150}}},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	resp, err := clients.logs.Export(context.Background(), req)
+	if err != nil {
+		t.Fatalf("logs Export failed: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
 	}
 
 	recv.mu.Lock()
@@ -215,6 +391,105 @@ func TestHandleLogs_ToolResult(t *testing.T) {
 	}
 	if !recv.toolResults[0].Success {
 		t.Error("expected success=true")
+	}
+}
+
+func TestGRPCLogs_APIRequest(t *testing.T) {
+	recv, clients, conn := startTestGRPC(t)
+	defer func() {
+		conn.Close()
+		recv.Stop()
+	}()
+
+	ts := uint64(time.Now().UnixNano())
+	req := &collogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{
+			{
+				ScopeLogs: []*logspb.ScopeLogs{
+					{
+						LogRecords: []*logspb.LogRecord{
+							{
+								TimeUnixNano: ts,
+								EventName:    "claude_code.api_request",
+								Attributes: []*commonpb.KeyValue{
+									{Key: "model", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "claude-sonnet-4-5-20250929"}}},
+									{Key: "cost_usd", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_DoubleValue{DoubleValue: 0.07}}},
+									{Key: "input_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 2000}}},
+									{Key: "output_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 500}}},
+									{Key: "duration_ms", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 3200}}},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, err := clients.logs.Export(context.Background(), req)
+	if err != nil {
+		t.Fatalf("logs Export failed: %v", err)
+	}
+
+	recv.mu.Lock()
+	defer recv.mu.Unlock()
+	if recv.totalAPICalls != 1 {
+		t.Errorf("expected totalAPICalls=1, got %d", recv.totalAPICalls)
+	}
+	if recv.totalCostUSD != 0.07 {
+		t.Errorf("expected totalCostUSD=0.07, got %f", recv.totalCostUSD)
+	}
+	if recv.inputTokens != 2000 {
+		t.Errorf("expected inputTokens=2000, got %d", recv.inputTokens)
+	}
+	if recv.outputTokens != 500 {
+		t.Errorf("expected outputTokens=500, got %d", recv.outputTokens)
+	}
+}
+
+func TestGRPCLogs_EventNameFallbackToBody(t *testing.T) {
+	recv, clients, conn := startTestGRPC(t)
+	defer func() {
+		conn.Close()
+		recv.Stop()
+	}()
+
+	ts := uint64(time.Now().UnixNano())
+	req := &collogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{
+			{
+				ScopeLogs: []*logspb.ScopeLogs{
+					{
+						LogRecords: []*logspb.LogRecord{
+							{
+								TimeUnixNano: ts,
+								// EventName not set — use Body as fallback.
+								Body: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "claude_code.tool_result"}},
+								Attributes: []*commonpb.KeyValue{
+									{Key: "tool_name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "Write"}}},
+									{Key: "success", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "true"}}},
+									{Key: "duration_ms", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_DoubleValue{DoubleValue: 200}}},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, err := clients.logs.Export(context.Background(), req)
+	if err != nil {
+		t.Fatalf("logs Export failed: %v", err)
+	}
+
+	recv.mu.Lock()
+	defer recv.mu.Unlock()
+	if len(recv.toolResults) != 1 {
+		t.Fatalf("expected 1 tool result, got %d", len(recv.toolResults))
+	}
+	if recv.toolResults[0].ToolName != "Write" {
+		t.Errorf("expected tool_name 'Write', got %q", recv.toolResults[0].ToolName)
 	}
 }
 
@@ -246,43 +521,100 @@ func TestResetMetrics(t *testing.T) {
 // TestHelpers
 // ---------------------------------------------------------------------------
 
-func TestGetAttributeString(t *testing.T) {
-	s := "hello"
-	attrs := []otlpKeyValue{
-		{Key: "foo", Value: otlpAnyValue{StringValue: &s}},
+func TestExtractAttributes(t *testing.T) {
+	kvs := []*commonpb.KeyValue{
+		{Key: "foo", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "hello"}}},
+		{Key: "bar", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 42}}},
 	}
-	if got := getAttributeString(attrs, "foo"); got != "hello" {
-		t.Errorf("expected 'hello', got %q", got)
+	attrs := extractAttributes(kvs)
+	if attrs["foo"] != "hello" {
+		t.Errorf("expected 'hello', got %q", attrs["foo"])
 	}
-	if got := getAttributeString(attrs, "bar"); got != "" {
-		t.Errorf("expected empty string for missing key, got %q", got)
-	}
-}
-
-func TestGetAttributeFloat(t *testing.T) {
-	d := 3.14
-	attrs := []otlpKeyValue{
-		{Key: "pi", Value: otlpAnyValue{DoubleValue: &d}},
-	}
-	if got := getAttributeFloat(attrs, "pi"); got != 3.14 {
-		t.Errorf("expected 3.14, got %f", got)
-	}
-	if got := getAttributeFloat(attrs, "missing"); got != 0 {
-		t.Errorf("expected 0 for missing key, got %f", got)
+	if attrs["bar"] != "42" {
+		t.Errorf("expected '42', got %q", attrs["bar"])
 	}
 }
 
-func TestGetNumericValue(t *testing.T) {
-	intVal := int64(42)
-	doubleVal := 3.14
-
-	if got := getNumericValue(otlpDataPoint{AsInt: &intVal}); got != 42 {
-		t.Errorf("expected 42, got %f", got)
+func TestAnyValueToString(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    *commonpb.AnyValue
+		expected string
+	}{
+		{"nil", nil, ""},
+		{"string", &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "hello"}}, "hello"},
+		{"int", &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 42}}, "42"},
+		{"bool", &commonpb.AnyValue{Value: &commonpb.AnyValue_BoolValue{BoolValue: true}}, "true"},
 	}
-	if got := getNumericValue(otlpDataPoint{AsDouble: &doubleVal}); got != 3.14 {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := anyValueToString(tc.value)
+			if got != tc.expected {
+				t.Errorf("expected %q, got %q", tc.expected, got)
+			}
+		})
+	}
+}
+
+func TestAttrFloat(t *testing.T) {
+	attrs := map[string]interface{}{
+		"double": 3.14,
+		"string": "2.5",
+		"empty":  nil,
+	}
+	if got := attrFloat(attrs, "double"); got != 3.14 {
 		t.Errorf("expected 3.14, got %f", got)
 	}
-	if got := getNumericValue(otlpDataPoint{}); got != 0 {
-		t.Errorf("expected 0 for empty, got %f", got)
+	if got := attrFloat(attrs, "string"); got != 2.5 {
+		t.Errorf("expected 2.5, got %f", got)
+	}
+	if got := attrFloat(attrs, "missing"); got != 0 {
+		t.Errorf("expected 0, got %f", got)
+	}
+}
+
+func TestGRPCMetrics_GaugeType(t *testing.T) {
+	recv, clients, conn := startTestGRPC(t)
+	defer func() {
+		conn.Close()
+		recv.Stop()
+	}()
+
+	ts := uint64(time.Now().UnixNano())
+	req := &colmetricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricspb.ResourceMetrics{
+			{
+				ScopeMetrics: []*metricspb.ScopeMetrics{
+					{
+						Metrics: []*metricspb.Metric{
+							{
+								Name: "claude_code.cost.usage",
+								Data: &metricspb.Metric_Gauge{
+									Gauge: &metricspb.Gauge{
+										DataPoints: []*metricspb.NumberDataPoint{
+											{
+												TimeUnixNano: ts,
+												Value:        &metricspb.NumberDataPoint_AsDouble{AsDouble: 0.25},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, err := clients.metrics.Export(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Export failed: %v", err)
+	}
+
+	recv.mu.Lock()
+	defer recv.mu.Unlock()
+	if recv.totalCostUSD != 0.25 {
+		t.Errorf("expected totalCostUSD=0.25, got %f", recv.totalCostUSD)
 	}
 }
