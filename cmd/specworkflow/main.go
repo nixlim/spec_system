@@ -168,6 +168,15 @@ func main() {
 	// --- Static files (dashboard UI) ---
 	staticDir := findStaticDir()
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
+	// Serve favicon from static dir, or return 204 No Content if missing.
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join(staticDir, "favicon.ico")
+		if _, err := os.Stat(path); err == nil {
+			http.ServeFile(w, r, path)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
 	// Serve index.html at root.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {

@@ -112,8 +112,10 @@ func (m *WorkflowManager) GetTracker() *specworkflow.IssueTracker {
 	return specworkflow.NewIssueTracker()
 }
 
-// GetState returns the workflow state from the current orchestrator,
-// or a default state if no workflow is running.
+// GetState returns the workflow state from the current orchestrator.
+// If no orchestrator is running, it falls back to the most recent
+// on-disk state so that spec endpoints can still serve data after a
+// server restart. Returns an empty state only when nothing is found.
 func (m *WorkflowManager) GetState() *specworkflow.WorkflowStateJSON {
 	m.mu.Lock()
 	orch := m.orchestrator
@@ -121,6 +123,12 @@ func (m *WorkflowManager) GetState() *specworkflow.WorkflowStateJSON {
 
 	if orch != nil {
 		return orch.State()
+	}
+
+	// Fall back to on-disk state so spec/issue/convergence endpoints
+	// work even when no orchestrator is running (e.g. after restart).
+	if diskState := findLatestDiskState(m.workspaceDir); diskState != nil {
+		return diskState
 	}
 	return &specworkflow.WorkflowStateJSON{}
 }
