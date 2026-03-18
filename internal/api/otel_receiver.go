@@ -367,9 +367,10 @@ func (recv *OTELReceiver) emitMetricsEvent() {
 	}
 	recv.mu.Unlock()
 
-	log.Printf("[otel] metrics update: in=%d out=%d cache=%d cost=$%.4f api_calls=%d",
+	clientCount := recv.hub.ClientCount()
+	log.Printf("[otel] metrics update: in=%d out=%d cache=%d cost=$%.4f api_calls=%d (ws_clients=%d)",
 		payload.InputTokens, payload.OutputTokens, payload.CacheReadTokens,
-		payload.TotalCostUSD, payload.TotalAPICalls)
+		payload.TotalCostUSD, payload.TotalAPICalls, clientCount)
 
 	event := specworkflow.EventEnvelope{
 		Event: specworkflow.EventAgentMetrics,

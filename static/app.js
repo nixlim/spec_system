@@ -548,6 +548,11 @@
     // Keepalive ping — ignore silently.
     if (envelope.event === "ping") return;
 
+    // Debug: log agent_metrics events to console
+    if (envelope.event === "agent_metrics") {
+      console.log("[WS] agent_metrics received:", JSON.stringify(envelope.data));
+    }
+
     // Add ALL WebSocket events to the Messages tab log.
     addWsEventToMessages(envelope);
 
