@@ -28,7 +28,7 @@ func NewGate1Handler(state *WorkflowStateJSON, emitter EventEmitter, maxGateCorr
 // EnterGate emits a gate_request event with gate_type "requirements_confirmation"
 // so that the UI can present the discovery output to the human for review.
 func (h *Gate1Handler) EnterGate(discovery *DiscoveryOutput) error {
-	event := NewGateRequestEvent("requirements_confirmation", "", discovery)
+	event := NewGateRequestEvent("requirements_confirmation", h.state.FeatureName, discovery)
 	return h.emitter.Emit(event)
 }
 

@@ -39,7 +39,7 @@ func NewGate2Handler(state *WorkflowStateJSON, emitter EventEmitter, maxRedrafts
 // EnterGate emits a gate_request event with gate_type "ambiguity_resolution"
 // so that the UI can present the drafter's ambiguity warnings to the human.
 func (h *Gate2Handler) EnterGate(drafter *DrafterOutput) error {
-	event := NewGateRequestEvent("ambiguity_resolution", "", drafter)
+	event := NewGateRequestEvent("ambiguity_resolution", h.state.FeatureName, drafter)
 	return h.emitter.Emit(event)
 }
 

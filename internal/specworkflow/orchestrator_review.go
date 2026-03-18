@@ -323,7 +323,7 @@ func (o *Orchestrator) handleJudging(state *WorkflowStateJSON, specDir string) e
 // the accept/reject decision.
 func (o *Orchestrator) handleHumanGateFinal(state *WorkflowStateJSON, specDir string) error {
 	// Present final spec + critical resolutions.
-	o.emitter.Emit(NewGateRequestEvent("final_review", "", state))
+	o.emitter.Emit(NewGateRequestEvent("final_review", state.FeatureName, state))
 
 	resp := <-o.gateCh
 
