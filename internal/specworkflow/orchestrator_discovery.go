@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // handleDiscovery builds the discovery prompt, dispatches the discovery agent,
@@ -141,9 +142,22 @@ func (o *Orchestrator) handleHumanGate1(state *WorkflowStateJSON, specDir string
 				_, hasComment = corrFile["reviewer_comment"]
 			}
 		}
-		o.emitter.Emit(NewGateResponseEvent("requirements_confirmation", "correct",
-			fmt.Sprintf("Human requested corrections (%d fields, answers=%v, comment=%v), re-running discovery (attempt %d/%d)",
-				nCorrections, hasUserAnswers, hasComment, state.Gate1CorrectionCount+1, o.config.MaxGateCorrections)))
+		detail := fmt.Sprintf("Re-running discovery (attempt %d/%d) with:",
+			state.Gate1CorrectionCount+1, o.config.MaxGateCorrections)
+		if nCorrections > 0 {
+			detail += fmt.Sprintf(" %d inline corrections,", nCorrections)
+		}
+		if hasUserAnswers {
+			detail += " question answers,"
+		}
+		if hasComment {
+			detail += " reviewer comments,"
+		}
+		if !hasUserAnswers && !hasComment && nCorrections == 0 {
+			detail += " no changes"
+		}
+		detail = strings.TrimRight(detail, ",")
+		o.emitter.Emit(NewGateResponseEvent("requirements_confirmation", "correct", detail))
 
 		// Read corrections for the gate handler.
 		var corrections map[string]string
