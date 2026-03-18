@@ -376,6 +376,8 @@ func HandleStartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 func HandleGateApprove(manager *WorkflowManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
+			log.Printf("[gate-approve] rejected %s %s (expected POST)", r.Method, r.URL.Path)
+			w.Header().Set("Allow", "POST")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
