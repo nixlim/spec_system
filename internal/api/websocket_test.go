@@ -12,61 +12,7 @@ import (
 	"golang.org/x/net/websocket"
 )
 
-// ---------------------------------------------------------------------------
-// TestBuildTextFrame
-// ---------------------------------------------------------------------------
-
-func TestBuildTextFrame_Small(t *testing.T) {
-	payload := []byte("hello")
-	frame := buildTextFrame(payload)
-
-	// First byte: FIN + text opcode = 0x81
-	if frame[0] != 0x81 {
-		t.Errorf("expected first byte 0x81, got 0x%02x", frame[0])
-	}
-	// Second byte: payload length = 5 (no mask bit for server frames)
-	if frame[1] != 5 {
-		t.Errorf("expected length byte 5, got %d", frame[1])
-	}
-	// Payload follows immediately.
-	if string(frame[2:]) != "hello" {
-		t.Errorf("expected payload 'hello', got %q", string(frame[2:]))
-	}
-}
-
-func TestBuildTextFrame_Medium(t *testing.T) {
-	// 200 bytes — should use 126 + 2-byte length encoding.
-	payload := []byte(strings.Repeat("x", 200))
-	frame := buildTextFrame(payload)
-
-	if frame[0] != 0x81 {
-		t.Errorf("expected first byte 0x81, got 0x%02x", frame[0])
-	}
-	if frame[1] != 126 {
-		t.Errorf("expected length marker 126, got %d", frame[1])
-	}
-	// 2-byte big-endian length at bytes 2-3.
-	length := int(frame[2])<<8 | int(frame[3])
-	if length != 200 {
-		t.Errorf("expected extended length 200, got %d", length)
-	}
-	if len(frame) != 4+200 {
-		t.Errorf("expected total frame length %d, got %d", 4+200, len(frame))
-	}
-}
-
-func TestBuildTextFrame_Empty(t *testing.T) {
-	frame := buildTextFrame([]byte{})
-	if frame[0] != 0x81 {
-		t.Errorf("expected first byte 0x81, got 0x%02x", frame[0])
-	}
-	if frame[1] != 0 {
-		t.Errorf("expected length 0, got %d", frame[1])
-	}
-	if len(frame) != 2 {
-		t.Errorf("expected frame length 2, got %d", len(frame))
-	}
-}
+// buildTextFrame tests removed — golang.org/x/net/websocket handles framing.
 
 // headerContains was removed (now using golang.org/x/net/websocket).
 

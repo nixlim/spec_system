@@ -5,10 +5,8 @@
 package api
 
 import (
-	"encoding/binary"
 	"encoding/json"
 	"log"
-	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -21,9 +19,9 @@ import (
 // WebSocket connection wrapper
 // ---------------------------------------------------------------------------
 
-// wsConn wraps a raw net.Conn with WebSocket framing helpers.
+// wsConn wraps a websocket.Conn with thread-safe writing and keepalive.
 type wsConn struct {
-	conn net.Conn
+	conn *websocket.Conn
 	mu   sync.Mutex
 	done chan struct{} // closed when the connection is shutting down
 }
@@ -33,12 +31,9 @@ func (c *wsConn) writeMessage(data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Set a write deadline to avoid blocking indefinitely on slow clients.
 	_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-
-	frame := buildTextFrame(data)
-	_, err := c.conn.Write(frame)
-	return err
+	// Use websocket.Message.Send to let the library handle framing.
+	return websocket.Message.Send(c.conn, string(data))
 }
 
 // sendPing sends a JSON keepalive message to the client.
@@ -46,87 +41,34 @@ func (c *wsConn) sendPing() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	_ = c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	frame := buildTextFrame([]byte(`{"event":"ping"}`))
-	_, err := c.conn.Write(frame)
-	return err
+	return websocket.Message.Send(c.conn, `{"event":"ping"}`)
 }
 
-// close sends a close frame and closes the underlying connection.
+// close signals the ping goroutine to stop and closes the connection.
 func (c *wsConn) close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Signal the ping goroutine to stop.
 	select {
 	case <-c.done:
 	default:
 		close(c.done)
 	}
 
-	// Send close frame (opcode 0x8).
-	closeFrame := []byte{0x88, 0x00}
-	_ = c.conn.SetWriteDeadline(time.Now().Add(1 * time.Second))
-	_, _ = c.conn.Write(closeFrame)
 	c.conn.Close()
 }
 
-// buildTextFrame constructs a WebSocket text frame (opcode 0x1, FIN bit set,
-// no masking — server-to-client frames are unmasked per RFC 6455).
-func buildTextFrame(payload []byte) []byte {
-	length := len(payload)
-	var frame []byte
-
-	// First byte: FIN + opcode 0x1 (text).
-	frame = append(frame, 0x81)
-
-	// Payload length encoding.
-	if length < 126 {
-		frame = append(frame, byte(length))
-	} else if length < 65536 {
-		frame = append(frame, 126)
-		lenBytes := make([]byte, 2)
-		binary.BigEndian.PutUint16(lenBytes, uint16(length))
-		frame = append(frame, lenBytes...)
-	} else {
-		frame = append(frame, 127)
-		lenBytes := make([]byte, 8)
-		binary.BigEndian.PutUint64(lenBytes, uint64(length))
-		frame = append(frame, lenBytes...)
-	}
-
-	frame = append(frame, payload...)
-	return frame
-}
-
-// readFrames reads WebSocket frames from the connection. It handles ping
-// frames by sending pong replies, and returns when a close frame is received
-// or the connection errors. This keeps the connection alive and detects
-// client disconnection.
+// readFrames reads messages from the WebSocket connection until it closes.
+// This keeps the connection alive and detects client disconnection.
+// With golang.org/x/net/websocket, ping/pong is handled by the library.
 func readFrames(conn *wsConn) {
-	buf := make([]byte, 4096)
+	var msg string
 	for {
-		_ = conn.conn.SetReadDeadline(time.Now().Add(120 * time.Second))
-		n, err := conn.conn.Read(buf)
-		if err != nil {
+		// websocket.Message.Receive blocks until a message arrives or the
+		// connection closes. We don't use the messages — we just need to
+		// detect disconnection.
+		if err := websocket.Message.Receive(conn.conn, &msg); err != nil {
 			return
-		}
-		if n < 2 {
-			continue
-		}
-
-		opcode := buf[0] & 0x0F
-
-		switch opcode {
-		case 0x8: // Close frame
-			return
-		case 0x9: // Ping — reply with pong
-			pong := []byte{0x8A, 0x00} // FIN + pong opcode, zero length
-			conn.mu.Lock()
-			_ = conn.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			_, _ = conn.conn.Write(pong)
-			conn.mu.Unlock()
-		default:
-			// Ignore other frames (text/binary from client).
 		}
 	}
 }
