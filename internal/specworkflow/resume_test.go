@@ -1,6 +1,7 @@
 package specworkflow
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -408,5 +409,121 @@ func TestIsGateState(t *testing.T) {
 				t.Errorf("IsGateState(%s) = %v, want %v", tt.state, got, tt.want)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// reloadFindings tests
+// ---------------------------------------------------------------------------
+
+func TestReloadFindings_LoadsMergedFindings(t *testing.T) {
+	dir := t.TempDir()
+	specDir := filepath.Join(dir, "specs", "test-feature")
+	os.MkdirAll(specDir, 0o755)
+
+	// Write merged findings for round 1 with 2 findings.
+	merged := MergedFindings{
+		SchemaVersion:   "1.0",
+		Round:           1,
+		TotalFindings:   2,
+		TotalAfterDedup: 2,
+		Findings: []MergedFinding{
+			{
+				ID:              "F-001",
+				Description:     "SQL injection risk",
+				Severity:        SeverityCritical,
+				Impact:          "Data breach",
+				Recommendation:  "Use parameterised queries",
+				Lens:            "security",
+				AffectedSection: "3.1",
+				Status:          "open",
+				RoundRaised:     1,
+			},
+			{
+				ID:              "F-002",
+				Description:     "Missing auth check",
+				Severity:        SeverityMajor,
+				Impact:          "Unauthorised access",
+				Recommendation:  "Add auth middleware",
+				Lens:            "security",
+				AffectedSection: "3.2",
+				Status:          "open",
+				RoundRaised:     1,
+			},
+		},
+	}
+	data, err := json.MarshalIndent(merged, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(specDir, "merged-findings-round-1.json"), data, 0o644)
+
+	tracker := NewIssueTracker()
+	reloadFindings(tracker, specDir, 1)
+
+	summary := tracker.GetFindingSummary()
+	if summary.Raised != 2 {
+		t.Errorf("expected 2 raised findings, got %d", summary.Raised)
+	}
+	if summary.OpenCritical != 1 {
+		t.Errorf("expected 1 open critical, got %d", summary.OpenCritical)
+	}
+	if summary.OpenMajor != 1 {
+		t.Errorf("expected 1 open major, got %d", summary.OpenMajor)
+	}
+}
+
+func TestReloadFindings_NoFiles(t *testing.T) {
+	dir := t.TempDir()
+	specDir := filepath.Join(dir, "specs", "empty")
+	os.MkdirAll(specDir, 0o755)
+
+	tracker := NewIssueTracker()
+	reloadFindings(tracker, specDir, 3)
+
+	summary := tracker.GetFindingSummary()
+	if summary.Raised != 0 {
+		t.Errorf("expected 0 raised findings, got %d", summary.Raised)
+	}
+}
+
+func TestReloadFindings_MultipleRounds(t *testing.T) {
+	dir := t.TempDir()
+	specDir := filepath.Join(dir, "specs", "multi-round")
+	os.MkdirAll(specDir, 0o755)
+
+	// Round 1 findings.
+	merged1 := MergedFindings{
+		SchemaVersion: "1.0",
+		Round:         1,
+		Findings: []MergedFinding{
+			{ID: "F-001", Description: "Issue 1", Severity: SeverityCritical, Status: "open", RoundRaised: 1,
+				Impact: "High", Recommendation: "Fix", Lens: "security", AffectedSection: "1.0"},
+		},
+	}
+	data1, _ := json.Marshal(merged1)
+	os.WriteFile(filepath.Join(specDir, "merged-findings-round-1.json"), data1, 0o644)
+
+	// Round 2 findings (new finding + same ID from round 1 should be skipped).
+	merged2 := MergedFindings{
+		SchemaVersion: "1.0",
+		Round:         2,
+		Findings: []MergedFinding{
+			{ID: "F-001", Description: "Issue 1 again", Severity: SeverityCritical, Status: "open", RoundRaised: 1,
+				Impact: "High", Recommendation: "Fix", Lens: "security", AffectedSection: "1.0"},
+			{ID: "F-003", Description: "New issue", Severity: SeverityMinor, Status: "open", RoundRaised: 2,
+				Impact: "Low", Recommendation: "Consider", Lens: "clarity", AffectedSection: "2.0"},
+		},
+	}
+	data2, _ := json.Marshal(merged2)
+	os.WriteFile(filepath.Join(specDir, "merged-findings-round-2.json"), data2, 0o644)
+
+	tracker := NewIssueTracker()
+	reloadFindings(tracker, specDir, 2)
+
+	summary := tracker.GetFindingSummary()
+	// F-001 from round 1 + F-003 from round 2 = 2 unique findings.
+	if summary.Raised != 2 {
+		t.Errorf("expected 2 raised findings (deduplicated), got %d", summary.Raised)
 	}
 }

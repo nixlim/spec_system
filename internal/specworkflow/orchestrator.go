@@ -5,8 +5,10 @@
 package specworkflow
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -367,10 +369,20 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 		emitter = NewChannelEmitter(64)
 	}
 
+	// Build issue tracker — if resuming, reload findings from disk so the
+	// dashboard and downstream agents have the full issue history.
+	tracker := NewIssueTracker()
+	if existingState != nil {
+		reloadFindings(tracker, specDir, existingState.Round)
+		// Sync the findings summary into the persisted state so the
+		// dashboard API reflects the reloaded findings immediately.
+		ws.FindingsSummary = tracker.GetFindingSummary()
+	}
+
 	orch := &Orchestrator{
 		config:          cfg.Config,
 		sm:              sm,
-		tracker:         NewIssueTracker(),
+		tracker:         tracker,
 		logger:          logger,
 		emitter:         emitter,
 		promptBuilder:   promptBuilder,
@@ -385,4 +397,30 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 	}
 
 	return orch, nil
+}
+
+// reloadFindings loads merged findings from all rounds up to maxRound back
+// into the IssueTracker. This is needed when resuming a workflow so the
+// dashboard and downstream agents have the full issue history.
+func reloadFindings(tracker *IssueTracker, specDir string, maxRound int) {
+	for round := 1; round <= maxRound; round++ {
+		mergedPath := filepath.Join(specDir, fmt.Sprintf("merged-findings-round-%d.json", round))
+		data, err := os.ReadFile(mergedPath)
+		if err != nil {
+			continue // file doesn't exist for this round
+		}
+
+		var merged MergedFindings
+		if err := json.Unmarshal(data, &merged); err != nil {
+			log.Printf("[orchestrator] warning: failed to parse %s: %v", mergedPath, err)
+			continue
+		}
+
+		tracker.AddFindings(merged.Findings)
+		log.Printf("[orchestrator] reloaded %d findings from round %d", len(merged.Findings), round)
+	}
+
+	summary := tracker.GetFindingSummary()
+	log.Printf("[orchestrator] issue tracker restored: %d raised, %d open critical, %d open major",
+		summary.Raised, summary.OpenCritical, summary.OpenMajor)
 }
