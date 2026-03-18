@@ -160,7 +160,7 @@ func TestPromptDiscoveryIncludesPlanSpecInstructions(t *testing.T) {
 
 func TestPromptDrafterNonEmpty(t *testing.T) {
 	pb := newTestPromptBuilder(t)
-	prompt, err := pb.BuildDrafterPrompt("/tmp/workspace/specs/auth-feature/confirmed-reqs.json", nil)
+	prompt, err := pb.BuildDrafterPrompt("/tmp/workspace/specs/auth-feature/confirmed-reqs.json", nil, nil)
 	if err != nil {
 		t.Fatalf("BuildDrafterPrompt error: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestPromptDrafterNonEmpty(t *testing.T) {
 
 func TestPromptDrafterEmbedsAllThreeTemplates(t *testing.T) {
 	pb := newTestPromptBuilder(t)
-	prompt, err := pb.BuildDrafterPrompt("/tmp/reqs.json", nil)
+	prompt, err := pb.BuildDrafterPrompt("/tmp/reqs.json", nil, nil)
 	if err != nil {
 		t.Fatalf("BuildDrafterPrompt error: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestPromptDrafterIncludesUserAnswers(t *testing.T) {
 		"What auth provider?": "OAuth2 with Google",
 		"Max session time?":   "24 hours",
 	}
-	prompt, err := pb.BuildDrafterPrompt("/tmp/reqs.json", answers)
+	prompt, err := pb.BuildDrafterPrompt("/tmp/reqs.json", answers, nil)
 	if err != nil {
 		t.Fatalf("BuildDrafterPrompt error: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestPromptDrafterIncludesUserAnswers(t *testing.T) {
 
 func TestPromptDrafterNoUserAnswersSection(t *testing.T) {
 	pb := newTestPromptBuilder(t)
-	prompt, err := pb.BuildDrafterPrompt("/tmp/reqs.json", nil)
+	prompt, err := pb.BuildDrafterPrompt("/tmp/reqs.json", nil, nil)
 	if err != nil {
 		t.Fatalf("BuildDrafterPrompt error: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestPromptDrafterNoUserAnswersSection(t *testing.T) {
 
 func TestPromptDrafterOutputPaths(t *testing.T) {
 	pb := newTestPromptBuilder(t)
-	prompt, err := pb.BuildDrafterPrompt("/tmp/reqs.json", nil)
+	prompt, err := pb.BuildDrafterPrompt("/tmp/reqs.json", nil, nil)
 	if err != nil {
 		t.Fatalf("BuildDrafterPrompt error: %v", err)
 	}
@@ -239,6 +239,38 @@ func TestPromptDrafterOutputPaths(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "auth-feature-holdouts.md") {
 		t.Error("expected holdouts output path")
+	}
+}
+
+func TestPromptDrafterIncludesContextDocs(t *testing.T) {
+	pb := newTestPromptBuilder(t)
+	docs := []string{
+		"/workspace/specs/auth-feature/gate1-corrections.json",
+		"/workspace/specs/auth-feature/user-answers.json",
+		"/workspace/source-docs/requirements.pdf",
+	}
+	prompt, err := pb.BuildDrafterPrompt("/tmp/reqs.json", nil, docs)
+	if err != nil {
+		t.Fatalf("BuildDrafterPrompt error: %v", err)
+	}
+	if !strings.Contains(prompt, "Context Documents") {
+		t.Error("expected Context Documents section")
+	}
+	for _, doc := range docs {
+		if !strings.Contains(prompt, doc) {
+			t.Errorf("expected context doc path %q in prompt", doc)
+		}
+	}
+}
+
+func TestPromptDrafterNoContextDocsSection(t *testing.T) {
+	pb := newTestPromptBuilder(t)
+	prompt, err := pb.BuildDrafterPrompt("/tmp/reqs.json", nil, nil)
+	if err != nil {
+		t.Fatalf("BuildDrafterPrompt error: %v", err)
+	}
+	if strings.Contains(prompt, "Context Documents") {
+		t.Error("should not include Context Documents section when none provided")
 	}
 }
 

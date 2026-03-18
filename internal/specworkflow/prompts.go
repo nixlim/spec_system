@@ -187,9 +187,10 @@ func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string, ctx ...Di
 
 // BuildDrafterPrompt constructs the prompt for the drafter agent. It embeds
 // the spec-template, bdd-template, and test-dataset-template from the
-// SkillCache, references the confirmed requirements JSON, and optionally
-// includes user answers to open questions.
-func (pb *PromptBuilder) BuildDrafterPrompt(confirmedReqsPath string, userAnswers map[string]string) (string, error) {
+// SkillCache, references the confirmed requirements JSON, optionally
+// includes user answers to open questions, and lists additional context
+// documents that the agent must read before drafting.
+func (pb *PromptBuilder) BuildDrafterPrompt(confirmedReqsPath string, userAnswers map[string]string, contextDocs []string) (string, error) {
 	specTemplate, err := pb.skills.GetSkillContent(SpecTemplate)
 	if err != nil {
 		return "", fmt.Errorf("loading spec template: %w", err)
@@ -238,6 +239,17 @@ func (pb *PromptBuilder) BuildDrafterPrompt(confirmedReqsPath string, userAnswer
 		for q, a := range userAnswers {
 			fmt.Fprintf(&b, "**Q:** %s\n**A:** %s\n\n", q, a)
 		}
+	}
+
+	// Context documents — additional files the agent must read before drafting.
+	if len(contextDocs) > 0 {
+		b.WriteString("## Context Documents\n\n")
+		b.WriteString("Read and incorporate the following documents. They contain source material,\n")
+		b.WriteString("user corrections, and other context essential for producing an accurate spec:\n\n")
+		for _, doc := range contextDocs {
+			fmt.Fprintf(&b, "- %s\n", doc)
+		}
+		b.WriteString("\n")
 	}
 
 	// Output schema.
