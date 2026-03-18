@@ -112,8 +112,9 @@ func (m *WorkflowManager) GetOrchestrator() *specworkflow.Orchestrator {
 	return m.orchestrator
 }
 
-// GetTracker returns the issue tracker from the current orchestrator,
-// or a new empty tracker if no workflow is running.
+// GetTracker returns the issue tracker from the current orchestrator.
+// If no orchestrator is running, it falls back to loading merged findings
+// from disk so the dashboard shows issues after a server restart.
 func (m *WorkflowManager) GetTracker() *specworkflow.IssueTracker {
 	m.mu.Lock()
 	orch := m.orchestrator
@@ -121,6 +122,15 @@ func (m *WorkflowManager) GetTracker() *specworkflow.IssueTracker {
 
 	if orch != nil {
 		return orch.Tracker()
+	}
+
+	// Fall back to disk: find the latest workflow state and load its
+	// merged findings into a fresh tracker.
+	if diskState := findLatestDiskState(m.workspaceDir); diskState != nil {
+		tracker := specworkflow.NewIssueTracker()
+		specDir := filepath.Join(m.workspaceDir, "specs", diskState.FeatureName)
+		specworkflow.ReloadFindings(tracker, specDir, diskState.Round)
+		return tracker
 	}
 	return specworkflow.NewIssueTracker()
 }

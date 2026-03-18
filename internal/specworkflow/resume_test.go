@@ -413,7 +413,7 @@ func TestIsGateState(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// reloadFindings tests
+// ReloadFindings tests
 // ---------------------------------------------------------------------------
 
 func TestReloadFindings_LoadsMergedFindings(t *testing.T) {
@@ -459,7 +459,7 @@ func TestReloadFindings_LoadsMergedFindings(t *testing.T) {
 	os.WriteFile(filepath.Join(specDir, "merged-findings-round-1.json"), data, 0o644)
 
 	tracker := NewIssueTracker()
-	reloadFindings(tracker, specDir, 1)
+	ReloadFindings(tracker, specDir, 1)
 
 	summary := tracker.GetFindingSummary()
 	if summary.Raised != 2 {
@@ -479,7 +479,7 @@ func TestReloadFindings_NoFiles(t *testing.T) {
 	os.MkdirAll(specDir, 0o755)
 
 	tracker := NewIssueTracker()
-	reloadFindings(tracker, specDir, 3)
+	ReloadFindings(tracker, specDir, 3)
 
 	summary := tracker.GetFindingSummary()
 	if summary.Raised != 0 {
@@ -519,7 +519,7 @@ func TestReloadFindings_MultipleRounds(t *testing.T) {
 	os.WriteFile(filepath.Join(specDir, "merged-findings-round-2.json"), data2, 0o644)
 
 	tracker := NewIssueTracker()
-	reloadFindings(tracker, specDir, 2)
+	ReloadFindings(tracker, specDir, 2)
 
 	summary := tracker.GetFindingSummary()
 	// F-001 from round 1 + F-003 from round 2 = 2 unique findings.

@@ -373,7 +373,7 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 	// dashboard and downstream agents have the full issue history.
 	tracker := NewIssueTracker()
 	if existingState != nil {
-		reloadFindings(tracker, specDir, existingState.Round)
+		ReloadFindings(tracker, specDir, existingState.Round)
 		// Sync the findings summary into the persisted state so the
 		// dashboard API reflects the reloaded findings immediately.
 		ws.FindingsSummary = tracker.GetFindingSummary()
@@ -399,10 +399,12 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 	return orch, nil
 }
 
-// reloadFindings loads merged findings from all rounds up to maxRound back
+// ReloadFindings loads merged findings from all rounds up to maxRound back
 // into the IssueTracker. This is needed when resuming a workflow so the
-// dashboard and downstream agents have the full issue history.
-func reloadFindings(tracker *IssueTracker, specDir string, maxRound int) {
+// dashboard and downstream agents have the full issue history. It is also
+// called by the API layer to populate the tracker from disk when no
+// orchestrator is running.
+func ReloadFindings(tracker *IssueTracker, specDir string, maxRound int) {
 	for round := 1; round <= maxRound; round++ {
 		mergedPath := filepath.Join(specDir, fmt.Sprintf("merged-findings-round-%d.json", round))
 		data, err := os.ReadFile(mergedPath)
