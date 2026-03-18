@@ -348,6 +348,9 @@ func DefaultClaudeRunner(workspaceDir string, otelPort int) *ClaudeRunner {
 		env["OTEL_METRIC_EXPORT_INTERVAL"] = "5000"
 		env["OTEL_LOGS_EXPORT_INTERVAL"] = "2000"
 		env["OTEL_LOG_TOOL_DETAILS"] = "1"
+		// Tag child processes so the OTEL receiver can filter out
+		// telemetry from unrelated Claude Code instances on the system.
+		env["OTEL_SERVICE_NAME"] = "adversarial-spec-system"
 	}
 
 	return &ClaudeRunner{

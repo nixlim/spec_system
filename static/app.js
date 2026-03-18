@@ -1094,6 +1094,56 @@
           actions.appendChild(viewBtn);
         }
 
+        // Restart button for active or gate states — stops and starts fresh.
+        if (isActive || isGate) {
+          var liveRestartBtn = el("button", {
+            className: "btn btn-sm",
+            textContent: "Restart",
+            style: "background:#fff3cd;color:#856404;border-color:#ffc107;"
+          });
+          liveRestartBtn.addEventListener("click", (function (featureName) {
+            return function () {
+              if (!confirm("Stop and restart workflow for \"" + featureName + "\"? This will cancel the running workflow, delete all results, and start fresh.")) return;
+              liveRestartBtn.disabled = true;
+              liveRestartBtn.textContent = "Restarting...";
+              fetchJSON("/api/workflow/restart", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ feature_name: featureName })
+              }).then(function () {
+                // Auto-start fresh workflow.
+                return fetchJSON("/api/workflow/start", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    title: featureName,
+                    feature_name: featureName,
+                    description: "Restarted workflow"
+                  })
+                });
+              }).then(function (data) {
+                updateWorkflowStatus({
+                  state: data.state || "INIT",
+                  feature_name: data.feature_name || featureName,
+                  round: data.round || 1,
+                  cost_usd: 0,
+                  wall_clock_seconds: 0,
+                  agent_invocations: 0
+                });
+                addActivityEntry("Workflow restarted: " + featureName, "info");
+                clearChildren($("#gate-panels"));
+                startWorkflowPoller();
+                loadFeatureList();
+              }).catch(function (err) {
+                alert("Restart failed: " + err.message);
+                liveRestartBtn.disabled = false;
+                liveRestartBtn.textContent = "Restart";
+              });
+            };
+          })(f.feature_name));
+          actions.appendChild(liveRestartBtn);
+        }
+
         // Delete button (always shown for features with content)
         var deleteBtn = el("button", {
           className: "btn btn-danger btn-sm",

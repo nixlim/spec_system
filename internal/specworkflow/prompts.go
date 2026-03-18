@@ -67,6 +67,8 @@ type DiscoveryContext struct {
 	Corrections map[string]string
 	// UserAnswers from the human reviewer (open_questions and assumption answers).
 	UserAnswers map[string]interface{}
+	// ReviewerComment is free-text feedback from the human reviewer.
+	ReviewerComment string
 	// PreviousOutput is the previous discovery output JSON (for context).
 	PreviousOutput *DiscoveryOutput
 }
@@ -146,6 +148,14 @@ func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string, ctx ...Di
 						b.WriteString("\n")
 					}
 				}
+			}
+
+			if dc.ReviewerComment != "" {
+				b.WriteString("### Reviewer Comments\n\n")
+				b.WriteString("The reviewer provided the following additional notes and observations.\n")
+				b.WriteString("Incorporate these into your analysis:\n\n")
+				b.WriteString(dc.ReviewerComment)
+				b.WriteString("\n\n")
 			}
 
 			if dc.PreviousOutput != nil {

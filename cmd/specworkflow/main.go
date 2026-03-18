@@ -133,9 +133,10 @@ func main() {
 		handleTaskRouting(workflowManager).ServeHTTP(w, r)
 	})
 
-	// --- Workflow control endpoints (retry/reset) ---
+	// --- Workflow control endpoints (retry/reset/restart) ---
 	mux.HandleFunc("/api/workflow/retry", api.HandleRetryWorkflow(workflowManager))
 	mux.HandleFunc("/api/workflow/reset", api.HandleResetWorkflow(workflowManager))
+	mux.HandleFunc("/api/workflow/restart", api.HandleRestartWorkflow(workflowManager))
 
 	// --- Metrics endpoint (persisted OTEL telemetry) ---
 	mux.HandleFunc("/api/metrics", api.HandleGetMetrics(metricsStore))

@@ -27,6 +27,9 @@ func (o *Orchestrator) handleDiscovery(goal GoalInput, state *WorkflowStateJSON,
 			if ua, ok := corrFile["user_answers"].(map[string]interface{}); ok {
 				dc.UserAnswers = ua
 			}
+			if rc, ok := corrFile["reviewer_comment"].(string); ok {
+				dc.ReviewerComment = rc
+			}
 			// Load previous discovery output for context.
 			outPath := filepath.Join(specDir, "discovery-output.json")
 			if prevData, prevErr := os.ReadFile(outPath); prevErr == nil {
@@ -148,6 +151,12 @@ func (o *Orchestrator) handleHumanGate1(state *WorkflowStateJSON, specDir string
 			correctionData["corrections"] = resp.Data
 		}
 
+		// Include reviewer comment in corrections file so it's available
+		// during re-discovery (not just via human-comments.json).
+		if resp.Comment != "" {
+			correctionData["reviewer_comment"] = resp.Comment
+		}
+
 		corrPath := filepath.Join(specDir, "gate1-corrections.json")
 		corrJSON, marshalErr := json.MarshalIndent(correctionData, "", "  ")
 		if marshalErr == nil {
@@ -159,12 +168,23 @@ func (o *Orchestrator) handleHumanGate1(state *WorkflowStateJSON, specDir string
 		}
 
 		nCorrections := 0
-		if corrections, ok := resp.Data.(map[string]string); ok {
-			nCorrections = len(corrections)
+		hasUserAnswers := false
+		hasComment := resp.Comment != ""
+		if m, ok := resp.Data.(map[string]interface{}); ok {
+			if corr, exists := m["corrections"]; exists {
+				if cm, ok := corr.(map[string]interface{}); ok {
+					nCorrections = len(cm)
+				} else if cm, ok := corr.(map[string]string); ok {
+					nCorrections = len(cm)
+				}
+			}
+			if _, exists := m["user_answers"]; exists {
+				hasUserAnswers = true
+			}
 		}
 		o.emitter.Emit(NewGateResponseEvent("requirements_confirmation", "correct",
-			fmt.Sprintf("Human requested corrections (%d fields), re-running discovery (attempt %d/%d)",
-				nCorrections, state.Gate1CorrectionCount+1, o.config.MaxGateCorrections)))
+			fmt.Sprintf("Human requested corrections (%d fields, answers=%v, comment=%v), re-running discovery (attempt %d/%d)",
+				nCorrections, hasUserAnswers, hasComment, state.Gate1CorrectionCount+1, o.config.MaxGateCorrections)))
 
 		// Extract corrections map for the gate handler (just the corrections,
 		// not user_answers — those are already saved to disk).

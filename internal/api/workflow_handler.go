@@ -405,6 +405,8 @@ func HandleGateApprove(manager *WorkflowManager) http.HandlerFunc {
 		case "correct":
 			// Bundle corrections and user_answers together so the orchestrator
 			// can save both to gate1-corrections.json.
+			log.Printf("[gate-approve] correct: %d corrections, user_answers=%v, comment=%d chars",
+				len(req.Corrections), req.UserAnswers != nil, len(req.Comment))
 			corrData := map[string]interface{}{
 				"corrections": req.Corrections,
 			}
@@ -707,6 +709,66 @@ func HandleRetryWorkflow(manager *WorkflowManager) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, map[string]string{
 			"status":  "cleared",
 			"message": "Ready to start a new workflow",
+		})
+	}
+}
+
+// HandleRestartWorkflow returns an HTTP handler for POST /api/workflow/restart.
+// It stops any running workflow, deletes the feature's spec directory so the
+// workflow starts completely fresh, resets persisted metrics, and starts a
+// new workflow for the same feature.
+func HandleRestartWorkflow(manager *WorkflowManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			FeatureName string `json:"feature_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+			return
+		}
+		if req.FeatureName == "" {
+			writeError(w, http.StatusBadRequest, "feature_name is required")
+			return
+		}
+
+		// 1. Cancel running workflow if any.
+		manager.mu.Lock()
+		if orch := manager.orchestrator; orch != nil {
+			orch.Cancel()
+			manager.orchestrator = nil
+		}
+		manager.mu.Unlock()
+
+		// Give the orchestrator goroutine a moment to exit cleanly.
+		time.Sleep(500 * time.Millisecond)
+
+		// 2. Delete the feature's spec directory.
+		featureDir := filepath.Join(manager.workspaceDir, "specs", req.FeatureName)
+		if err := os.RemoveAll(featureDir); err != nil {
+			log.Printf("[workflow] restart: failed to remove %s: %v", featureDir, err)
+		}
+
+		// 3. Reset persisted metrics.
+		if manager.metricsStore != nil {
+			if err := manager.metricsStore.ResetForFeature(req.FeatureName); err != nil {
+				log.Printf("[workflow] restart: failed to reset metrics: %v", err)
+			}
+		}
+
+		// 4. Reset OTEL receiver in-memory accumulators.
+		if manager.otelReceiver != nil {
+			manager.otelReceiver.ResetMetrics()
+		}
+
+		log.Printf("[workflow] restarted feature %q — cancelled, deleted state, reset metrics", req.FeatureName)
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":  "restarted",
+			"message": fmt.Sprintf("Workflow %q stopped and state cleared. Start a new workflow to begin fresh.", req.FeatureName),
 		})
 	}
 }

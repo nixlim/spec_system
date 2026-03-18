@@ -178,6 +178,25 @@ func (recv *OTELReceiver) Stop() {
 // MetricsServiceServer implementation
 // ---------------------------------------------------------------------------
 
+// otelServiceName is the expected service.name resource attribute on
+// incoming OTLP data. Data from other Claude Code instances is silently
+// dropped so metrics only reflect our child processes.
+const otelServiceName = "adversarial-spec-system"
+
+// isOwnResource checks whether the OTLP resource carries our service name.
+// Returns true if the resource matches or has no service.name (backward compat).
+func isOwnResource(attrs []*commonpb.KeyValue) bool {
+	for _, kv := range attrs {
+		if kv.GetKey() == "service.name" {
+			if sv, ok := kv.GetValue().GetValue().(*commonpb.AnyValue_StringValue); ok {
+				return sv.StringValue == otelServiceName
+			}
+		}
+	}
+	// No service.name attribute — accept for backward compatibility.
+	return true
+}
+
 // Export handles incoming ExportMetricsServiceRequest RPCs.
 func (recv *OTELReceiver) Export(_ context.Context, req *colmetricspb.ExportMetricsServiceRequest) (*colmetricspb.ExportMetricsServiceResponse, error) {
 	if req == nil {
@@ -186,6 +205,10 @@ func (recv *OTELReceiver) Export(_ context.Context, req *colmetricspb.ExportMetr
 
 	changed := false
 	for _, rm := range req.GetResourceMetrics() {
+		// Filter: only process metrics from our own child processes.
+		if !isOwnResource(rm.GetResource().GetAttributes()) {
+			continue
+		}
 		for _, sm := range rm.GetScopeMetrics() {
 			for _, m := range sm.GetMetrics() {
 				if recv.processMetric(m) {
@@ -282,6 +305,10 @@ func (h *otelLogsHandler) Export(_ context.Context, req *collogspb.ExportLogsSer
 	}
 
 	for _, rl := range req.GetResourceLogs() {
+		// Filter: only process logs from our own child processes.
+		if !isOwnResource(rl.GetResource().GetAttributes()) {
+			continue
+		}
 		for _, sl := range rl.GetScopeLogs() {
 			for _, lr := range sl.GetLogRecords() {
 				h.recv.processLogRecord(lr)
