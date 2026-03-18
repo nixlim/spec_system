@@ -136,12 +136,8 @@ func HandleGetCurrentSpec(config SpecAPIConfig) http.HandlerFunc {
 		}
 
 		version := state.CurrentSpecVersion
-		if version < 1 {
-			writeError(w, http.StatusNotFound, "no spec version available yet")
-			return
-		}
-
 		path := specFilePath(config.WorkspaceDir, resolveFeatureName(config), version)
+
 		content, err := os.ReadFile(path)
 		if err != nil {
 			if os.IsNotExist(err) {
