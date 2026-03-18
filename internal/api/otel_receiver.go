@@ -8,6 +8,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -375,6 +376,10 @@ func (recv *OTELReceiver) emitMetricsEvent() {
 	event := specworkflow.EventEnvelope{
 		Event: specworkflow.EventAgentMetrics,
 		Data:  payload,
+	}
+	// Debug: log the JSON that will be sent
+	if debugJSON, err := json.Marshal(event); err == nil {
+		log.Printf("[otel] broadcasting event JSON: %s", string(debugJSON))
 	}
 	recv.hub.Broadcast(event)
 }
