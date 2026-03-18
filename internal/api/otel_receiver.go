@@ -8,7 +8,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -47,6 +46,7 @@ type OTELReceiver struct {
 	totalCostUSD      float64
 	totalAPICalls     int
 	toolResults       []ToolResultEvent
+	broadcastCount    int
 }
 
 // otelLogsHandler implements LogsServiceServer separately from OTELReceiver.
@@ -368,18 +368,17 @@ func (recv *OTELReceiver) emitMetricsEvent() {
 	}
 	recv.mu.Unlock()
 
-	clientCount := recv.hub.ClientCount()
-	log.Printf("[otel] metrics update: in=%d out=%d cache=%d cost=$%.4f api_calls=%d (ws_clients=%d)",
-		payload.InputTokens, payload.OutputTokens, payload.CacheReadTokens,
-		payload.TotalCostUSD, payload.TotalAPICalls, clientCount)
+	// Log every 10th update to avoid noise (metrics arrive every 5s).
+	recv.broadcastCount++
+	if recv.broadcastCount%10 == 1 {
+		log.Printf("[otel] metrics: in=%d out=%d cache=%d cost=$%.4f api_calls=%d",
+			payload.InputTokens, payload.OutputTokens, payload.CacheReadTokens,
+			payload.TotalCostUSD, payload.TotalAPICalls)
+	}
 
 	event := specworkflow.EventEnvelope{
 		Event: specworkflow.EventAgentMetrics,
 		Data:  payload,
-	}
-	// Debug: log the JSON that will be sent
-	if debugJSON, err := json.Marshal(event); err == nil {
-		log.Printf("[otel] broadcasting event JSON: %s", string(debugJSON))
 	}
 	recv.hub.Broadcast(event)
 }
