@@ -294,8 +294,8 @@ func TestDefaultClaudeRunner(t *testing.T) {
 	if runner.WorkspaceDir != "/tmp/workspace" {
 		t.Errorf("expected workspace '/tmp/workspace', got %q", runner.WorkspaceDir)
 	}
-	if runner.Timeout != 600*time.Second {
-		t.Errorf("expected timeout 600s, got %v", runner.Timeout)
+	if runner.Timeout != 1800*time.Second {
+		t.Errorf("expected timeout 1800s, got %v", runner.Timeout)
 	}
 	if runner.Env["CLAUDE_CODE_MAX_TURNS"] != "50" {
 		t.Errorf("expected CLAUDE_CODE_MAX_TURNS=50, got %q", runner.Env["CLAUDE_CODE_MAX_TURNS"])

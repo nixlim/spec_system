@@ -909,21 +909,61 @@ func HandleResumeWorkflow(manager *WorkflowManager) http.HandlerFunc {
 
 // determineResumeState figures out the best state to resume a workflow from
 // based on what artefacts exist on disk. It works backward from the most
-// advanced state that has its prerequisites met.
+// advanced state that has its prerequisites met, checking the current round
+// from the persisted state.
 func determineResumeState(state *specworkflow.WorkflowStateJSON, workspaceDir, featureName string) specworkflow.WorkflowState {
 	specDir := filepath.Join(workspaceDir, "specs", featureName)
+	round := state.Round
+	if round < 1 {
+		round = 1
+	}
 
-	// If drafter output exists, we can go to REVIEWING (or HUMAN_GATE_2).
+	// If drafter output exists, we're past drafting. Check how far into
+	// the review cycle we got by inspecting artefacts in reverse order.
 	drafterPath := filepath.Join(specDir, "drafter-output.json")
 	if _, err := os.Stat(drafterPath); err == nil {
-		// Drafter output exists. Check if spec-v0.md exists too.
+		// Drafter output exists. Check if spec exists too.
 		specPath := filepath.Join(specDir, "spec-v0.md")
-		if _, err := os.Stat(specPath); err == nil {
-			// Both exist — resume into REVIEWING.
+		if _, err := os.Stat(specPath); err != nil {
+			// Drafter output but no spec — resume into HUMAN_GATE_2.
+			return specworkflow.StateHumanGate2
+		}
+
+		// Spec exists — check how far into the review/revise/judge cycle.
+		// Work backward: judge -> revising -> reviewing.
+
+		// Check for judge output for this round.
+		judgePath := filepath.Join(specDir, fmt.Sprintf("judge-round-%d.json", round))
+		if _, err := os.Stat(judgePath); err == nil {
+			// Judge completed — the orchestrator loop will evaluate the
+			// verdict and decide the next action. Resume into JUDGING so
+			// the orchestrator can process the existing output.
+			return specworkflow.StateJudging
+		}
+
+		// Check for revision output for this round (reviser completed).
+		revisionPath := filepath.Join(specDir, fmt.Sprintf("revision-round-%d.json", round))
+		if _, err := os.Stat(revisionPath); err == nil {
+			// Revision exists — move on to judging.
+			return specworkflow.StateJudging
+		}
+
+		// Check for merged findings (reviews completed, ready for revising).
+		mergedPath := filepath.Join(specDir, fmt.Sprintf("merged-findings-round-%d.json", round))
+		if _, err := os.Stat(mergedPath); err == nil {
+			// Reviews completed and merged — resume into REVISING.
+			return specworkflow.StateRevising
+		}
+
+		// Check if any individual review outputs exist for this round.
+		if hasReviewOutputs(specDir, round) {
+			// Some reviews exist but not merged yet — resume into REVIEWING
+			// so the orchestrator can re-run/complete the review dispatch.
 			return specworkflow.StateReviewing
 		}
-		// Drafter output but no spec — resume into HUMAN_GATE_2.
-		return specworkflow.StateHumanGate2
+
+		// No review artefacts — start reviewing from scratch.
+		return specworkflow.StateReviewing
 	}
 
 	// If discovery output exists, we can go to DRAFTING (or HUMAN_GATE_1).
@@ -934,6 +974,18 @@ func determineResumeState(state *specworkflow.WorkflowStateJSON, workspaceDir, f
 
 	// Nothing useful on disk — start from discovery.
 	return specworkflow.StateDiscovery
+}
+
+// hasReviewOutputs checks whether any reviewer output files exist for the
+// given round in the spec directory.
+func hasReviewOutputs(specDir string, round int) bool {
+	for _, letter := range []string{"a", "b", "c", "d"} {
+		p := filepath.Join(specDir, fmt.Sprintf("review-%s-round-%d.json", letter, round))
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // HandleRestartWorkflow returns an HTTP handler for POST /api/workflow/restart.

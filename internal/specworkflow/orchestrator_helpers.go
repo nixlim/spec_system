@@ -101,11 +101,15 @@ func (o *Orchestrator) dispatchAgent(agentName, prompt, outputPath string) (cost
 	state.CumulativeCostUSD += cost
 
 	if runErr != nil {
+		// Classify the error: check for timeout (context deadline) before
+		// falling back to generic crash. The runner returns a descriptive
+		// error message that we can inspect.
+		errType := classifyRunError(runErr)
 		o.logger.LogAgentComplete(agentName, agentName, duration, cost, false)
-		o.logger.LogAgentError(agentName, ErrCrash, runErr.Error())
+		o.logger.LogAgentError(agentName, errType, runErr.Error())
 		o.emitter.Emit(NewAgentCompleteEvent(agentName, state.Round, false, duration, cost))
-		o.emitter.Emit(NewAgentErrorEvent(agentName, ErrCrash, 0, o.config.MaxRetries))
-		return cost, duration, runErr
+		o.emitter.Emit(NewAgentErrorEvent(agentName, errType, 0, o.config.MaxRetries))
+		return cost, duration, fmt.Errorf("agent %s failed: %s — %s", agentName, errType, runErr.Error())
 	}
 
 	// Detect failure type.
@@ -185,6 +189,23 @@ func (o *Orchestrator) handleAgentError(agentName string, err error, cost float6
 	default:
 		return fmt.Errorf("agent %s failed: %w", agentName, err)
 	}
+}
+
+// classifyRunError determines the failure type from a runner error.
+// It inspects the error message for timeout indicators (from context
+// deadline exceeded) before falling back to ErrCrash.
+func classifyRunError(err error) string {
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "timed out") || strings.Contains(msg, "deadline exceeded") {
+		return ErrTimeout
+	}
+	if containsAny(msg, contextOverflowPatterns) {
+		return ErrContextOverflow
+	}
+	if containsAny(msg, rateLimitPatterns) {
+		return ErrRateLimited
+	}
+	return ErrCrash
 }
 
 // detectErrorType extracts the failure type from an error message.

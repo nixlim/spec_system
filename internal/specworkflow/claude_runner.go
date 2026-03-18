@@ -356,7 +356,7 @@ func DefaultClaudeRunner(workspaceDir string, otelPort int) *ClaudeRunner {
 	return &ClaudeRunner{
 		Command:      "claude",
 		Args:         []string{"--dangerously-skip-permissions", "--output-format", "json", "--verbose"},
-		Timeout:      600 * time.Second,
+		Timeout:      1800 * time.Second,
 		WorkspaceDir: workspaceDir,
 		Env:          env,
 	}
