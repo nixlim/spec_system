@@ -32,6 +32,9 @@
   var gate1CorrectionCount = 0;
   var gate2AnswerDisabled = false;
 
+  // Workflow poller — periodically checks for state changes during active runs
+  var workflowPoller = null;
+
   // Messages tab state
   var messagesPollingTimer = null;
   var lastServerLogCount = 0;
@@ -64,6 +67,16 @@
 
   function clearChildren(node) {
     while (node.firstChild) node.removeChild(node.firstChild);
+  }
+
+  // Simple string hash for stable keying (returns e.g. "q1a2b3c").
+  function simpleHash(str) {
+    var hash = 0;
+    for (var i = 0; i < str.length; i++) {
+      hash = ((hash << 5) - hash) + str.charCodeAt(i);
+      hash |= 0; // Convert to 32-bit integer
+    }
+    return "q" + Math.abs(hash).toString(36);
   }
 
   // -----------------------------------------------------------------------
@@ -405,16 +418,60 @@
   function pollWorkflowStatus() {
     fetchJSON("/api/workflow/status").then(function (data) {
       if (!data || !data.state) return;
+
+      var state = data.state.toUpperCase();
+
       // Don't overwrite an active workflow display with an "idle" response.
       // This prevents the race where the poll returns idle before the
       // orchestrator goroutine has started.
-      if (data.state.toUpperCase() === "IDLE" && workflowActive) return;
-      if (data.state.toUpperCase() !== "IDLE") {
+      if (state === "IDLE" && workflowActive) return;
+
+      if (state !== "IDLE") {
         updateWorkflowStatus(data);
+      }
+
+      // If idle or terminal, stop the workflow poller.
+      if (state === "IDLE" || state === "FINALIZED" || state === "ESCALATED") {
+        stopWorkflowPoller();
+        return;
+      }
+
+      // If gate state and gate panel not already showing, show it.
+      if (state.indexOf("HUMAN_GATE") !== -1) {
+        var gatePanel = $(".gate-panel");
+        if (!gatePanel) {
+          var feature = data.feature_name;
+          if (state === "HUMAN_GATE_1" && feature) {
+            Promise.all([
+              fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/discovery").catch(function () { return null; }),
+              fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/files/gate1-corrections.json").catch(function () { return null; })
+            ]).then(function (results) {
+              if (results[0]) showGate1Panel({ gate_type: "requirements_confirmation", data: results[0], task_id: feature }, results[1]);
+            });
+          } else if (state === "HUMAN_GATE_2" && feature) {
+            fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/files/drafter-output.json").then(function (drafter) {
+              if (drafter) showGate2Panel({ gate_type: "ambiguity_resolution", data: drafter, task_id: feature });
+            }).catch(function () {});
+          }
+        }
       }
     }).catch(function () {
       // No workflow running or endpoint not available — ignore
     });
+  }
+
+  function startWorkflowPoller() {
+    if (workflowPoller) return;
+    workflowPoller = setInterval(function () {
+      pollWorkflowStatus();
+    }, 5000);
+  }
+
+  function stopWorkflowPoller() {
+    if (workflowPoller) {
+      clearInterval(workflowPoller);
+      workflowPoller = null;
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -488,6 +545,9 @@
   // -----------------------------------------------------------------------
 
   function handleEvent(envelope) {
+    // Keepalive ping — ignore silently.
+    if (envelope.event === "ping") return;
+
     // Add ALL WebSocket events to the Messages tab log.
     addWsEventToMessages(envelope);
 
@@ -672,6 +732,7 @@
                   agent_invocations: 0
                 });
                 addActivityEntry("Workflow restarted: " + featureName, "info");
+                startWorkflowPoller();
                 loadFeatureList();
               }).catch(function (err) {
                 alert("Restart failed: " + err.message);
@@ -718,6 +779,7 @@
                   agent_invocations: 0
                 });
                 addActivityEntry("Workflow resumed: " + featureName + " at " + stateStr, "info");
+                startWorkflowPoller();
                 loadFeatureList();
 
                 // Fetch the gate data (and previous corrections) and show the gate panel.
@@ -856,6 +918,7 @@
           agent_invocations: 0
         });
         addActivityEntry("Workflow started: " + (data.feature_name || payload.feature_name), "info");
+        startWorkflowPoller();
         form.reset();
         // Collapse the new workflow section and refresh the list
         var details = $("#new-workflow-section");
@@ -1339,7 +1402,10 @@
     var taskId = data.task_id || "";
 
     var panel = el("div", { className: "gate-panel" });
-    var header = '<h3><span class="gate-badge">Human Gate 1</span> Requirements Confirmation</h3>';
+    var header = '<div style="display:flex;justify-content:space-between;align-items:center;">' +
+      '<h3><span class="gate-badge">Human Gate 1</span> Requirements Confirmation</h3>' +
+      '<button id="gate1-copy" class="btn btn-sm" style="background:#eee;color:#333;">Copy</button>' +
+      '</div>';
     var content = "";
 
     // Problem statement
@@ -1437,18 +1503,69 @@
     panel.innerHTML = header + content;
     container.appendChild(panel);
 
+    // Wire the copy button
+    var copyBtn = panel.querySelector("#gate1-copy");
+    if (copyBtn) {
+      copyBtn.addEventListener("click", function () {
+        var textContent = panel.innerText || panel.textContent;
+        navigator.clipboard.writeText(textContent).then(function () {
+          copyBtn.textContent = "Copied!";
+          setTimeout(function () { copyBtn.textContent = "Copy"; }, 2000);
+        }).catch(function () {
+          // Fallback: select all text in the panel
+          var range = document.createRange();
+          range.selectNodeContents(panel);
+          window.getSelection().removeAllRanges();
+          window.getSelection().addRange(range);
+        });
+      });
+    }
+
     // Pre-fill textareas with previous corrections if available.
+    // Matches by question/assumption text hash so answers survive question reordering.
     if (previousCorrections) {
       var ua = previousCorrections.user_answers || {};
       var oqAnswers = ua.open_questions || {};
-      Object.keys(oqAnswers).forEach(function (idx) {
-        var ta = panel.querySelector('.gate-answer[data-question-idx="' + idx + '"]');
-        if (ta) ta.value = oqAnswers[idx];
+      $$(".gate-question", panel).forEach(function (qDiv) {
+        var qTextEl = qDiv.querySelector(".gate-question-text");
+        if (!qTextEl) return;
+        var qText = qTextEl.textContent.trim();
+        var qHash = simpleHash(qText);
+        var ta = qDiv.querySelector(".gate-answer");
+        if (!ta) return;
+        // Try hash-keyed match first (new format)
+        if (oqAnswers[qHash]) {
+          var entry = oqAnswers[qHash];
+          ta.value = typeof entry === "object" ? entry.answer : entry;
+        } else {
+          // Fallback: try legacy index-based match
+          var idx = ta.dataset.questionIdx;
+          if (oqAnswers[idx]) {
+            var legacyEntry = oqAnswers[idx];
+            ta.value = typeof legacyEntry === "object" ? legacyEntry.answer : legacyEntry;
+          }
+        }
       });
+
       var asAnswers = ua.assumptions || {};
-      Object.keys(asAnswers).forEach(function (idx) {
-        var ta = panel.querySelector('.gate-assumption-answer[data-assumption-idx="' + idx + '"]');
-        if (ta) ta.value = asAnswers[idx];
+      $$(".gate-assumption-answer", panel).forEach(function (ta) {
+        var li = ta.closest("li");
+        if (!li) return;
+        var strongEl = li.querySelector("strong");
+        var aText = strongEl && strongEl.nextSibling ? strongEl.nextSibling.textContent.trim() : "";
+        var aHash = simpleHash(aText);
+        // Try hash-keyed match first (new format)
+        if (asAnswers[aHash]) {
+          var entry = asAnswers[aHash];
+          ta.value = typeof entry === "object" ? entry.answer : entry;
+        } else {
+          // Fallback: try legacy index-based match
+          var idx = ta.dataset.assumptionIdx;
+          if (asAnswers[idx]) {
+            var legacyEntry = asAnswers[idx];
+            ta.value = typeof legacyEntry === "object" ? legacyEntry.answer : legacyEntry;
+          }
+        }
       });
     }
 
@@ -1465,20 +1582,28 @@
 
     // Wire actions
     $("#gate1-confirm").addEventListener("click", function () {
-      // Collect answers to open questions
+      // Collect answers to open questions, keyed by question text hash
       var questionAnswers = {};
       $$(".gate-answer", panel).forEach(function (ta) {
-        var idx = ta.dataset.questionIdx;
         var text = ta.value.trim();
-        if (text) questionAnswers[idx] = text;
+        if (text) {
+          var qDiv = ta.closest(".gate-question");
+          var qText = qDiv ? qDiv.querySelector(".gate-question-text").textContent.trim() : "";
+          var key = qText ? simpleHash(qText) : ta.dataset.questionIdx;
+          questionAnswers[key] = { question: qText, answer: text };
+        }
       });
 
-      // Collect answers to assumption questions
+      // Collect answers to assumption questions, keyed by assumption text hash
       var assumptionAnswers = {};
       $$(".gate-assumption-answer", panel).forEach(function (ta) {
-        var idx = ta.dataset.assumptionIdx;
         var text = ta.value.trim();
-        if (text) assumptionAnswers[idx] = text;
+        if (text) {
+          var li = ta.closest("li");
+          var aText = li ? li.querySelector("strong").nextSibling.textContent.trim() : "";
+          var key = aText ? simpleHash(aText) : ta.dataset.assumptionIdx;
+          assumptionAnswers[key] = { assumption: aText, answer: text };
+        }
       });
 
       var payload = { action: "confirm" };
@@ -1508,20 +1633,28 @@
         if (key) corrections[key] = field.textContent;
       });
 
-      // Collect answers to open questions (same as confirm)
+      // Collect answers to open questions, keyed by question text hash
       var questionAnswers = {};
       $$(".gate-answer", panel).forEach(function (ta) {
-        var idx = ta.dataset.questionIdx;
         var text = ta.value.trim();
-        if (text) questionAnswers[idx] = text;
+        if (text) {
+          var qDiv = ta.closest(".gate-question");
+          var qText = qDiv ? qDiv.querySelector(".gate-question-text").textContent.trim() : "";
+          var key = qText ? simpleHash(qText) : ta.dataset.questionIdx;
+          questionAnswers[key] = { question: qText, answer: text };
+        }
       });
 
-      // Collect answers to assumption questions
+      // Collect answers to assumption questions, keyed by assumption text hash
       var assumptionAnswers = {};
       $$(".gate-assumption-answer", panel).forEach(function (ta) {
-        var idx = ta.dataset.assumptionIdx;
         var text = ta.value.trim();
-        if (text) assumptionAnswers[idx] = text;
+        if (text) {
+          var li = ta.closest("li");
+          var aText = li ? li.querySelector("strong").nextSibling.textContent.trim() : "";
+          var key = aText ? simpleHash(aText) : ta.dataset.assumptionIdx;
+          assumptionAnswers[key] = { assumption: aText, answer: text };
+        }
       });
 
       var payload = { action: "correct", corrections: corrections };

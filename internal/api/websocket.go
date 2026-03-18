@@ -25,6 +25,7 @@ import (
 type wsConn struct {
 	conn net.Conn
 	mu   sync.Mutex
+	done chan struct{} // closed when the connection is shutting down
 }
 
 // writeMessage sends a text WebSocket frame to the connection.
@@ -40,10 +41,27 @@ func (c *wsConn) writeMessage(data []byte) error {
 	return err
 }
 
+// sendPing sends a JSON keepalive message to the client.
+func (c *wsConn) sendPing() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_ = c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	frame := buildTextFrame([]byte(`{"event":"ping"}`))
+	_, err := c.conn.Write(frame)
+	return err
+}
+
 // close sends a close frame and closes the underlying connection.
 func (c *wsConn) close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Signal the ping goroutine to stop.
+	select {
+	case <-c.done:
+	default:
+		close(c.done)
+	}
 
 	// Send close frame (opcode 0x8).
 	closeFrame := []byte{0x88, 0x00}
@@ -87,7 +105,7 @@ func buildTextFrame(payload []byte) []byte {
 func readFrames(conn *wsConn) {
 	buf := make([]byte, 4096)
 	for {
-		_ = conn.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		_ = conn.conn.SetReadDeadline(time.Now().Add(120 * time.Second))
 		n, err := conn.conn.Read(buf)
 		if err != nil {
 			return
@@ -200,13 +218,31 @@ func (h *WebSocketHub) StartBroadcasting(emitter *specworkflow.ChannelEmitter) {
 func HandleWebSocket(hub *WebSocketHub) http.Handler {
 	return websocket.Handler(func(ws *websocket.Conn) {
 		// Wrap in our wsConn type and register.
-		wsc := &wsConn{conn: ws}
+		wsc := &wsConn{conn: ws, done: make(chan struct{})}
 		hub.addClient(wsc)
+
+		// Send periodic keepalive pings so the connection survives long
+		// agent runs (which can exceed browser/proxy idle timeouts).
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					if err := wsc.sendPing(); err != nil {
+						return
+					}
+				case <-wsc.done:
+					return
+				}
+			}
+		}()
 
 		// Block until the client disconnects (read frames to detect close).
 		readFrames(wsc)
 
 		hub.removeClient(wsc)
+		wsc.close()
 		// websocket.Handler closes the connection after the handler returns.
 	})
 }
