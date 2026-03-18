@@ -232,9 +232,15 @@
     if (seconds == null || isNaN(seconds)) return "0s";
     seconds = Math.round(seconds);
     if (seconds < 60) return seconds + "s";
-    var m = Math.floor(seconds / 60);
+    if (seconds < 3600) {
+      var m = Math.floor(seconds / 60);
+      var s = seconds % 60;
+      return m + "m " + s + "s";
+    }
+    var h = Math.floor(seconds / 3600);
+    var m = Math.floor((seconds % 3600) / 60);
     var s = seconds % 60;
-    return m + "m " + s + "s";
+    return h + "h " + m + "m " + s + "s";
   }
 
   function formatTime(isoString) {

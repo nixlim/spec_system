@@ -97,6 +97,7 @@ func main() {
 	if *otelPort > 0 {
 		otelReceiver = api.NewOTELReceiver(wsHub, emitter)
 		otelReceiver.SetMetricsStore(metricsStore, workflowManager.GetCurrentFeatureName)
+		workflowManager.SetOTELReceiver(otelReceiver)
 		if err := otelReceiver.Start(*otelPort); err != nil {
 			log.Fatalf("failed to start OTEL gRPC receiver: %v", err)
 		}

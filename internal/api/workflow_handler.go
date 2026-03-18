@@ -40,6 +40,7 @@ type WorkflowManager struct {
 	config       specworkflow.SpecWorkflowConfig
 	otelPort     int
 	metricsStore *MetricsStore
+	otelReceiver *OTELReceiver
 	mu           sync.Mutex
 }
 
@@ -74,21 +75,33 @@ func (m *WorkflowManager) SetMetricsStore(store *MetricsStore) {
 	m.metricsStore = store
 }
 
+// SetOTELReceiver configures the OTEL receiver reference so the status
+// endpoint can read in-memory cost data as a fallback.
+func (m *WorkflowManager) SetOTELReceiver(recv *OTELReceiver) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.otelReceiver = recv
+}
+
 // GetCurrentFeatureName returns the feature name of the currently running
-// workflow, or empty string if no workflow is active. Used as a callback
-// by the OTELReceiver to associate metrics with the correct workflow.
+// workflow. Falls back to on-disk state so OTEL metrics can still be
+// associated with the correct feature after a server restart (when the
+// parent Claude Code process continues sending telemetry even though
+// no orchestrator is running).
 func (m *WorkflowManager) GetCurrentFeatureName() string {
 	m.mu.Lock()
 	orch := m.orchestrator
 	m.mu.Unlock()
-	if orch == nil {
-		return ""
+	if orch != nil {
+		if state := orch.State(); state != nil && state.FeatureName != "" {
+			return state.FeatureName
+		}
 	}
-	state := orch.State()
-	if state == nil {
-		return ""
+	// Fall back to on-disk state.
+	if diskState := findLatestDiskState(m.workspaceDir); diskState != nil {
+		return diskState.FeatureName
 	}
-	return state.FeatureName
+	return ""
 }
 
 // GetOrchestrator returns the current orchestrator, or nil if no workflow
@@ -479,6 +492,23 @@ func HandleCancelWorkflowAPI(manager *WorkflowManager) http.HandlerFunc {
 	}
 }
 
+// bestCostUSD returns the highest cost value from all available sources:
+// orchestrator state, OTEL receiver (in-memory), and SQLite metrics store.
+func (m *WorkflowManager) bestCostUSD(stateCost float64, featureName string) float64 {
+	best := stateCost
+	if m.otelReceiver != nil {
+		if otelCost := m.otelReceiver.GetCostUSD(); otelCost > best {
+			best = otelCost
+		}
+	}
+	if m.metricsStore != nil && featureName != "" {
+		if dbCost := m.metricsStore.GetCurrentCostUSD(featureName); dbCost > best {
+			best = dbCost
+		}
+	}
+	return best
+}
+
 // HandleGetWorkflowStatus returns an HTTP handler for GET /api/workflow/status.
 // It returns the current workflow state as a JSON object with a human-readable
 // message describing what the workflow is doing.
@@ -501,13 +531,8 @@ func HandleGetWorkflowStatus(manager *WorkflowManager) http.HandlerFunc {
 					wallClockSec = time.Since(startTime).Seconds()
 				}
 
-				// Use OTEL-persisted cost if available.
-				costUSD := diskState.CumulativeCostUSD
-				if manager.metricsStore != nil && diskState.FeatureName != "" {
-					if otelCost := manager.metricsStore.GetCurrentCostUSD(diskState.FeatureName); otelCost > costUSD {
-						costUSD = otelCost
-					}
-				}
+				// Best cost from all sources (state, OTEL in-memory, SQLite).
+				costUSD := manager.bestCostUSD(diskState.CumulativeCostUSD, diskState.FeatureName)
 
 				writeJSON(w, http.StatusOK, map[string]interface{}{
 					"state":              diskState.State.String(),
@@ -546,14 +571,8 @@ func HandleGetWorkflowStatus(manager *WorkflowManager) http.HandlerFunc {
 			wallClockSec = time.Since(startTime).Seconds()
 		}
 
-		// Use the greater of orchestrator cost and OTEL-persisted cost
-		// since the CLI may report zero while OTEL captures real cost.
-		costUSD := state.CumulativeCostUSD
-		if manager.metricsStore != nil && state.FeatureName != "" {
-			if otelCost := manager.metricsStore.GetCurrentCostUSD(state.FeatureName); otelCost > costUSD {
-				costUSD = otelCost
-			}
-		}
+		// Best cost from all sources (state, OTEL in-memory, SQLite).
+		costUSD := manager.bestCostUSD(state.CumulativeCostUSD, state.FeatureName)
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"state":              state.State.String(),
