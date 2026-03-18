@@ -107,25 +107,16 @@ func (o *Orchestrator) handleHumanGate1(state *WorkflowStateJSON, specDir string
 
 	log.Printf("[orchestrator] gate 1 response received: action=%s", resp.Action)
 
-	// Persist reviewer comment if provided.
-	persistComment(specDir, "HUMAN_GATE_1", resp.Action, resp.Comment)
+	// NOTE: The HTTP handler persists all gate data to disk BEFORE
+	// signaling this channel. The orchestrator reads from disk, not
+	// from resp.Data. This ensures data is never lost even if the
+	// channel signal fails or the orchestrator restarts.
 
 	switch resp.Action {
 	case "confirm":
 		o.emitter.Emit(NewGateResponseEvent("requirements_confirmation", "confirm", "Human confirmed discovery output"))
 
-		// Save user answers if provided.
-		if resp.Data != nil {
-			answersPath := filepath.Join(specDir, "user-answers.json")
-			answersData, marshalErr := json.MarshalIndent(resp.Data, "", "  ")
-			if marshalErr == nil {
-				if writeErr := os.WriteFile(answersPath, answersData, 0o644); writeErr != nil {
-					log.Printf("[orchestrator] failed to write user answers: %v", writeErr)
-				} else {
-					log.Printf("[orchestrator] saved user answers to %s (%d bytes)", answersPath, len(answersData))
-				}
-			}
-		}
+		// User answers already persisted to user-answers.json by HTTP handler.
 		nextState, _ := gate1.HandleConfirm()
 		o.logTransition(StateHumanGate1, nextState)
 		if err := o.sm.Transition(nextState); err != nil {
@@ -133,87 +124,53 @@ func (o *Orchestrator) handleHumanGate1(state *WorkflowStateJSON, specDir string
 		}
 
 	case "correct":
-		// resp.Data is a map[string]interface{} with "corrections" and optionally "user_answers".
-		// Save the full structure to disk so handleDiscovery can include it in the re-run prompt.
-		correctionData := map[string]interface{}{
-			"action": "correct",
-		}
-
-		if m, ok := resp.Data.(map[string]interface{}); ok {
-			if corr, exists := m["corrections"]; exists {
-				correctionData["corrections"] = corr
-			}
-			if ua, exists := m["user_answers"]; exists {
-				correctionData["user_answers"] = ua
-			}
-		} else {
-			// Fallback: treat the whole Data as corrections.
-			correctionData["corrections"] = resp.Data
-		}
-
-		// Include reviewer comment in corrections file so it's available
-		// during re-discovery (not just via human-comments.json).
-		if resp.Comment != "" {
-			correctionData["reviewer_comment"] = resp.Comment
-		}
-
-		corrPath := filepath.Join(specDir, "gate1-corrections.json")
-		corrJSON, marshalErr := json.MarshalIndent(correctionData, "", "  ")
-		if marshalErr == nil {
-			if writeErr := os.WriteFile(corrPath, corrJSON, 0o644); writeErr != nil {
-				log.Printf("[orchestrator] failed to write gate 1 corrections: %v", writeErr)
-			} else {
-				log.Printf("[orchestrator] saved gate 1 corrections to %s (%d bytes)", corrPath, len(corrJSON))
-			}
-		}
-
+		// Gate data already persisted to gate1-corrections.json and
+		// human-comments.json by the HTTP handler.
+		// Read back from disk to compute statistics for the log message.
 		nCorrections := 0
 		hasUserAnswers := false
-		hasComment := resp.Comment != ""
-		if m, ok := resp.Data.(map[string]interface{}); ok {
-			if corr, exists := m["corrections"]; exists {
-				if cm, ok := corr.(map[string]interface{}); ok {
-					nCorrections = len(cm)
-				} else if cm, ok := corr.(map[string]string); ok {
-					nCorrections = len(cm)
+		hasComment := false
+		corrPath := filepath.Join(specDir, "gate1-corrections.json")
+		if corrData, readErr := os.ReadFile(corrPath); readErr == nil {
+			var corrFile map[string]interface{}
+			if json.Unmarshal(corrData, &corrFile) == nil {
+				if corr, ok := corrFile["corrections"].(map[string]interface{}); ok {
+					nCorrections = len(corr)
 				}
-			}
-			if _, exists := m["user_answers"]; exists {
-				hasUserAnswers = true
+				_, hasUserAnswers = corrFile["user_answers"]
+				_, hasComment = corrFile["reviewer_comment"]
 			}
 		}
 		o.emitter.Emit(NewGateResponseEvent("requirements_confirmation", "correct",
 			fmt.Sprintf("Human requested corrections (%d fields, answers=%v, comment=%v), re-running discovery (attempt %d/%d)",
 				nCorrections, hasUserAnswers, hasComment, state.Gate1CorrectionCount+1, o.config.MaxGateCorrections)))
 
-		// Extract corrections map for the gate handler (just the corrections,
-		// not user_answers — those are already saved to disk).
+		// Read corrections for the gate handler.
 		var corrections map[string]string
-		if m, ok := resp.Data.(map[string]interface{}); ok {
-			if corr, exists := m["corrections"]; exists {
-				if cm, ok := corr.(map[string]interface{}); ok {
+		if corrData, readErr := os.ReadFile(corrPath); readErr == nil {
+			var corrFile map[string]interface{}
+			if json.Unmarshal(corrData, &corrFile) == nil {
+				if corr, ok := corrFile["corrections"].(map[string]interface{}); ok {
 					corrections = make(map[string]string)
-					for k, v := range cm {
+					for k, v := range corr {
 						corrections[k] = fmt.Sprintf("%v", v)
 					}
 				}
 			}
 		}
+
 		nextState, err := gate1.HandleCorrect(corrections)
 		if err != nil {
-			// Correction limit reached. Don't escalate — the user's answers
-			// are already saved to gate1-corrections.json. Treat this as a
-			// confirm with corrections: proceed to DRAFTING so the drafter
-			// can use the saved answers.
+			// Correction limit reached. Proceed to DRAFTING with saved data.
 			log.Printf("[orchestrator] correction limit reached (%d/%d), proceeding to DRAFTING with saved corrections",
 				state.Gate1CorrectionCount, o.config.MaxGateCorrections)
 			o.emitter.Emit(NewGateResponseEvent("requirements_confirmation", "confirm",
 				"Correction limit reached — proceeding to drafting with saved feedback"))
 
-			// Also save as user-answers.json so the drafter picks them up.
+			// Copy corrections to user-answers.json so the drafter picks them up.
 			answersPath := filepath.Join(specDir, "user-answers.json")
-			if answersData, marshalErr := json.MarshalIndent(correctionData, "", "  "); marshalErr == nil {
-				os.WriteFile(answersPath, answersData, 0o644)
+			if corrData, readErr := os.ReadFile(corrPath); readErr == nil {
+				os.WriteFile(answersPath, corrData, 0o644)
 			}
 
 			o.logTransition(StateHumanGate1, StateDrafting)

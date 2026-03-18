@@ -382,6 +382,9 @@ func HandleGateApprove(manager *WorkflowManager) http.HandlerFunc {
 			return
 		}
 
+		// Extract feature name from URL: /api/tasks/{feature}/approve
+		featureName := extractFeatureFromTaskPath(r.URL.Path)
+
 		orch := manager.GetOrchestrator()
 		if orch == nil {
 			// No orchestrator running — try to resume from on-disk gate state.
@@ -397,55 +400,138 @@ func HandleGateApprove(manager *WorkflowManager) http.HandlerFunc {
 			return
 		}
 
-		// Determine the gate response based on the request content.
-		var gateResp specworkflow.GateResponse
-		switch req.Action {
-		case "confirm":
-			gateResp = specworkflow.GateResponse{Action: "confirm", Data: req.UserAnswers, Comment: req.Comment}
-		case "correct":
-			// Bundle corrections and user_answers together so the orchestrator
-			// can save both to gate1-corrections.json.
-			log.Printf("[gate-approve] correct: %d corrections, user_answers=%v, comment=%d chars",
-				len(req.Corrections), req.UserAnswers != nil, len(req.Comment))
-			corrData := map[string]interface{}{
-				"corrections": req.Corrections,
-			}
-			if req.UserAnswers != nil {
-				corrData["user_answers"] = req.UserAnswers
-			}
-			gateResp = specworkflow.GateResponse{
-				Action:  "correct",
-				Data:    corrData,
-				Comment: req.Comment,
-			}
-		case "accept":
-			gateResp = specworkflow.GateResponse{Action: "accept", Comment: req.Comment}
-		default:
-			// For gate 2 resolutions (no explicit action field).
-			if len(req.Resolutions) > 0 || req.Action == "" {
-				if hasAnswerResolution(req.Resolutions) {
-					gateResp = specworkflow.GateResponse{
-						Action:  "resolve",
-						Data:    req.Resolutions,
-						Comment: req.Comment,
-					}
-				} else {
-					gateResp = specworkflow.GateResponse{
-						Action:  "confirm",
-						Comment: req.Comment,
-					}
+		// ---------------------------------------------------------------
+		// PERSIST FIRST: Save all gate data to disk BEFORE signaling
+		// the gate channel. This ensures data is never lost even if the
+		// gate signal fails, the orchestrator has moved on, or the
+		// server crashes between signal and orchestrator persistence.
+		// ---------------------------------------------------------------
+		if featureName != "" {
+			specDir := filepath.Join(manager.workspaceDir, "specs", featureName)
+			os.MkdirAll(specDir, 0o755) // ensure dir exists
+
+			switch req.Action {
+			case "confirm":
+				// Save user answers.
+				if req.UserAnswers != nil {
+					persistGateData(specDir, "user-answers.json", req.UserAnswers)
 				}
+			case "correct":
+				// Save corrections + user answers + reviewer comment.
+				corrData := map[string]interface{}{
+					"action":      "correct",
+					"corrections": req.Corrections,
+				}
+				if req.UserAnswers != nil {
+					corrData["user_answers"] = req.UserAnswers
+				}
+				if req.Comment != "" {
+					corrData["reviewer_comment"] = req.Comment
+				}
+				persistGateData(specDir, "gate1-corrections.json", corrData)
+			default:
+				// Gate 2 resolutions.
+				if len(req.Resolutions) > 0 {
+					persistGateData(specDir, "gate2-resolutions.json", map[string]interface{}{
+						"resolutions": req.Resolutions,
+					})
+				}
+			}
+
+			// Always persist comment to human-comments.json (append).
+			if req.Comment != "" {
+				persistHumanComment(specDir, req.Action, req.Comment)
+			}
+
+			log.Printf("[gate-approve] persisted gate data: feature=%s action=%s corrections=%d user_answers=%v comment=%d chars",
+				featureName, req.Action, len(req.Corrections), req.UserAnswers != nil, len(req.Comment))
+		}
+
+		// ---------------------------------------------------------------
+		// SIGNAL: Now send the gate response through the channel.
+		// The orchestrator will read persisted data from disk.
+		// ---------------------------------------------------------------
+		gateResp := specworkflow.GateResponse{
+			Action:  req.Action,
+			Comment: req.Comment,
+		}
+		// For actions that don't have an explicit action field (gate 2
+		// resolutions), infer the action.
+		if gateResp.Action == "" {
+			if len(req.Resolutions) > 0 && hasAnswerResolution(req.Resolutions) {
+				gateResp.Action = "resolve"
 			} else {
-				gateResp = specworkflow.GateResponse{Action: req.Action, Comment: req.Comment}
+				gateResp.Action = "confirm"
 			}
 		}
 
 		if err := orch.HandleGateResponse(gateResp); err != nil {
-			writeError(w, http.StatusConflict, fmt.Sprintf("gate response failed: %v", err))
+			// Data is already persisted — the orchestrator will pick it
+			// up on the next gate interaction or resume.
+			writeError(w, http.StatusConflict, fmt.Sprintf("gate response failed (data saved to disk): %v", err))
 			return
 		}
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "accepted"})
+	}
+}
+
+// extractFeatureFromTaskPath extracts the feature name from a URL path
+// like /api/tasks/{feature}/approve.
+func extractFeatureFromTaskPath(path string) string {
+	// path: /api/tasks/{feature}/approve
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	// Expected: ["api", "tasks", "{feature}", "approve"]
+	if len(parts) >= 4 && parts[0] == "api" && parts[1] == "tasks" {
+		return parts[2]
+	}
+	return ""
+}
+
+// persistGateData writes gate data to a JSON file in the spec directory.
+func persistGateData(specDir, filename string, data interface{}) {
+	path := filepath.Join(specDir, filename)
+	jsonData, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		log.Printf("[gate-approve] failed to marshal %s: %v", filename, err)
+		return
+	}
+	if err := os.WriteFile(path, jsonData, 0o644); err != nil {
+		log.Printf("[gate-approve] failed to write %s: %v", path, err)
+	} else {
+		log.Printf("[gate-approve] persisted %s (%d bytes)", path, len(jsonData))
+	}
+}
+
+// persistHumanComment appends a reviewer comment to human-comments.json.
+func persistHumanComment(specDir, action, comment string) {
+	type commentEntry struct {
+		Gate      string `json:"gate"`
+		Action    string `json:"action"`
+		Comment   string `json:"comment"`
+		Timestamp string `json:"timestamp"`
+	}
+
+	commentsPath := filepath.Join(specDir, "human-comments.json")
+	var comments []commentEntry
+	if data, err := os.ReadFile(commentsPath); err == nil {
+		json.Unmarshal(data, &comments)
+	}
+
+	comments = append(comments, commentEntry{
+		Gate:      "HTTP_GATE_APPROVE",
+		Action:    action,
+		Comment:   comment,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	})
+
+	data, err := json.MarshalIndent(comments, "", "  ")
+	if err != nil {
+		log.Printf("[gate-approve] failed to marshal comments: %v", err)
+		return
+	}
+	if err := os.WriteFile(commentsPath, data, 0o644); err != nil {
+		log.Printf("[gate-approve] failed to write comments: %v", err)
 	}
 }
 
