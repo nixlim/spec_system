@@ -564,6 +564,170 @@
   // HTTP helpers
   // -----------------------------------------------------------------------
 
+  // -----------------------------------------------------------------------
+  // Gate Form Persistence (localStorage)
+  // -----------------------------------------------------------------------
+  // Auto-saves gate form fields so data survives refresh, restart, or
+  // failed submit. Keyed by feature name + gate ID.
+
+  function gateStorageKey(feature, gateId) {
+    return "gate-draft:" + feature + ":" + gateId;
+  }
+
+  function gateFormSave(feature, gateId, data) {
+    if (!feature) return;
+    try {
+      localStorage.setItem(gateStorageKey(feature, gateId), JSON.stringify(data));
+    } catch (e) { /* quota exceeded — silently ignore */ }
+  }
+
+  function gateFormLoad(feature, gateId) {
+    if (!feature) return null;
+    try {
+      var raw = localStorage.getItem(gateStorageKey(feature, gateId));
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
+
+  function gateFormClear(feature, gateId) {
+    if (!feature) return;
+    try {
+      localStorage.removeItem(gateStorageKey(feature, gateId));
+    } catch (e) { /* ignore */ }
+  }
+
+  /**
+   * Collects all editable form state from a gate panel into a plain object.
+   * Works for both Gate 1 and Gate 2.
+   */
+  function collectGate1FormState(panel) {
+    var state = {};
+    // Open question answers (by data-question-idx)
+    var answers = {};
+    $$(".gate-answer", panel).forEach(function (ta) {
+      answers[ta.dataset.questionIdx] = ta.value;
+    });
+    state.answers = answers;
+    // Assumption answers (by data-assumption-idx)
+    var assumptions = {};
+    $$(".gate-assumption-answer", panel).forEach(function (ta) {
+      assumptions[ta.dataset.assumptionIdx] = ta.value;
+    });
+    state.assumptions = assumptions;
+    // Editable fields (by data-field)
+    var editables = {};
+    $$(".gate-editable", panel).forEach(function (field) {
+      if (field.dataset.field) {
+        editables[field.dataset.field] = field.textContent;
+      }
+    });
+    state.editables = editables;
+    // Comment
+    var commentEl = $("#gate1-comment");
+    state.comment = commentEl ? commentEl.value : "";
+    return state;
+  }
+
+  function restoreGate1FormState(panel, saved) {
+    if (!saved) return;
+    // Restore open question answers
+    if (saved.answers) {
+      $$(".gate-answer", panel).forEach(function (ta) {
+        var val = saved.answers[ta.dataset.questionIdx];
+        if (val) ta.value = val;
+      });
+    }
+    // Restore assumption answers
+    if (saved.assumptions) {
+      $$(".gate-assumption-answer", panel).forEach(function (ta) {
+        var val = saved.assumptions[ta.dataset.assumptionIdx];
+        if (val) ta.value = val;
+      });
+    }
+    // Restore editable fields
+    if (saved.editables) {
+      $$(".gate-editable", panel).forEach(function (field) {
+        var val = saved.editables[field.dataset.field];
+        if (val) field.textContent = val;
+      });
+    }
+    // Restore comment
+    if (saved.comment) {
+      var commentEl = $("#gate1-comment");
+      if (commentEl) commentEl.value = saved.comment;
+    }
+  }
+
+  function collectGate2FormState(panel) {
+    var state = {};
+    // Action dropdowns (by data-idx)
+    var actions = {};
+    $$(".amb-action", panel).forEach(function (sel) {
+      actions[sel.dataset.idx] = sel.value;
+    });
+    state.actions = actions;
+    // Answer inputs (by data-idx)
+    var answers = {};
+    $$(".amb-answer", panel).forEach(function (input) {
+      answers[input.dataset.idx] = input.value;
+    });
+    state.answers = answers;
+    // Comment
+    var commentEl = $("#gate2-comment");
+    state.comment = commentEl ? commentEl.value : "";
+    return state;
+  }
+
+  function restoreGate2FormState(panel, saved) {
+    if (!saved) return;
+    // Restore action dropdowns
+    if (saved.actions) {
+      $$(".amb-action", panel).forEach(function (sel) {
+        var val = saved.actions[sel.dataset.idx];
+        if (val) sel.value = val;
+      });
+    }
+    // Restore answer inputs and enable/disable based on action
+    if (saved.answers) {
+      $$(".amb-answer", panel).forEach(function (input) {
+        var val = saved.answers[input.dataset.idx];
+        if (val) {
+          input.value = val;
+          // Enable the input if action is "answer"
+          var sel = $(".amb-action[data-idx='" + input.dataset.idx + "']", panel);
+          if (sel && sel.value === "answer") {
+            input.disabled = false;
+          }
+        }
+      });
+    }
+    // Restore comment
+    if (saved.comment) {
+      var commentEl = $("#gate2-comment");
+      if (commentEl) commentEl.value = saved.comment;
+    }
+  }
+
+  /**
+   * Installs input/change listeners on all form elements within a gate panel
+   * that auto-save to localStorage on every keystroke.
+   */
+  function installGateAutoSave(panel, feature, gateId, collectFn) {
+    var save = function () {
+      gateFormSave(feature, gateId, collectFn(panel));
+    };
+    // Debounce to avoid excessive writes
+    var timer = null;
+    var debouncedSave = function () {
+      clearTimeout(timer);
+      timer = setTimeout(save, 300);
+    };
+    panel.addEventListener("input", debouncedSave);
+    panel.addEventListener("change", debouncedSave);
+    // Also save on blur for contentEditable fields
+    panel.addEventListener("blur", debouncedSave, true);
+  }
+
   function fetchJSON(url, opts) {
     return fetch(url, opts).then(function (resp) {
       if (!resp.ok) {
@@ -1671,6 +1835,14 @@
       });
     }
 
+    // Restore saved form state from localStorage (survives refresh/restart).
+    // Applied after pre-fill from corrections so user's latest input wins.
+    var savedGate1 = gateFormLoad(taskId, "gate1");
+    restoreGate1FormState(panel, savedGate1);
+
+    // Install auto-save on every input/change.
+    installGateAutoSave(panel, taskId, "gate1", collectGate1FormState);
+
     // Enable inline editing on editable fields
     $$(".gate-editable", panel).forEach(function (field) {
       field.addEventListener("dblclick", function () {
@@ -1725,6 +1897,7 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       }).then(function () {
+        gateFormClear(taskId, "gate1");
         clearChildren(container);
       }).catch(function (err) {
         alert("Gate 1 confirm failed: " + err.message);
@@ -1780,6 +1953,7 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       }).then(function () {
+        gateFormClear(taskId, "gate1");
         gate1CorrectionCount++;
         clearChildren(container);
       }).catch(function (err) {
@@ -1793,6 +1967,7 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "cancel" })
       }).then(function () {
+        gateFormClear(taskId, "gate1");
         clearChildren(container);
       }).catch(function (err) {
         alert("Gate 1 cancel failed: " + err.message);
@@ -1879,6 +2054,13 @@
     panel.innerHTML = header + content;
     container.appendChild(panel);
 
+    // Restore saved form state from localStorage.
+    var savedGate2 = gateFormLoad(taskId, "gate2");
+    restoreGate2FormState(panel, savedGate2);
+
+    // Install auto-save on every input/change.
+    installGateAutoSave(panel, taskId, "gate2", collectGate2FormState);
+
     // Enable/disable answer input based on action selection
     $$(".amb-action", panel).forEach(function (sel) {
       sel.addEventListener("change", function () {
@@ -1923,6 +2105,7 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(gate2Payload)
       }).then(function () {
+        gateFormClear(taskId, "gate2");
         // Disable answer after first re-draft
         var hasAnswer = resolutions.some(function (r) { return r.action === "answer"; });
         if (hasAnswer) gate2AnswerDisabled = true;
