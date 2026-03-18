@@ -495,12 +495,26 @@ func HandleGetWorkflowStatus(manager *WorkflowManager) http.HandlerFunc {
 			// so that gate states survive server restarts.
 			diskState := findLatestDiskState(manager.workspaceDir)
 			if diskState != nil && !isTerminalWorkflowState(diskState.State) {
+				// Compute wall clock dynamically from StartedAt.
+				var wallClockSec float64
+				if startTime, parseErr := time.Parse(time.RFC3339, diskState.StartedAt); parseErr == nil {
+					wallClockSec = time.Since(startTime).Seconds()
+				}
+
+				// Use OTEL-persisted cost if available.
+				costUSD := diskState.CumulativeCostUSD
+				if manager.metricsStore != nil && diskState.FeatureName != "" {
+					if otelCost := manager.metricsStore.GetCurrentCostUSD(diskState.FeatureName); otelCost > costUSD {
+						costUSD = otelCost
+					}
+				}
+
 				writeJSON(w, http.StatusOK, map[string]interface{}{
 					"state":              diskState.State.String(),
 					"round":              diskState.Round,
 					"feature_name":       diskState.FeatureName,
-					"cost_usd":           diskState.CumulativeCostUSD,
-					"wall_clock_seconds": diskState.CumulativeWallClockSeconds,
+					"cost_usd":           costUSD,
+					"wall_clock_seconds": wallClockSec,
 					"agent_invocations":  diskState.AgentInvocations,
 					"message":            StatusMessage(diskState.State, diskState.Round) + " (server restarted — workflow paused)",
 					"paused":             true,

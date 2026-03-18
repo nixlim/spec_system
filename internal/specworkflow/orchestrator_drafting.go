@@ -11,7 +11,26 @@ import (
 
 // handleDrafting builds the drafter prompt, dispatches the drafter agent,
 // validates the output, and transitions to HUMAN_GATE_2.
+//
+// On crash recovery, if drafter-output.json already exists and is valid,
+// the agent dispatch is skipped and the workflow transitions directly
+// to HUMAN_GATE_2.
 func (o *Orchestrator) handleDrafting(state *WorkflowStateJSON, specDir string) error {
+	outPath := filepath.Join(specDir, "drafter-output.json")
+
+	// Check for existing valid output (crash recovery).
+	if data, err := os.ReadFile(outPath); err == nil {
+		var drafter DrafterOutput
+		if json.Unmarshal(data, &drafter) == nil && drafter.Agent == "drafter" {
+			log.Printf("[orchestrator] drafter output already exists, skipping re-dispatch (crash recovery)")
+			o.logTransition(StateDrafting, StateHumanGate2)
+			if err := o.sm.Transition(StateHumanGate2); err != nil {
+				return fmt.Errorf("transition DRAFTING -> HUMAN_GATE_2: %w", err)
+			}
+			return nil
+		}
+	}
+
 	confirmedReqsPath := filepath.Join(specDir, "discovery-output.json")
 
 	// Load user answers from disk if they exist.
@@ -31,7 +50,6 @@ func (o *Orchestrator) handleDrafting(state *WorkflowStateJSON, specDir string) 
 		return fmt.Errorf("build drafter prompt: %w", err)
 	}
 
-	outPath := filepath.Join(specDir, "drafter-output.json")
 	cost, duration, err := o.dispatchAgent("drafter", prompt, outPath)
 	if err != nil {
 		return o.handleAgentError("drafter", err, cost, duration)
