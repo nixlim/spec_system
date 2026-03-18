@@ -192,7 +192,7 @@ func HandleGetSpecVersion(config SpecAPIConfig) http.HandlerFunc {
 		nStr := parts[len(parts)-1]
 
 		n, err := strconv.Atoi(nStr)
-		if err != nil || n < 1 {
+		if err != nil || n < 0 {
 			writeError(w, http.StatusBadRequest, "invalid version number")
 			return
 		}

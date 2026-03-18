@@ -1465,14 +1465,22 @@
     $("#btn-diff").addEventListener("click", function () {
       var select = $("#spec-version-select");
       var selected = parseInt(select.value, 10);
-      if (!selected || selected < 2) {
-        // Default: diff latest two versions
-        var opts = $$("option", select).map(function (o) { return parseInt(o.value, 10); }).filter(function (n) { return n > 0; });
-        if (opts.length < 2) return;
-        opts.sort(function (a, b) { return b - a; });
-        showDiff(opts[1], opts[0]);
+      // Collect all available versions from the dropdown.
+      var opts = $$("option", select).map(function (o) { return parseInt(o.value, 10); }).filter(function (n) { return !isNaN(n) && n >= 0; });
+      opts.sort(function (a, b) { return a - b; });
+      if (opts.length < 2) return;
+
+      if (isNaN(selected) || selected <= opts[0]) {
+        // No valid selection or selected is the lowest — diff the latest two.
+        showDiff(opts[opts.length - 2], opts[opts.length - 1]);
       } else {
-        showDiff(selected - 1, selected);
+        // Diff selected version against its predecessor in the list.
+        var idx = opts.indexOf(selected);
+        if (idx > 0) {
+          showDiff(opts[idx - 1], selected);
+        } else {
+          showDiff(opts[opts.length - 2], opts[opts.length - 1]);
+        }
       }
     });
   }
