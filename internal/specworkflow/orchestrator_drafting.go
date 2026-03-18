@@ -144,6 +144,9 @@ func (o *Orchestrator) handleHumanGate2(state *WorkflowStateJSON, specDir string
 
 	resp := <-o.gateCh
 
+	// Persist reviewer comment if provided.
+	persistComment(specDir, "HUMAN_GATE_2", resp.Action, resp.Comment)
+
 	switch resp.Action {
 	case "confirm":
 		o.logTransition(StateHumanGate2, StateReviewing)

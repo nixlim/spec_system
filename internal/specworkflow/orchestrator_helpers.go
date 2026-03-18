@@ -1,12 +1,56 @@
 package specworkflow
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// persistComment appends a human reviewer comment to human-comments.json
+// in the spec directory. Comments accumulate across gate interactions so
+// downstream agents have the full history. No-op if comment is empty.
+func persistComment(specDir, gate, action, comment string) {
+	if comment == "" {
+		return
+	}
+
+	type commentEntry struct {
+		Gate      string `json:"gate"`
+		Action    string `json:"action"`
+		Comment   string `json:"comment"`
+		Timestamp string `json:"timestamp"`
+	}
+
+	commentsPath := filepath.Join(specDir, "human-comments.json")
+
+	// Load existing comments.
+	var comments []commentEntry
+	if data, err := os.ReadFile(commentsPath); err == nil {
+		json.Unmarshal(data, &comments) // ignore parse errors on corrupted file
+	}
+
+	comments = append(comments, commentEntry{
+		Gate:      gate,
+		Action:    action,
+		Comment:   comment,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	})
+
+	data, err := json.MarshalIndent(comments, "", "  ")
+	if err != nil {
+		log.Printf("[orchestrator] failed to marshal comments: %v", err)
+		return
+	}
+	if err := os.WriteFile(commentsPath, data, 0o644); err != nil {
+		log.Printf("[orchestrator] failed to write human-comments.json: %v", err)
+	} else {
+		log.Printf("[orchestrator] saved reviewer comment to %s (gate=%s, action=%s)", commentsPath, gate, action)
+	}
+}
 
 // mkdirAll creates multiple directories, returning the first error.
 func mkdirAll(dirs ...string) error {

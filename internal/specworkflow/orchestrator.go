@@ -41,6 +41,9 @@ type GateResponse struct {
 	Action string
 	// Data carries action-specific structured data.
 	Data interface{}
+	// Comment is optional free-text from the human reviewer. Persisted to
+	// human-comments.json and included as context for downstream agents.
+	Comment string
 }
 
 // ---------------------------------------------------------------------------

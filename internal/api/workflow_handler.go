@@ -248,6 +248,7 @@ type gateApproveRequest struct {
 	Corrections map[string]string                  `json:"corrections,omitempty"`
 	Resolutions []specworkflow.AmbiguityResolution `json:"resolutions,omitempty"`
 	UserAnswers map[string]interface{}             `json:"user_answers,omitempty"`
+	Comment     string                             `json:"comment,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +399,7 @@ func HandleGateApprove(manager *WorkflowManager) http.HandlerFunc {
 		var gateResp specworkflow.GateResponse
 		switch req.Action {
 		case "confirm":
-			gateResp = specworkflow.GateResponse{Action: "confirm", Data: req.UserAnswers}
+			gateResp = specworkflow.GateResponse{Action: "confirm", Data: req.UserAnswers, Comment: req.Comment}
 		case "correct":
 			// Bundle corrections and user_answers together so the orchestrator
 			// can save both to gate1-corrections.json.
@@ -409,26 +410,29 @@ func HandleGateApprove(manager *WorkflowManager) http.HandlerFunc {
 				corrData["user_answers"] = req.UserAnswers
 			}
 			gateResp = specworkflow.GateResponse{
-				Action: "correct",
-				Data:   corrData,
+				Action:  "correct",
+				Data:    corrData,
+				Comment: req.Comment,
 			}
 		case "accept":
-			gateResp = specworkflow.GateResponse{Action: "accept"}
+			gateResp = specworkflow.GateResponse{Action: "accept", Comment: req.Comment}
 		default:
 			// For gate 2 resolutions (no explicit action field).
 			if len(req.Resolutions) > 0 || req.Action == "" {
 				if hasAnswerResolution(req.Resolutions) {
 					gateResp = specworkflow.GateResponse{
-						Action: "resolve",
-						Data:   req.Resolutions,
+						Action:  "resolve",
+						Data:    req.Resolutions,
+						Comment: req.Comment,
 					}
 				} else {
 					gateResp = specworkflow.GateResponse{
-						Action: "confirm",
+						Action:  "confirm",
+						Comment: req.Comment,
 					}
 				}
 			} else {
-				gateResp = specworkflow.GateResponse{Action: req.Action}
+				gateResp = specworkflow.GateResponse{Action: req.Action, Comment: req.Comment}
 			}
 		}
 

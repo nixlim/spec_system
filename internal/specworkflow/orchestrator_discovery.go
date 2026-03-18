@@ -104,6 +104,9 @@ func (o *Orchestrator) handleHumanGate1(state *WorkflowStateJSON, specDir string
 
 	log.Printf("[orchestrator] gate 1 response received: action=%s", resp.Action)
 
+	// Persist reviewer comment if provided.
+	persistComment(specDir, "HUMAN_GATE_1", resp.Action, resp.Comment)
+
 	switch resp.Action {
 	case "confirm":
 		o.emitter.Emit(NewGateResponseEvent("requirements_confirmation", "confirm", "Human confirmed discovery output"))

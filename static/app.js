@@ -1584,6 +1584,13 @@
       content += buildGateSectionHtml("Open Questions", qHtml);
     }
 
+    // Free-text reviewer comments
+    content += '<div class="gate-section">';
+    content += '<h4>Reviewer Comments</h4>';
+    content += '<p style="font-size:13px;color:var(--color-text-muted);margin:0 0 6px;">Additional observations, notes, or context not covered by the questions above. These will be included as context for downstream agents.</p>';
+    content += '<textarea id="gate1-comment" rows="4" style="width:100%;font-size:14px;padding:8px;border:1px solid var(--color-border);border-radius:4px;resize:vertical;" placeholder="Any additional comments, observations, or context..."></textarea>';
+    content += '</div>';
+
     // Actions
     var correctDisabled = gate1CorrectionCount >= 3;
     content += '<div class="gate-actions">';
@@ -1708,6 +1715,10 @@
           assumptions: assumptionAnswers
         };
       }
+      var comment = ($("#gate1-comment") || {}).value;
+      if (comment && comment.trim()) {
+        payload.comment = comment.trim();
+      }
 
       fetchJSON("/api/tasks/" + encodeURIComponent(taskId) + "/approve", {
         method: "POST",
@@ -1758,6 +1769,10 @@
           open_questions: questionAnswers,
           assumptions: assumptionAnswers
         };
+      }
+      var comment = ($("#gate1-comment") || {}).value;
+      if (comment && comment.trim()) {
+        payload.comment = comment.trim();
       }
 
       fetchJSON("/api/tasks/" + encodeURIComponent(taskId) + "/approve", {
@@ -1850,6 +1865,13 @@
       content += '<p style="font-size:12px;color:var(--color-text-muted);">"Provide answer" is disabled — redraft limit reached.</p>';
     }
 
+    // Free-text reviewer comments
+    content += '<div class="gate-section" style="margin-top:12px;">';
+    content += '<h4>Reviewer Comments</h4>';
+    content += '<p style="font-size:13px;color:var(--color-text-muted);margin:0 0 6px;">Additional observations, notes, or context not covered above.</p>';
+    content += '<textarea id="gate2-comment" rows="4" style="width:100%;font-size:14px;padding:8px;border:1px solid var(--color-border);border-radius:4px;resize:vertical;" placeholder="Any additional comments, observations, or context..."></textarea>';
+    content += '</div>';
+
     content += '<div class="gate-actions">';
     content += '<button class="btn btn-success" id="gate2-submit">Submit Resolutions</button>';
     content += "</div>";
@@ -1890,10 +1912,16 @@
         });
       });
 
+      var gate2Payload = { resolutions: resolutions };
+      var gate2Comment = ($("#gate2-comment") || {}).value;
+      if (gate2Comment && gate2Comment.trim()) {
+        gate2Payload.comment = gate2Comment.trim();
+      }
+
       fetchJSON("/api/tasks/" + encodeURIComponent(taskId) + "/approve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ resolutions: resolutions })
+        body: JSON.stringify(gate2Payload)
       }).then(function () {
         // Disable answer after first re-draft
         var hasAnswer = resolutions.some(function (r) { return r.action === "answer"; });
