@@ -403,6 +403,7 @@
    * all panels to show data for the selected workflow.
    */
   function selectWorkflow(featureName) {
+    var previousFeature = selectedFeature;
     selectedFeature = featureName;
 
     // Re-render the status list to update selection highlight
@@ -418,13 +419,83 @@
     }
     if (match) {
       updateWorkflowStatus(match);
+
+      // Clear activity feed and agent metrics before restoring for the new workflow
+      clearChildren($("#status-activity"));
+      var metricsPanel = $("#agent-metrics");
+      if (metricsPanel) metricsPanel.hidden = true;
+
       restorePersistedMetrics(featureName);
     }
+
+    // Refresh all data tabs for the newly selected workflow
+    refreshAllPanelsForFeature(featureName);
+
+    // Show or hide gate panels based on the selected workflow's state
+    refreshGatePanelsForFeature(featureName);
 
     // Dispatch a custom event so other parts of the app can react
     document.dispatchEvent(new CustomEvent("workflow-selected", {
       detail: { feature_name: featureName }
     }));
+  }
+
+  /**
+   * Refreshes all data-driven panels (spec, issues, convergence) for
+   * the given feature. Called when the selected workflow changes.
+   */
+  function refreshAllPanelsForFeature(featureName) {
+    // Re-fetch spec tab data
+    loadSpecVersions();
+    loadCurrentSpec();
+
+    // Re-fetch issues tab data
+    loadIssues();
+
+    // Re-fetch convergence tab data
+    loadConvergence();
+  }
+
+  /**
+   * Shows or hides gate panels based on the selected workflow's state.
+   * If the selected workflow is at a gate state, fetches gate data and
+   * renders the appropriate panel. Otherwise clears any existing gate panel.
+   */
+  function refreshGatePanelsForFeature(featureName) {
+    var container = $("#gate-panels");
+    if (!container) return;
+
+    // Find the selected workflow's current state
+    var match = null;
+    for (var i = 0; i < allWorkflowStatuses.length; i++) {
+      if (allWorkflowStatuses[i].feature_name === featureName) {
+        match = allWorkflowStatuses[i];
+        break;
+      }
+    }
+
+    var state = match ? (match.state || "").toUpperCase() : "";
+
+    // Clear existing gate panels first
+    clearChildren(container);
+
+    // Only show gate UI when the selected workflow is at a gate state
+    if (state === "HUMAN_GATE_1") {
+      Promise.all([
+        fetchJSON("/api/workspace/features/" + encodeURIComponent(featureName) + "/discovery").catch(function () { return null; }),
+        fetchJSON("/api/workspace/features/" + encodeURIComponent(featureName) + "/files/gate1-corrections.json").catch(function () { return null; })
+      ]).then(function (results) {
+        if (results[0]) {
+          showGate1Panel({ gate_type: "requirements_confirmation", data: results[0], task_id: featureName }, results[1]);
+        }
+      });
+    } else if (state === "HUMAN_GATE_2") {
+      fetchJSON("/api/workspace/features/" + encodeURIComponent(featureName) + "/files/drafter-output.json").then(function (drafter) {
+        if (drafter) {
+          showGate2Panel({ gate_type: "ambiguity_resolution", data: drafter, task_id: featureName });
+        }
+      }).catch(function () {});
+    }
   }
 
   /**
@@ -559,8 +630,8 @@
     if (data.round != null) msg += " (round " + data.round + ")";
     addActivityEntry(msg, "info");
 
-    // Refresh the workflow status list so badges update in real-time.
-    refreshWorkflowStatusList();
+    // Note: workflow status list refresh is handled by handleEvent() which
+    // calls refreshWorkflowStatusList() before dispatching to this handler.
   }
 
   function onAgentDispatch(data) {
@@ -581,9 +652,13 @@
   }
 
   function onWorkflowStatus(data) {
-    updateWorkflowStatus(data);
-    // Refresh the full status list so all workflows are up-to-date.
+    // Always refresh the full status list so all workflows badges stay current.
     refreshWorkflowStatusList();
+
+    // Only update the detail panel if this event is for the selected workflow.
+    if (eventMatchesSelectedFeature(data)) {
+      updateWorkflowStatus(data);
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -1014,55 +1089,84 @@
   // Event Dispatch
   // -----------------------------------------------------------------------
 
+  /**
+   * Returns true if the event belongs to the currently selected workflow
+   * (or if no workflow is selected, allowing all events through).
+   */
+  function eventMatchesSelectedFeature(data) {
+    if (!selectedFeature) return true;
+    if (!data || !data.feature_name) return true; // events without feature_name pass through
+    return data.feature_name === selectedFeature;
+  }
+
   function handleEvent(envelope) {
     // Keepalive ping — ignore silently.
     if (envelope.event === "ping") return;
 
-    // Add ALL WebSocket events to the Messages tab log.
+    // Add ALL WebSocket events to the Messages tab log (unfiltered).
     addWsEventToMessages(envelope);
+
+    var data = envelope.data || {};
+
+    // Workflow status list updates always apply (all workflows).
+    // state_transition also refreshes the list, so it runs unconditionally
+    // for the list update, but detail panel updates are filtered below.
+    if (envelope.event === "workflow_status") {
+      onWorkflowStatus(data);
+      return;
+    }
+
+    // state_transition: always refresh the workflow list for badge updates,
+    // but only update the detail panel / activity if it matches the selection.
+    if (envelope.event === "state_transition") {
+      // Always refresh the status list so all workflow badges stay current.
+      refreshWorkflowStatusList();
+      if (eventMatchesSelectedFeature(data)) {
+        onStateTransition(data);
+      }
+      return;
+    }
+
+    // For all other events, only update UI panels if the event matches
+    // the selected workflow (or no workflow is selected).
+    if (!eventMatchesSelectedFeature(data)) return;
 
     switch (envelope.event) {
       case "spec_version":
-        onSpecVersion(envelope.data);
+        onSpecVersion(data);
         break;
       case "issue_update":
-        onIssueUpdate(envelope.data);
+        onIssueUpdate(data);
         break;
       case "convergence_update":
-        onConvergenceUpdate(envelope.data);
+        onConvergenceUpdate(data);
         break;
       case "gate_request":
-        onGateRequest(envelope.data);
+        onGateRequest(data);
         break;
       case "gate_response":
-        onGateResponse(envelope.data);
+        onGateResponse(data);
         break;
       case "circuit_breaker":
-        onCircuitBreaker(envelope.data);
+        onCircuitBreaker(data);
         break;
       case "agent_error":
-        onAgentError(envelope.data);
-        break;
-      case "state_transition":
-        onStateTransition(envelope.data);
+        onAgentError(data);
         break;
       case "agent_dispatch":
-        onAgentDispatch(envelope.data);
+        onAgentDispatch(data);
         break;
       case "agent_complete":
-        onAgentComplete(envelope.data);
-        break;
-      case "workflow_status":
-        onWorkflowStatus(envelope.data);
+        onAgentComplete(data);
         break;
       case "agent_metrics":
-        onAgentMetrics(envelope.data);
+        onAgentMetrics(data);
         break;
       case "agent_tool_event":
-        onAgentToolEvent(envelope.data);
+        onAgentToolEvent(data);
         break;
       case "agent_api_event":
-        onAgentAPIEvent(envelope.data);
+        onAgentAPIEvent(data);
         break;
     }
   }
@@ -1727,7 +1831,10 @@
   }
 
   function loadSpecVersions() {
-    fetchJSON("/api/spec/versions").then(function (versions) {
+    var url = "/api/spec/versions";
+    if (selectedFeature) url += "?feature=" + encodeURIComponent(selectedFeature);
+
+    fetchJSON(url).then(function (versions) {
       var select = $("#spec-version-select");
       var current = select.value;
       clearChildren(select);
@@ -1745,6 +1852,9 @@
     var select = $("#spec-version-select");
     var version = select.value;
     var url = version ? "/api/spec/version/" + version : "/api/spec/current";
+    if (selectedFeature) {
+      url += (url.indexOf("?") === -1 ? "?" : "&") + "feature=" + encodeURIComponent(selectedFeature);
+    }
 
     fetchJSON(url).then(function (data) {
       $("#spec-content").innerHTML = renderMarkdown(data.content || "");
@@ -1782,7 +1892,9 @@
   }
 
   function showDiff(a, b) {
-    fetchJSON("/api/spec/diff/" + a + "/" + b).then(function (data) {
+    var url = "/api/spec/diff/" + a + "/" + b;
+    if (selectedFeature) url += "?feature=" + encodeURIComponent(selectedFeature);
+    fetchJSON(url).then(function (data) {
       var diffView = $("#spec-diff-view");
       diffView.hidden = false;
 
@@ -1827,6 +1939,7 @@
     if (sev) params.set("severity", sev);
     if (status) params.set("status", status);
     if (lens) params.set("lens", lens);
+    if (selectedFeature) params.set("feature", selectedFeature);
 
     var url = "/api/spec/issues" + (params.toString() ? "?" + params.toString() : "");
     fetchJSON(url).then(function (issues) {
@@ -1956,7 +2069,10 @@
   // -----------------------------------------------------------------------
 
   function loadConvergence() {
-    fetchJSON("/api/spec/convergence").then(function (data) {
+    var url = "/api/spec/convergence";
+    if (selectedFeature) url += "?feature=" + encodeURIComponent(selectedFeature);
+
+    fetchJSON(url).then(function (data) {
       renderConvergence(data);
     }).catch(function () {
       $("#conv-round").textContent = "-";
