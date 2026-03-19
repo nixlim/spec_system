@@ -1080,13 +1080,23 @@ func HandleResetWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			return
 		}
 
+		// Cancel and clear the orchestrator if it's running this feature.
+		manager.mu.Lock()
+		if orch := manager.orchestrator; orch != nil {
+			if st := orch.State(); st != nil && st.FeatureName == req.FeatureName {
+				orch.Cancel()
+				manager.orchestrator = nil
+			}
+		}
+		manager.mu.Unlock()
+
 		featureDir := filepath.Join(manager.workspaceDir, "specs", req.FeatureName)
 		if err := os.RemoveAll(featureDir); err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to remove feature directory: %v", err))
 			return
 		}
 
-		log.Printf("[workflow] reset feature %q — deleted %s", req.FeatureName, featureDir)
+		log.Printf("[workflow] reset feature %q — cancelled orchestrator, deleted %s", req.FeatureName, featureDir)
 		writeJSON(w, http.StatusOK, map[string]string{
 			"status":  "reset",
 			"message": "Feature directory deleted",

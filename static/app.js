@@ -1196,6 +1196,20 @@
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ feature_name: featureName })
             }).then(function () {
+              // If the deleted workflow is currently displayed, clear the status panel.
+              var displayed = ($("#status-feature").textContent || "").trim();
+              if (displayed === featureName) {
+                updateWorkflowStatus({
+                  state: "IDLE",
+                  feature_name: "-",
+                  round: 0,
+                  cost_usd: 0,
+                  wall_clock_seconds: 0,
+                  agent_invocations: 0
+                });
+                // Clear activity feed.
+                clearChildren($("#status-activity"));
+              }
               loadFeatureList();
             }).catch(function (err) {
               alert("Delete failed: " + err.message);
