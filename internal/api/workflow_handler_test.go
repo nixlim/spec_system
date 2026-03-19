@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,6 +53,47 @@ func TestSanitizeFeatureName(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("sanitizeFeatureName(%q) = %q, want %q", tt.input, got, tt.want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestValidateFeatureName
+// ---------------------------------------------------------------------------
+
+func TestValidateFeatureName(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantErr   bool
+		errSubstr string
+	}{
+		{name: "simple alpha", input: "alpha", wantErr: false},
+		{name: "hyphenated", input: "my-feature", wantErr: false},
+		{name: "empty string", input: "", wantErr: true, errSubstr: "empty"},
+		{name: "forward slash", input: "feat/sub", wantErr: true, errSubstr: "path separator"},
+		{name: "backslash", input: "feat\\sub", wantErr: true, errSubstr: "path separator"},
+		{name: "double dot mid", input: "feat..sub", wantErr: true, errSubstr: "traversal"},
+		{name: "parent traversal", input: "../escape", wantErr: true, errSubstr: "traversal"},
+		{name: "alphanumeric", input: "feature123", wantErr: false},
+		{name: "underscores", input: "my_feature", wantErr: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateFeatureName(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ValidateFeatureName(%q) = nil, want error containing %q", tt.input, tt.errSubstr)
+				}
+				if !strings.Contains(err.Error(), tt.errSubstr) {
+					t.Fatalf("ValidateFeatureName(%q) error = %q, want substring %q", tt.input, err.Error(), tt.errSubstr)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("ValidateFeatureName(%q) = %v, want nil", tt.input, err)
+				}
+			}
+		})
 	}
 }
 

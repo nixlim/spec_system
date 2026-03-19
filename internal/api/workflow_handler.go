@@ -396,6 +396,11 @@ func HandleStartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			return
 		}
 
+		if err := ValidateFeatureName(req.FeatureName); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid feature_name: %v", err))
+			return
+		}
+
 		// Check for an existing workflow state on disk before creating a new one.
 		absWorkspace, _ := filepath.Abs(manager.workspaceDir)
 		resumeResult, resumeErr := specworkflow.ResumeWorkflow(absWorkspace, req.FeatureName, nil)
@@ -706,6 +711,13 @@ func HandleCancelWorkflowAPI(manager *WorkflowManager) http.HandlerFunc {
 		// Body may be empty for backward compat.
 		json.NewDecoder(r.Body).Decode(&req)
 
+		if req.FeatureName != "" {
+			if err := ValidateFeatureName(req.FeatureName); err != nil {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid feature_name: %v", err))
+				return
+			}
+		}
+
 		var err error
 		if req.FeatureName != "" {
 			err = manager.CancelWorkflow(req.FeatureName)
@@ -726,7 +738,7 @@ func HandleCancelWorkflowAPI(manager *WorkflowManager) http.HandlerFunc {
 func (m *WorkflowManager) bestCostUSD(stateCost float64, featureName string) float64 {
 	best := stateCost
 	if m.otelReceiver != nil {
-		if otelCost := m.otelReceiver.GetCostUSD(); otelCost > best {
+		if otelCost := m.otelReceiver.GetCostUSD(featureName); otelCost > best {
 			best = otelCost
 		}
 	}
@@ -918,6 +930,10 @@ func HandleRetryWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "feature_name is required")
 			return
 		}
+		if err := ValidateFeatureName(req.FeatureName); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid feature_name: %v", err))
+			return
+		}
 
 		// Remove the workflow-state.json file.
 		statePath := filepath.Join(manager.workspaceDir, "specs", req.FeatureName, "workflow-state.json")
@@ -954,6 +970,10 @@ func HandleResumeWorkflow(manager *WorkflowManager) http.HandlerFunc {
 		}
 		if req.FeatureName == "" {
 			writeError(w, http.StatusBadRequest, "feature_name is required")
+			return
+		}
+		if err := ValidateFeatureName(req.FeatureName); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid feature_name: %v", err))
 			return
 		}
 
@@ -1146,6 +1166,10 @@ func HandleRestartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "feature_name is required")
 			return
 		}
+		if err := ValidateFeatureName(req.FeatureName); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid feature_name: %v", err))
+			return
+		}
 
 		// 1. Cancel running workflow for this feature if any.
 		manager.mu.Lock()
@@ -1171,9 +1195,9 @@ func HandleRestartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			}
 		}
 
-		// 4. Reset OTEL receiver in-memory accumulators.
+		// 4. Reset OTEL receiver in-memory accumulators for this feature.
 		if manager.otelReceiver != nil {
-			manager.otelReceiver.ResetMetrics()
+			manager.otelReceiver.ResetMetrics(req.FeatureName)
 		}
 
 		log.Printf("[workflow] restarted feature %q — cancelled, deleted state, reset metrics", req.FeatureName)
@@ -1206,6 +1230,10 @@ func HandleRewindWorkflow(manager *WorkflowManager) http.HandlerFunc {
 		}
 		if req.FeatureName == "" {
 			writeError(w, http.StatusBadRequest, "feature_name is required")
+			return
+		}
+		if err := ValidateFeatureName(req.FeatureName); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid feature_name: %v", err))
 			return
 		}
 		if req.TargetState == "" {
@@ -1285,6 +1313,10 @@ func HandleResetWorkflow(manager *WorkflowManager) http.HandlerFunc {
 		}
 		if req.FeatureName == "" {
 			writeError(w, http.StatusBadRequest, "feature_name is required")
+			return
+		}
+		if err := ValidateFeatureName(req.FeatureName); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid feature_name: %v", err))
 			return
 		}
 
@@ -1521,6 +1553,23 @@ func serveJSONFile(w http.ResponseWriter, filePath string) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// ValidateFeatureName rejects feature names that contain path traversal
+// patterns or path separators. It returns a descriptive error for invalid
+// names and nil for valid ones. This must be called at the HTTP handler
+// layer before any business logic uses the name.
+func ValidateFeatureName(name string) error {
+	if name == "" {
+		return fmt.Errorf("feature name must not be empty")
+	}
+	if strings.Contains(name, "..") {
+		return fmt.Errorf("feature name must not contain traversal sequence")
+	}
+	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		return fmt.Errorf("feature name must not contain path separator")
+	}
+	return nil
+}
 
 // sanitizeFeatureName converts a human title to a URL-safe feature name
 // by lowercasing, replacing spaces/special characters with hyphens, and
