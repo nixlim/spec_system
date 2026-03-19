@@ -190,11 +190,91 @@ func evalSymlinksPartial(path string) (string, error) {
 	return filepath.Join(resolvedDir, base), nil
 }
 
+// ValidateFolderPath validates a folder path for safe use under the source-docs
+// directory. It rejects absolute paths, ".." traversal sequences, backslash
+// separators, and null bytes. The returned path is cleaned and uses forward
+// slashes. An empty input is valid and means "root of source-docs".
+func ValidateFolderPath(folder string) (string, error) {
+	if folder == "" {
+		return "", nil
+	}
+
+	// Reject null bytes.
+	if strings.ContainsRune(folder, 0) {
+		return "", fmt.Errorf("folder path contains null bytes")
+	}
+
+	// Reject backslash separators (normalize to forward slash first for check).
+	if strings.Contains(folder, "\\") {
+		return "", fmt.Errorf("folder path contains backslash")
+	}
+
+	// Reject absolute paths.
+	if filepath.IsAbs(folder) || strings.HasPrefix(folder, "/") {
+		return "", fmt.Errorf("folder path must be relative")
+	}
+
+	// Reject ".." traversal sequences.
+	if strings.Contains(folder, "..") {
+		return "", fmt.Errorf("folder path contains '..' traversal")
+	}
+
+	// Clean the path and strip trailing slashes.
+	cleaned := filepath.Clean(folder)
+	cleaned = strings.TrimRight(cleaned, string(filepath.Separator))
+
+	// After cleaning, re-check for traversal (Clean may have resolved something).
+	if strings.Contains(cleaned, "..") {
+		return "", fmt.Errorf("folder path contains '..' traversal after cleaning")
+	}
+
+	if cleaned == "." {
+		return "", nil
+	}
+
+	return cleaned, nil
+}
+
+// countFilesRecursive counts all regular files under a directory tree.
+func countFilesRecursive(dir string) (int, error) {
+	count := 0
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip entries we can't read
+		}
+		if !d.IsDir() {
+			count++
+		}
+		return nil
+	})
+	return count, err
+}
+
+// totalSizeRecursive sums file sizes for all regular files under a directory tree.
+func totalSizeRecursive(dir string) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			info, err := d.Info()
+			if err != nil {
+				return nil
+			}
+			total += info.Size()
+		}
+		return nil
+	})
+	return total, err
+}
+
 // HandleUpload returns an HTTP handler that accepts multipart file uploads.
 // Files are stored under {WorkspaceDir}/source-docs/. The handler validates
 // file extensions, content types, file sizes, and content integrity for JSON
-// and YAML files. Returns 201 on success with a JSON response containing
-// filename, size, and path.
+// and YAML files. An optional "folder" form field places the file in a
+// subdirectory under source-docs/. Returns 201 on success with a JSON
+// response containing filename, size, and path.
 func HandleUpload(config UploadConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -205,6 +285,14 @@ func HandleUpload(config UploadConfig) http.HandlerFunc {
 		// Parse multipart form with a reasonable memory limit
 		if err := r.ParseMultipartForm(config.maxFileSize()); err != nil {
 			http.Error(w, "failed to parse multipart form", http.StatusBadRequest)
+			return
+		}
+
+		// Read optional folder parameter.
+		folder := r.FormValue("folder")
+		cleanedFolder, err := ValidateFolderPath(folder)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("invalid folder path: %v", err), http.StatusBadRequest)
 			return
 		}
 
@@ -246,25 +334,22 @@ func HandleUpload(config UploadConfig) http.HandlerFunc {
 			return
 		}
 
-		// Check file count limit
-		entries, err := os.ReadDir(docsDir)
+		// Check file count limit (recursive count across all subdirectories)
+		fileCount, err := countFilesRecursive(docsDir)
 		if err != nil {
-			http.Error(w, "failed to read upload directory", http.StatusInternalServerError)
+			http.Error(w, "failed to count files in upload directory", http.StatusInternalServerError)
 			return
 		}
-		if len(entries) >= config.maxFileCount() {
+		if fileCount >= config.maxFileCount() {
 			http.Error(w, fmt.Sprintf("file count limit %d reached", config.maxFileCount()), http.StatusBadRequest)
 			return
 		}
 
-		// Check total size limit
-		var totalSize int64
-		for _, entry := range entries {
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-			totalSize += info.Size()
+		// Check total size limit (recursive total across all subdirectories)
+		totalSize, err := totalSizeRecursive(docsDir)
+		if err != nil {
+			http.Error(w, "failed to calculate total size", http.StatusInternalServerError)
+			return
 		}
 		if totalSize+header.Size > config.maxTotalSize() {
 			http.Error(w, fmt.Sprintf("total upload size would exceed limit of %d bytes", config.maxTotalSize()), http.StatusRequestEntityTooLarge)
@@ -304,8 +389,18 @@ func HandleUpload(config UploadConfig) http.HandlerFunc {
 			}
 		}
 
-		// Build final path and validate it's within workspace
-		destPath := filepath.Join(docsDir, sanitized)
+		// Build final path: source-docs/{folder}/{filename}
+		// Create nested folder structure if needed.
+		targetDir := docsDir
+		if cleanedFolder != "" {
+			targetDir = filepath.Join(docsDir, cleanedFolder)
+			if err := os.MkdirAll(targetDir, 0o755); err != nil {
+				http.Error(w, "failed to create folder", http.StatusInternalServerError)
+				return
+			}
+		}
+
+		destPath := filepath.Join(targetDir, sanitized)
 		if err := ValidateUploadPath(config.WorkspaceDir, destPath); err != nil {
 			http.Error(w, fmt.Sprintf("path validation failed: %v", err), http.StatusBadRequest)
 			return
@@ -317,11 +412,17 @@ func HandleUpload(config UploadConfig) http.HandlerFunc {
 			return
 		}
 
+		// Build relative path for response.
+		relPath := sanitized
+		if cleanedFolder != "" {
+			relPath = filepath.ToSlash(filepath.Join(cleanedFolder, sanitized))
+		}
+
 		// Return success response
 		resp := map[string]interface{}{
 			"filename": sanitized,
 			"size":     len(content),
-			"path":     filepath.Join("source-docs", sanitized),
+			"path":     filepath.ToSlash(filepath.Join("source-docs", relPath)),
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -331,8 +432,9 @@ func HandleUpload(config UploadConfig) http.HandlerFunc {
 }
 
 // HandleListUploads returns an HTTP handler that lists all uploaded files
-// in the source-docs directory. Returns a JSON array of objects containing
-// name, size, and modified_at fields.
+// in the source-docs directory, including files in subdirectories. Returns
+// a JSON array of objects containing name (relative path with forward
+// slashes), size, and modified_at fields.
 func HandleListUploads(config UploadConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -342,14 +444,9 @@ func HandleListUploads(config UploadConfig) http.HandlerFunc {
 
 		docsDir := config.sourceDocsDir()
 
-		entries, err := os.ReadDir(docsDir)
-		if err != nil {
-			if os.IsNotExist(err) {
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode([]interface{}{})
-				return
-			}
-			http.Error(w, "failed to read upload directory", http.StatusInternalServerError)
+		if _, err := os.Stat(docsDir); os.IsNotExist(err) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode([]interface{}{})
 			return
 		}
 
@@ -359,20 +456,40 @@ func HandleListUploads(config UploadConfig) http.HandlerFunc {
 			ModifiedAt time.Time `json:"modified_at"`
 		}
 
-		files := make([]fileInfo, 0, len(entries))
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			info, err := entry.Info()
+		var files []fileInfo
+		err := filepath.WalkDir(docsDir, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
-				continue
+				return nil // skip entries we can't read
 			}
+			if d.IsDir() {
+				return nil
+			}
+			info, infoErr := d.Info()
+			if infoErr != nil {
+				return nil
+			}
+
+			// Compute relative path from docsDir and normalize to forward slashes.
+			relPath, relErr := filepath.Rel(docsDir, path)
+			if relErr != nil {
+				return nil
+			}
+			relPath = filepath.ToSlash(relPath)
+
 			files = append(files, fileInfo{
-				Name:       entry.Name(),
+				Name:       relPath,
 				Size:       info.Size(),
 				ModifiedAt: info.ModTime(),
 			})
+			return nil
+		})
+		if err != nil {
+			http.Error(w, "failed to read upload directory", http.StatusInternalServerError)
+			return
+		}
+
+		if files == nil {
+			files = []fileInfo{}
 		}
 
 		w.Header().Set("Content-Type", "application/json")

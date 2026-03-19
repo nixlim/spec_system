@@ -1662,23 +1662,21 @@ func sanitizeFeatureName(title string) string {
 	return result
 }
 
-// discoverSourceDocs scans the workspace's global source-docs directory and
-// returns absolute paths to all files found there. This is used only as the
-// source library for copying into per-workflow directories.
+// discoverSourceDocs scans the workspace's global source-docs directory
+// recursively and returns absolute paths to all files found there. This is
+// used only as the source library for copying into per-workflow directories.
 func discoverSourceDocs(workspaceDir string) []string {
 	docsDir := filepath.Join(workspaceDir, "source-docs")
-	entries, err := os.ReadDir(docsDir)
-	if err != nil {
-		return nil
-	}
-
 	var paths []string
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+	filepath.WalkDir(docsDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
 		}
-		paths = append(paths, filepath.Join(docsDir, e.Name()))
-	}
+		if !d.IsDir() {
+			paths = append(paths, path)
+		}
+		return nil
+	})
 	return paths
 }
 
@@ -1706,8 +1704,14 @@ func discoverWorkflowSourceDocs(workspaceDir, featureName string) []string {
 // source-docs library into the per-workflow directory at
 // specs/{feature}/source-docs/. It creates the target directory on demand.
 //
-// sourcePaths must be absolute paths to files in the global source-docs
-// directory. Path traversal in source paths is rejected.
+// sourcePaths can be:
+//   - Absolute paths to individual files in the global source-docs directory
+//   - Absolute paths to subdirectories in the global source-docs directory
+//     (all files are copied recursively)
+//
+// Files are always copied FLAT into the workflow source-docs directory
+// (folder hierarchy from the library is NOT preserved). Path traversal in
+// source paths is rejected.
 //
 // Returns the new paths (under specs/{feature}/source-docs/) or an error.
 func copySourceDocsToWorkflow(workspaceDir, featureName string, sourcePaths []string) ([]string, error) {
@@ -1730,11 +1734,27 @@ func copySourceDocsToWorkflow(workspaceDir, featureName string, sourcePaths []st
 		if err != nil {
 			return nil, fmt.Errorf("resolve source path %q: %w", srcPath, err)
 		}
-		if !strings.HasPrefix(absSrc, absGlobalDir+string(filepath.Separator)) {
+		if !strings.HasPrefix(absSrc, absGlobalDir+string(filepath.Separator)) && absSrc != absGlobalDir {
 			return nil, fmt.Errorf("source path %q is outside the global source-docs directory", srcPath)
 		}
 
-		// Extract filename — reject any embedded path separators or traversals.
+		// Check if the source path is a directory (folder assignment).
+		info, statErr := os.Stat(absSrc)
+		if statErr != nil {
+			return nil, fmt.Errorf("stat source path %q: %w", srcPath, statErr)
+		}
+
+		if info.IsDir() {
+			// Recursively copy all files from the folder, flattened.
+			copied, walkErr := copyDirFlat(absSrc, targetDir)
+			if walkErr != nil {
+				return nil, fmt.Errorf("copy folder %q: %w", srcPath, walkErr)
+			}
+			newPaths = append(newPaths, copied...)
+			continue
+		}
+
+		// Individual file: extract filename — reject any traversals.
 		baseName := filepath.Base(absSrc)
 		if baseName == "." || baseName == ".." || baseName == "" {
 			return nil, fmt.Errorf("invalid source filename: %q", srcPath)
@@ -1749,6 +1769,29 @@ func copySourceDocsToWorkflow(workspaceDir, featureName string, sourcePaths []st
 	}
 
 	return newPaths, nil
+}
+
+// copyDirFlat recursively copies all files from srcDir into dstDir without
+// preserving the source directory hierarchy (flat copy). Returns the list of
+// destination paths created.
+func copyDirFlat(srcDir, dstDir string) ([]string, error) {
+	var copied []string
+	err := filepath.WalkDir(srcDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries
+		}
+		if d.IsDir() {
+			return nil
+		}
+		baseName := filepath.Base(path)
+		dstPath := filepath.Join(dstDir, baseName)
+		if err := copyFile(path, dstPath); err != nil {
+			return fmt.Errorf("copy %q: %w", path, err)
+		}
+		copied = append(copied, dstPath)
+		return nil
+	})
+	return copied, err
 }
 
 // copyFile copies a single file from src to dst using io.Copy.
