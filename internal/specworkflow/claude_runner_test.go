@@ -286,7 +286,7 @@ func TestTruncate(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDefaultClaudeRunner(t *testing.T) {
-	runner := DefaultClaudeRunner("/tmp/workspace", 0)
+	runner := DefaultClaudeRunner("/tmp/workspace", 0, "")
 
 	if runner.Command != "claude" {
 		t.Errorf("expected command 'claude', got %q", runner.Command)
@@ -321,7 +321,7 @@ func TestDefaultClaudeRunner(t *testing.T) {
 }
 
 func TestDefaultClaudeRunner_WithOTELPort(t *testing.T) {
-	runner := DefaultClaudeRunner("/tmp/workspace", 4317)
+	runner := DefaultClaudeRunner("/tmp/workspace", 4317, "my-feature")
 
 	if runner.Env["OTEL_METRICS_EXPORTER"] != "otlp" {
 		t.Errorf("expected OTEL_METRICS_EXPORTER=otlp, got %q", runner.Env["OTEL_METRICS_EXPORTER"])
@@ -335,6 +335,24 @@ func TestDefaultClaudeRunner_WithOTELPort(t *testing.T) {
 	want := "http://localhost:4317"
 	if runner.Env["OTEL_EXPORTER_OTLP_ENDPOINT"] != want {
 		t.Errorf("expected OTEL_EXPORTER_OTLP_ENDPOINT=%q, got %q", want, runner.Env["OTEL_EXPORTER_OTLP_ENDPOINT"])
+	}
+	// Verify workflow.feature resource attribute is set.
+	wantAttrs := "workflow.feature=my-feature"
+	if runner.Env["OTEL_RESOURCE_ATTRIBUTES"] != wantAttrs {
+		t.Errorf("expected OTEL_RESOURCE_ATTRIBUTES=%q, got %q", wantAttrs, runner.Env["OTEL_RESOURCE_ATTRIBUTES"])
+	}
+}
+
+func TestDefaultClaudeRunner_WithOTELPort_NoFeature(t *testing.T) {
+	runner := DefaultClaudeRunner("/tmp/workspace", 4317, "")
+
+	// OTEL vars should still be set.
+	if runner.Env["OTEL_METRICS_EXPORTER"] != "otlp" {
+		t.Errorf("expected OTEL_METRICS_EXPORTER=otlp, got %q", runner.Env["OTEL_METRICS_EXPORTER"])
+	}
+	// But OTEL_RESOURCE_ATTRIBUTES should not be set when featureName is empty.
+	if _, ok := runner.Env["OTEL_RESOURCE_ATTRIBUTES"]; ok {
+		t.Error("expected no OTEL_RESOURCE_ATTRIBUTES when featureName is empty")
 	}
 }
 

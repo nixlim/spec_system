@@ -309,7 +309,7 @@ func (m *WorkflowManager) ResumeFromGate(featureName string) (*specworkflow.Orch
 		FeatureName:    featureName,
 		SourceDocPaths: sourcePaths,
 		Config:         m.config,
-		Runner:         specworkflow.DefaultClaudeRunner(m.workspaceDir, m.otelPort),
+		Runner:         specworkflow.DefaultClaudeRunner(m.workspaceDir, m.otelPort, featureName),
 		Emitter:        m.emitter,
 	}
 	// Wire cost provider if metrics store is available.
@@ -444,7 +444,7 @@ func HandleStartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			FeatureName:    req.FeatureName,
 			SourceDocPaths: sourcePaths,
 			Config:         manager.config,
-			Runner:         specworkflow.DefaultClaudeRunner(manager.workspaceDir, manager.otelPort),
+			Runner:         specworkflow.DefaultClaudeRunner(manager.workspaceDir, manager.otelPort, req.FeatureName),
 			Emitter:        manager.emitter,
 		}
 
@@ -1024,7 +1024,7 @@ func HandleResumeWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			FeatureName:    req.FeatureName,
 			SourceDocPaths: sourcePaths,
 			Config:         manager.config,
-			Runner:         specworkflow.DefaultClaudeRunner(manager.workspaceDir, manager.otelPort),
+			Runner:         specworkflow.DefaultClaudeRunner(manager.workspaceDir, manager.otelPort, req.FeatureName),
 			Emitter:        manager.emitter,
 		}
 		if manager.metricsStore != nil {

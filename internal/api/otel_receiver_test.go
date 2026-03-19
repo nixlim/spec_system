@@ -11,6 +11,7 @@ import (
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
+	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -20,6 +21,8 @@ import (
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
+
+const testFeatureName = "test-feature"
 
 func setupOTELReceiver(t *testing.T) (*OTELReceiver, *WebSocketHub) {
 	t.Helper()
@@ -78,6 +81,36 @@ func startTestGRPC(t *testing.T) (*OTELReceiver, grpcTestClients, *grpc.ClientCo
 	return recv, clients, conn
 }
 
+// testResource returns an OTLP Resource with our service name and the given
+// workflow.feature value. If featureName is empty, no workflow.feature is set.
+func testResource(featureName string) *resourcepb.Resource {
+	attrs := []*commonpb.KeyValue{
+		{
+			Key:   "service.name",
+			Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: otelServiceName}},
+		},
+	}
+	if featureName != "" {
+		attrs = append(attrs, &commonpb.KeyValue{
+			Key:   "workflow.feature",
+			Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: featureName}},
+		})
+	}
+	return &resourcepb.Resource{Attributes: attrs}
+}
+
+// getAcc is a test helper to safely read an accumulator for a feature.
+func getAcc(t *testing.T, recv *OTELReceiver, featureName string) *MetricsAccumulator {
+	t.Helper()
+	recv.mu.RLock()
+	defer recv.mu.RUnlock()
+	acc, ok := recv.accumulators[featureName]
+	if !ok {
+		return nil
+	}
+	return acc
+}
+
 // ---------------------------------------------------------------------------
 // TestExportMetrics via gRPC
 // ---------------------------------------------------------------------------
@@ -109,6 +142,7 @@ func TestGRPCMetrics_TokenUsage(t *testing.T) {
 	req := &colmetricspb.ExportMetricsServiceRequest{
 		ResourceMetrics: []*metricspb.ResourceMetrics{
 			{
+				Resource: testResource(testFeatureName),
 				ScopeMetrics: []*metricspb.ScopeMetrics{
 					{
 						Metrics: []*metricspb.Metric{
@@ -146,10 +180,12 @@ func TestGRPCMetrics_TokenUsage(t *testing.T) {
 		t.Fatal("expected non-nil response")
 	}
 
-	recv.mu.Lock()
-	defer recv.mu.Unlock()
-	if recv.inputTokens != 1000 {
-		t.Errorf("expected inputTokens=1000, got %d", recv.inputTokens)
+	acc := getAcc(t, recv, testFeatureName)
+	if acc == nil {
+		t.Fatal("expected accumulator for test feature")
+	}
+	if acc.inputTokens != 1000 {
+		t.Errorf("expected inputTokens=1000, got %d", acc.inputTokens)
 	}
 }
 
@@ -164,6 +200,7 @@ func TestGRPCMetrics_CostUsage(t *testing.T) {
 	req := &colmetricspb.ExportMetricsServiceRequest{
 		ResourceMetrics: []*metricspb.ResourceMetrics{
 			{
+				Resource: testResource(testFeatureName),
 				ScopeMetrics: []*metricspb.ScopeMetrics{
 					{
 						Metrics: []*metricspb.Metric{
@@ -192,10 +229,12 @@ func TestGRPCMetrics_CostUsage(t *testing.T) {
 		t.Fatalf("Export failed: %v", err)
 	}
 
-	recv.mu.Lock()
-	defer recv.mu.Unlock()
-	if recv.totalCostUSD != 0.05 {
-		t.Errorf("expected totalCostUSD=0.05, got %f", recv.totalCostUSD)
+	acc := getAcc(t, recv, testFeatureName)
+	if acc == nil {
+		t.Fatal("expected accumulator for test feature")
+	}
+	if acc.totalCostUSD != 0.05 {
+		t.Errorf("expected totalCostUSD=0.05, got %f", acc.totalCostUSD)
 	}
 }
 
@@ -210,6 +249,7 @@ func TestGRPCMetrics_MultipleTokenTypes(t *testing.T) {
 	req := &colmetricspb.ExportMetricsServiceRequest{
 		ResourceMetrics: []*metricspb.ResourceMetrics{
 			{
+				Resource: testResource(testFeatureName),
 				ScopeMetrics: []*metricspb.ScopeMetrics{
 					{
 						Metrics: []*metricspb.Metric{
@@ -255,16 +295,18 @@ func TestGRPCMetrics_MultipleTokenTypes(t *testing.T) {
 		t.Fatalf("Export failed: %v", err)
 	}
 
-	recv.mu.Lock()
-	defer recv.mu.Unlock()
-	if recv.inputTokens != 500 {
-		t.Errorf("expected inputTokens=500, got %d", recv.inputTokens)
+	acc := getAcc(t, recv, testFeatureName)
+	if acc == nil {
+		t.Fatal("expected accumulator for test feature")
 	}
-	if recv.outputTokens != 200 {
-		t.Errorf("expected outputTokens=200, got %d", recv.outputTokens)
+	if acc.inputTokens != 500 {
+		t.Errorf("expected inputTokens=500, got %d", acc.inputTokens)
 	}
-	if recv.cacheReadTokens != 300 {
-		t.Errorf("expected cacheReadTokens=300, got %d", recv.cacheReadTokens)
+	if acc.outputTokens != 200 {
+		t.Errorf("expected outputTokens=200, got %d", acc.outputTokens)
+	}
+	if acc.cacheReadTokens != 300 {
+		t.Errorf("expected cacheReadTokens=300, got %d", acc.cacheReadTokens)
 	}
 }
 
@@ -288,6 +330,7 @@ func TestGRPCMetrics_ServerSurvivesAfterEmptyRequest(t *testing.T) {
 	req := &colmetricspb.ExportMetricsServiceRequest{
 		ResourceMetrics: []*metricspb.ResourceMetrics{
 			{
+				Resource: testResource(testFeatureName),
 				ScopeMetrics: []*metricspb.ScopeMetrics{
 					{
 						Metrics: []*metricspb.Metric{
@@ -316,10 +359,12 @@ func TestGRPCMetrics_ServerSurvivesAfterEmptyRequest(t *testing.T) {
 		t.Fatalf("Export after empty request failed: %v", err)
 	}
 
-	recv.mu.Lock()
-	defer recv.mu.Unlock()
-	if recv.totalCostUSD != 0.10 {
-		t.Errorf("expected totalCostUSD=0.10, got %f", recv.totalCostUSD)
+	acc := getAcc(t, recv, testFeatureName)
+	if acc == nil {
+		t.Fatal("expected accumulator for test feature")
+	}
+	if acc.totalCostUSD != 0.10 {
+		t.Errorf("expected totalCostUSD=0.10, got %f", acc.totalCostUSD)
 	}
 }
 
@@ -354,6 +399,7 @@ func TestGRPCLogs_ToolResult(t *testing.T) {
 	req := &collogspb.ExportLogsServiceRequest{
 		ResourceLogs: []*logspb.ResourceLogs{
 			{
+				Resource: testResource(testFeatureName),
 				ScopeLogs: []*logspb.ScopeLogs{
 					{
 						LogRecords: []*logspb.LogRecord{
@@ -381,15 +427,17 @@ func TestGRPCLogs_ToolResult(t *testing.T) {
 		t.Fatal("expected non-nil response")
 	}
 
-	recv.mu.Lock()
-	defer recv.mu.Unlock()
-	if len(recv.toolResults) != 1 {
-		t.Fatalf("expected 1 tool result, got %d", len(recv.toolResults))
+	acc := getAcc(t, recv, testFeatureName)
+	if acc == nil {
+		t.Fatal("expected accumulator for test feature")
 	}
-	if recv.toolResults[0].ToolName != "Read" {
-		t.Errorf("expected tool_name 'Read', got %q", recv.toolResults[0].ToolName)
+	if len(acc.toolResults) != 1 {
+		t.Fatalf("expected 1 tool result, got %d", len(acc.toolResults))
 	}
-	if !recv.toolResults[0].Success {
+	if acc.toolResults[0].ToolName != "Read" {
+		t.Errorf("expected tool_name 'Read', got %q", acc.toolResults[0].ToolName)
+	}
+	if !acc.toolResults[0].Success {
 		t.Error("expected success=true")
 	}
 }
@@ -405,6 +453,7 @@ func TestGRPCLogs_APIRequest(t *testing.T) {
 	req := &collogspb.ExportLogsServiceRequest{
 		ResourceLogs: []*logspb.ResourceLogs{
 			{
+				Resource: testResource(testFeatureName),
 				ScopeLogs: []*logspb.ScopeLogs{
 					{
 						LogRecords: []*logspb.LogRecord{
@@ -431,19 +480,21 @@ func TestGRPCLogs_APIRequest(t *testing.T) {
 		t.Fatalf("logs Export failed: %v", err)
 	}
 
-	recv.mu.Lock()
-	defer recv.mu.Unlock()
-	if recv.totalAPICalls != 1 {
-		t.Errorf("expected totalAPICalls=1, got %d", recv.totalAPICalls)
+	acc := getAcc(t, recv, testFeatureName)
+	if acc == nil {
+		t.Fatal("expected accumulator for test feature")
 	}
-	if recv.totalCostUSD != 0.07 {
-		t.Errorf("expected totalCostUSD=0.07, got %f", recv.totalCostUSD)
+	if acc.totalAPICalls != 1 {
+		t.Errorf("expected totalAPICalls=1, got %d", acc.totalAPICalls)
 	}
-	if recv.inputTokens != 2000 {
-		t.Errorf("expected inputTokens=2000, got %d", recv.inputTokens)
+	if acc.totalCostUSD != 0.07 {
+		t.Errorf("expected totalCostUSD=0.07, got %f", acc.totalCostUSD)
 	}
-	if recv.outputTokens != 500 {
-		t.Errorf("expected outputTokens=500, got %d", recv.outputTokens)
+	if acc.inputTokens != 2000 {
+		t.Errorf("expected inputTokens=2000, got %d", acc.inputTokens)
+	}
+	if acc.outputTokens != 500 {
+		t.Errorf("expected outputTokens=500, got %d", acc.outputTokens)
 	}
 }
 
@@ -458,6 +509,7 @@ func TestGRPCLogs_EventNameFallbackToBody(t *testing.T) {
 	req := &collogspb.ExportLogsServiceRequest{
 		ResourceLogs: []*logspb.ResourceLogs{
 			{
+				Resource: testResource(testFeatureName),
 				ScopeLogs: []*logspb.ScopeLogs{
 					{
 						LogRecords: []*logspb.LogRecord{
@@ -483,13 +535,15 @@ func TestGRPCLogs_EventNameFallbackToBody(t *testing.T) {
 		t.Fatalf("logs Export failed: %v", err)
 	}
 
-	recv.mu.Lock()
-	defer recv.mu.Unlock()
-	if len(recv.toolResults) != 1 {
-		t.Fatalf("expected 1 tool result, got %d", len(recv.toolResults))
+	acc := getAcc(t, recv, testFeatureName)
+	if acc == nil {
+		t.Fatal("expected accumulator for test feature")
 	}
-	if recv.toolResults[0].ToolName != "Write" {
-		t.Errorf("expected tool_name 'Write', got %q", recv.toolResults[0].ToolName)
+	if len(acc.toolResults) != 1 {
+		t.Fatalf("expected 1 tool result, got %d", len(acc.toolResults))
+	}
+	if acc.toolResults[0].ToolName != "Write" {
+		t.Errorf("expected tool_name 'Write', got %q", acc.toolResults[0].ToolName)
 	}
 }
 
@@ -501,19 +555,39 @@ func TestResetMetrics(t *testing.T) {
 	recv, _ := setupOTELReceiver(t)
 
 	recv.mu.Lock()
-	recv.inputTokens = 500
-	recv.outputTokens = 200
-	recv.totalCostUSD = 1.5
-	recv.totalAPICalls = 10
-	recv.toolResults = []ToolResultEvent{{ToolName: "test"}}
+	acc := recv.getOrCreateAccumulatorLocked(testFeatureName)
+	acc.inputTokens = 500
+	acc.outputTokens = 200
+	acc.totalCostUSD = 1.5
+	acc.totalAPICalls = 10
+	acc.toolResults = []ToolResultEvent{{ToolName: "test"}}
+	recv.mu.Unlock()
+
+	recv.ResetMetrics(testFeatureName)
+
+	recv.mu.RLock()
+	defer recv.mu.RUnlock()
+	if _, ok := recv.accumulators[testFeatureName]; ok {
+		t.Error("ResetMetrics did not remove the feature accumulator")
+	}
+}
+
+func TestResetMetrics_All(t *testing.T) {
+	recv, _ := setupOTELReceiver(t)
+
+	recv.mu.Lock()
+	a := recv.getOrCreateAccumulatorLocked("alpha")
+	a.totalCostUSD = 1.0
+	b := recv.getOrCreateAccumulatorLocked("beta")
+	b.totalCostUSD = 2.0
 	recv.mu.Unlock()
 
 	recv.ResetMetrics()
 
-	recv.mu.Lock()
-	defer recv.mu.Unlock()
-	if recv.inputTokens != 0 || recv.outputTokens != 0 || recv.totalCostUSD != 0 || recv.totalAPICalls != 0 || recv.toolResults != nil {
-		t.Error("ResetMetrics did not clear all fields")
+	recv.mu.RLock()
+	defer recv.mu.RUnlock()
+	if len(recv.accumulators) != 0 {
+		t.Errorf("expected 0 accumulators after ResetMetrics(), got %d", len(recv.accumulators))
 	}
 }
 
@@ -584,6 +658,7 @@ func TestGRPCMetrics_GaugeType(t *testing.T) {
 	req := &colmetricspb.ExportMetricsServiceRequest{
 		ResourceMetrics: []*metricspb.ResourceMetrics{
 			{
+				Resource: testResource(testFeatureName),
 				ScopeMetrics: []*metricspb.ScopeMetrics{
 					{
 						Metrics: []*metricspb.Metric{
@@ -612,9 +687,377 @@ func TestGRPCMetrics_GaugeType(t *testing.T) {
 		t.Fatalf("Export failed: %v", err)
 	}
 
-	recv.mu.Lock()
-	defer recv.mu.Unlock()
-	if recv.totalCostUSD != 0.25 {
-		t.Errorf("expected totalCostUSD=0.25, got %f", recv.totalCostUSD)
+	acc := getAcc(t, recv, testFeatureName)
+	if acc == nil {
+		t.Fatal("expected accumulator for test feature")
+	}
+	if acc.totalCostUSD != 0.25 {
+		t.Errorf("expected totalCostUSD=0.25, got %f", acc.totalCostUSD)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestExtractWorkflowFeature
+// ---------------------------------------------------------------------------
+
+func TestExtractWorkflowFeature(t *testing.T) {
+	tests := []struct {
+		name     string
+		attrs    []*commonpb.KeyValue
+		expected string
+	}{
+		{
+			name:     "present",
+			attrs:    testResource("my-feature").Attributes,
+			expected: "my-feature",
+		},
+		{
+			name: "absent",
+			attrs: []*commonpb.KeyValue{
+				{Key: "service.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: otelServiceName}}},
+			},
+			expected: "",
+		},
+		{
+			name:     "empty",
+			attrs:    nil,
+			expected: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractWorkflowFeature(tc.attrs)
+			if got != tc.expected {
+				t.Errorf("expected %q, got %q", tc.expected, got)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestOTELAccumulatorPartitioning
+// ---------------------------------------------------------------------------
+
+func TestOTELAccumulatorPartitioning(t *testing.T) {
+	recv, clients, conn := startTestGRPC(t)
+	defer func() {
+		conn.Close()
+		recv.Stop()
+	}()
+
+	ts := uint64(time.Now().UnixNano())
+
+	// Send metrics for "alpha" workflow.
+	alphaReq := &colmetricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricspb.ResourceMetrics{
+			{
+				Resource: testResource("alpha"),
+				ScopeMetrics: []*metricspb.ScopeMetrics{
+					{
+						Metrics: []*metricspb.Metric{
+							{
+								Name: "claude_code.token.usage",
+								Data: &metricspb.Metric_Sum{
+									Sum: &metricspb.Sum{
+										DataPoints: []*metricspb.NumberDataPoint{
+											{
+												TimeUnixNano: ts,
+												Value:        &metricspb.NumberDataPoint_AsInt{AsInt: 1000},
+												Attributes: []*commonpb.KeyValue{
+													{Key: "type", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "input"}}},
+												},
+											},
+										},
+									},
+								},
+							},
+							{
+								Name: "claude_code.cost.usage",
+								Data: &metricspb.Metric_Sum{
+									Sum: &metricspb.Sum{
+										DataPoints: []*metricspb.NumberDataPoint{
+											{
+												TimeUnixNano: ts,
+												Value:        &metricspb.NumberDataPoint_AsDouble{AsDouble: 0.50},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Send metrics for "beta" workflow.
+	betaReq := &colmetricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricspb.ResourceMetrics{
+			{
+				Resource: testResource("beta"),
+				ScopeMetrics: []*metricspb.ScopeMetrics{
+					{
+						Metrics: []*metricspb.Metric{
+							{
+								Name: "claude_code.token.usage",
+								Data: &metricspb.Metric_Sum{
+									Sum: &metricspb.Sum{
+										DataPoints: []*metricspb.NumberDataPoint{
+											{
+												TimeUnixNano: ts,
+												Value:        &metricspb.NumberDataPoint_AsInt{AsInt: 2000},
+												Attributes: []*commonpb.KeyValue{
+													{Key: "type", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "input"}}},
+												},
+											},
+										},
+									},
+								},
+							},
+							{
+								Name: "claude_code.cost.usage",
+								Data: &metricspb.Metric_Sum{
+									Sum: &metricspb.Sum{
+										DataPoints: []*metricspb.NumberDataPoint{
+											{
+												TimeUnixNano: ts,
+												Value:        &metricspb.NumberDataPoint_AsDouble{AsDouble: 1.25},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	if _, err := clients.metrics.Export(ctx, alphaReq); err != nil {
+		t.Fatalf("Export alpha failed: %v", err)
+	}
+	if _, err := clients.metrics.Export(ctx, betaReq); err != nil {
+		t.Fatalf("Export beta failed: %v", err)
+	}
+
+	// Verify alpha accumulator.
+	alphaAcc := getAcc(t, recv, "alpha")
+	if alphaAcc == nil {
+		t.Fatal("expected accumulator for alpha")
+	}
+	if alphaAcc.inputTokens != 1000 {
+		t.Errorf("alpha: expected inputTokens=1000, got %d", alphaAcc.inputTokens)
+	}
+	if alphaAcc.totalCostUSD != 0.50 {
+		t.Errorf("alpha: expected totalCostUSD=0.50, got %f", alphaAcc.totalCostUSD)
+	}
+
+	// Verify beta accumulator.
+	betaAcc := getAcc(t, recv, "beta")
+	if betaAcc == nil {
+		t.Fatal("expected accumulator for beta")
+	}
+	if betaAcc.inputTokens != 2000 {
+		t.Errorf("beta: expected inputTokens=2000, got %d", betaAcc.inputTokens)
+	}
+	if betaAcc.totalCostUSD != 1.25 {
+		t.Errorf("beta: expected totalCostUSD=1.25, got %f", betaAcc.totalCostUSD)
+	}
+
+	// Verify GetCostUSD per-feature.
+	if cost := recv.GetCostUSD("alpha"); cost != 0.50 {
+		t.Errorf("GetCostUSD(alpha): expected 0.50, got %f", cost)
+	}
+	if cost := recv.GetCostUSD("beta"); cost != 1.25 {
+		t.Errorf("GetCostUSD(beta): expected 1.25, got %f", cost)
+	}
+	// Sum across all.
+	if cost := recv.GetCostUSD(); cost != 1.75 {
+		t.Errorf("GetCostUSD(): expected 1.75, got %f", cost)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestOTELAccumulatorResetIsolation
+// ---------------------------------------------------------------------------
+
+func TestOTELAccumulatorResetIsolation(t *testing.T) {
+	recv, clients, conn := startTestGRPC(t)
+	defer func() {
+		conn.Close()
+		recv.Stop()
+	}()
+
+	ts := uint64(time.Now().UnixNano())
+	ctx := context.Background()
+
+	// Send metrics for both alpha and beta.
+	for _, feature := range []string{"alpha", "beta"} {
+		req := &colmetricspb.ExportMetricsServiceRequest{
+			ResourceMetrics: []*metricspb.ResourceMetrics{
+				{
+					Resource: testResource(feature),
+					ScopeMetrics: []*metricspb.ScopeMetrics{
+						{
+							Metrics: []*metricspb.Metric{
+								{
+									Name: "claude_code.cost.usage",
+									Data: &metricspb.Metric_Sum{
+										Sum: &metricspb.Sum{
+											DataPoints: []*metricspb.NumberDataPoint{
+												{
+													TimeUnixNano: ts,
+													Value:        &metricspb.NumberDataPoint_AsDouble{AsDouble: 0.75},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		if _, err := clients.metrics.Export(ctx, req); err != nil {
+			t.Fatalf("Export %s failed: %v", feature, err)
+		}
+	}
+
+	// Reset beta only.
+	recv.ResetMetrics("beta")
+
+	// Alpha should be unaffected.
+	alphaAcc := getAcc(t, recv, "alpha")
+	if alphaAcc == nil {
+		t.Fatal("expected alpha accumulator to survive beta reset")
+	}
+	if alphaAcc.totalCostUSD != 0.75 {
+		t.Errorf("alpha: expected totalCostUSD=0.75 after beta reset, got %f", alphaAcc.totalCostUSD)
+	}
+
+	// Beta should be gone.
+	betaAcc := getAcc(t, recv, "beta")
+	if betaAcc != nil {
+		t.Error("expected beta accumulator to be removed after reset")
+	}
+
+	// GetCostUSD should only reflect alpha now.
+	if cost := recv.GetCostUSD(); cost != 0.75 {
+		t.Errorf("GetCostUSD() after beta reset: expected 0.75, got %f", cost)
+	}
+	if cost := recv.GetCostUSD("beta"); cost != 0 {
+		t.Errorf("GetCostUSD(beta) after reset: expected 0, got %f", cost)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestOTELAttributeRouting
+// ---------------------------------------------------------------------------
+
+func TestOTELAttributeRouting(t *testing.T) {
+	recv, clients, conn := startTestGRPC(t)
+	defer func() {
+		conn.Close()
+		recv.Stop()
+	}()
+
+	ts := uint64(time.Now().UnixNano())
+	ctx := context.Background()
+
+	costMetric := func(cost float64) *metricspb.Metric {
+		return &metricspb.Metric{
+			Name: "claude_code.cost.usage",
+			Data: &metricspb.Metric_Sum{
+				Sum: &metricspb.Sum{
+					DataPoints: []*metricspb.NumberDataPoint{
+						{
+							TimeUnixNano: ts,
+							Value:        &metricspb.NumberDataPoint_AsDouble{AsDouble: cost},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	// 1. No workflow.feature attribute — should be silently dropped.
+	noFeatureReq := &colmetricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricspb.ResourceMetrics{
+			{
+				Resource: testResource(""), // service.name set but no workflow.feature
+				ScopeMetrics: []*metricspb.ScopeMetrics{
+					{Metrics: []*metricspb.Metric{costMetric(99.99)}},
+				},
+			},
+		},
+	}
+	if _, err := clients.metrics.Export(ctx, noFeatureReq); err != nil {
+		t.Fatalf("Export (no feature) failed: %v", err)
+	}
+
+	// 2. Wrong service.name — should be silently dropped.
+	wrongServiceRes := &resourcepb.Resource{
+		Attributes: []*commonpb.KeyValue{
+			{Key: "service.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "other-service"}}},
+			{Key: "workflow.feature", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "should-not-appear"}}},
+		},
+	}
+	wrongServiceReq := &colmetricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricspb.ResourceMetrics{
+			{
+				Resource: wrongServiceRes,
+				ScopeMetrics: []*metricspb.ScopeMetrics{
+					{Metrics: []*metricspb.Metric{costMetric(88.88)}},
+				},
+			},
+		},
+	}
+	if _, err := clients.metrics.Export(ctx, wrongServiceReq); err != nil {
+		t.Fatalf("Export (wrong service) failed: %v", err)
+	}
+
+	// 3. Valid request — should be accumulated.
+	validReq := &colmetricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricspb.ResourceMetrics{
+			{
+				Resource: testResource("valid-feature"),
+				ScopeMetrics: []*metricspb.ScopeMetrics{
+					{Metrics: []*metricspb.Metric{costMetric(0.42)}},
+				},
+			},
+		},
+	}
+	if _, err := clients.metrics.Export(ctx, validReq); err != nil {
+		t.Fatalf("Export (valid) failed: %v", err)
+	}
+
+	// Verify: no accumulator for dropped data.
+	recv.mu.RLock()
+	accCount := len(recv.accumulators)
+	_, hasNoFeature := recv.accumulators[""]
+	_, hasShouldNot := recv.accumulators["should-not-appear"]
+	recv.mu.RUnlock()
+
+	if hasNoFeature {
+		t.Error("should not have accumulator for empty feature name")
+	}
+	if hasShouldNot {
+		t.Error("should not have accumulator for wrong service.name")
+	}
+	if accCount != 1 {
+		t.Errorf("expected exactly 1 accumulator (valid-feature), got %d", accCount)
+	}
+
+	// Verify the valid accumulator.
+	validAcc := getAcc(t, recv, "valid-feature")
+	if validAcc == nil {
+		t.Fatal("expected accumulator for valid-feature")
+	}
+	if validAcc.totalCostUSD != 0.42 {
+		t.Errorf("expected totalCostUSD=0.42, got %f", validAcc.totalCostUSD)
 	}
 }

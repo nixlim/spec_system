@@ -334,8 +334,10 @@ func truncate(s string, n int) string {
 // DefaultClaudeRunner returns a ClaudeRunner configured with standard
 // defaults for the adversarial spec workflow. If otelPort > 0, OTEL
 // environment variables are set so child Claude processes export
-// telemetry back to the embedded OTLP receiver.
-func DefaultClaudeRunner(workspaceDir string, otelPort int) *ClaudeRunner {
+// telemetry back to the embedded OTLP receiver. The featureName is
+// included as a workflow.feature resource attribute so the OTEL receiver
+// can partition telemetry by workflow.
+func DefaultClaudeRunner(workspaceDir string, otelPort int, featureName string) *ClaudeRunner {
 	env := map[string]string{
 		"CLAUDE_CODE_MAX_TURNS":        "50",
 		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
@@ -351,6 +353,11 @@ func DefaultClaudeRunner(workspaceDir string, otelPort int) *ClaudeRunner {
 		// Tag child processes so the OTEL receiver can filter out
 		// telemetry from unrelated Claude Code instances on the system.
 		env["OTEL_SERVICE_NAME"] = "adversarial-spec-system"
+		// Include workflow.feature so the OTEL receiver can partition
+		// telemetry accumulators by workflow.
+		if featureName != "" {
+			env["OTEL_RESOURCE_ATTRIBUTES"] = "workflow.feature=" + featureName
+		}
 	}
 
 	return &ClaudeRunner{

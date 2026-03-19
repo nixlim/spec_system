@@ -28,17 +28,8 @@ import (
 // Types
 // ---------------------------------------------------------------------------
 
-// OTELReceiver accepts OTLP gRPC requests and converts them into
-// dashboard-friendly WebSocket events.
-type OTELReceiver struct {
-	colmetricspb.UnimplementedMetricsServiceServer
-
-	hub     *WebSocketHub
-	emitter specworkflow.EventEmitter
-	server  *grpc.Server
-	mu      sync.Mutex
-
-	// Accumulated metrics from OTLP metric exports.
+// MetricsAccumulator holds per-workflow accumulated telemetry data.
+type MetricsAccumulator struct {
 	inputTokens       int64
 	outputTokens      int64
 	cacheReadTokens   int64
@@ -47,6 +38,20 @@ type OTELReceiver struct {
 	totalAPICalls     int
 	toolResults       []ToolResultEvent
 	broadcastCount    int
+}
+
+// OTELReceiver accepts OTLP gRPC requests and converts them into
+// dashboard-friendly WebSocket events.
+type OTELReceiver struct {
+	colmetricspb.UnimplementedMetricsServiceServer
+
+	hub     *WebSocketHub
+	emitter specworkflow.EventEmitter
+	server  *grpc.Server
+	mu      sync.RWMutex
+
+	// Per-workflow accumulated metrics, keyed by workflow.feature.
+	accumulators map[string]*MetricsAccumulator
 
 	// metricsStore persists telemetry to SQLite so data survives
 	// browser refreshes and server restarts. Nil if not configured.
@@ -75,6 +80,7 @@ type ToolResultEvent struct {
 
 // AgentMetricsPayload is the WebSocket event payload for agent_metrics events.
 type AgentMetricsPayload struct {
+	FeatureName     string            `json:"feature_name"`
 	TotalTokens     int64             `json:"total_tokens"`
 	TotalCostUSD    float64           `json:"total_cost_usd"`
 	TotalAPICalls   int               `json:"total_api_calls"`
@@ -105,8 +111,9 @@ type AgentAPIPayload struct {
 // given hub and emitter.
 func NewOTELReceiver(hub *WebSocketHub, emitter specworkflow.EventEmitter) *OTELReceiver {
 	return &OTELReceiver{
-		hub:     hub,
-		emitter: emitter,
+		hub:          hub,
+		emitter:      emitter,
+		accumulators: make(map[string]*MetricsAccumulator),
 	}
 }
 
@@ -133,13 +140,25 @@ func (recv *OTELReceiver) RestoreFromStore(featureName string) {
 	}
 	recv.mu.Lock()
 	defer recv.mu.Unlock()
-	recv.inputTokens = m.InputTokens
-	recv.outputTokens = m.OutputTokens
-	recv.cacheReadTokens = m.CacheReadTokens
-	recv.totalCostUSD = m.TotalCostUSD
-	recv.totalAPICalls = m.TotalAPICalls
+	acc := recv.getOrCreateAccumulatorLocked(featureName)
+	acc.inputTokens = m.InputTokens
+	acc.outputTokens = m.OutputTokens
+	acc.cacheReadTokens = m.CacheReadTokens
+	acc.totalCostUSD = m.TotalCostUSD
+	acc.totalAPICalls = m.TotalAPICalls
 	log.Printf("[otel] restored metrics from store: feature=%s cost=$%.4f api_calls=%d",
 		featureName, m.TotalCostUSD, m.TotalAPICalls)
+}
+
+// getOrCreateAccumulatorLocked returns the accumulator for the given feature,
+// creating one if it doesn't exist. Caller must hold recv.mu.
+func (recv *OTELReceiver) getOrCreateAccumulatorLocked(featureName string) *MetricsAccumulator {
+	acc, ok := recv.accumulators[featureName]
+	if !ok {
+		acc = &MetricsAccumulator{}
+		recv.accumulators[featureName] = acc
+	}
+	return acc
 }
 
 // ---------------------------------------------------------------------------
@@ -197,29 +216,54 @@ func isOwnResource(attrs []*commonpb.KeyValue) bool {
 	return true
 }
 
+// extractWorkflowFeature reads the workflow.feature resource attribute
+// from the given OTLP KeyValue slice. Returns empty string if not found.
+func extractWorkflowFeature(attrs []*commonpb.KeyValue) string {
+	for _, kv := range attrs {
+		if kv.GetKey() == "workflow.feature" {
+			if sv, ok := kv.GetValue().GetValue().(*commonpb.AnyValue_StringValue); ok {
+				return sv.StringValue
+			}
+		}
+	}
+	return ""
+}
+
 // Export handles incoming ExportMetricsServiceRequest RPCs.
 func (recv *OTELReceiver) Export(_ context.Context, req *colmetricspb.ExportMetricsServiceRequest) (*colmetricspb.ExportMetricsServiceResponse, error) {
 	if req == nil {
 		return &colmetricspb.ExportMetricsServiceResponse{}, nil
 	}
 
-	changed := false
+	// Track which features changed so we emit events per-feature.
+	changedFeatures := make(map[string]bool)
+
 	for _, rm := range req.GetResourceMetrics() {
+		resAttrs := rm.GetResource().GetAttributes()
 		// Filter: only process metrics from our own child processes.
-		if !isOwnResource(rm.GetResource().GetAttributes()) {
+		if !isOwnResource(resAttrs) {
 			continue
 		}
+		// Extract workflow.feature; drop telemetry without it.
+		featureName := extractWorkflowFeature(resAttrs)
+		if featureName == "" {
+			continue
+		}
+
+		recv.mu.Lock()
+		acc := recv.getOrCreateAccumulatorLocked(featureName)
 		for _, sm := range rm.GetScopeMetrics() {
 			for _, m := range sm.GetMetrics() {
-				if recv.processMetric(m) {
-					changed = true
+				if processMetric(acc, m) {
+					changedFeatures[featureName] = true
 				}
 			}
 		}
+		recv.mu.Unlock()
 	}
 
-	if changed {
-		recv.emitMetricsEvent()
+	for feature := range changedFeatures {
+		recv.emitMetricsEvent(feature)
 	}
 
 	return &colmetricspb.ExportMetricsServiceResponse{}, nil
@@ -229,7 +273,9 @@ func (recv *OTELReceiver) Export(_ context.Context, req *colmetricspb.ExportMetr
 // Metric processing
 // ---------------------------------------------------------------------------
 
-func (recv *OTELReceiver) processMetric(m *metricspb.Metric) bool {
+// processMetric accumulates a single OTLP metric into the given accumulator.
+// Returns true if any values were accumulated.
+func processMetric(acc *MetricsAccumulator, m *metricspb.Metric) bool {
 	var dataPoints []*metricspb.NumberDataPoint
 	switch d := m.GetData().(type) {
 	case *metricspb.Metric_Sum:
@@ -259,37 +305,35 @@ func (recv *OTELReceiver) processMetric(m *metricspb.Metric) bool {
 
 		attrs := extractAttributes(dp.GetAttributes())
 
-		recv.mu.Lock()
 		switch m.GetName() {
 		case "claude_code.token.usage", "claude_code.tokens":
 			tokenType := attrs["type"]
 			switch tokenType {
 			case "input":
-				recv.inputTokens += int64(value)
+				acc.inputTokens += int64(value)
 				changed = true
 			case "output":
-				recv.outputTokens += int64(value)
+				acc.outputTokens += int64(value)
 				changed = true
 			case "cacheRead", "cache_read":
-				recv.cacheReadTokens += int64(value)
+				acc.cacheReadTokens += int64(value)
 				changed = true
 			case "cacheCreation", "cache_creation":
-				recv.cacheCreateTokens += int64(value)
+				acc.cacheCreateTokens += int64(value)
 				changed = true
 			default:
 				if tokenType == "" {
-					recv.inputTokens += int64(value)
+					acc.inputTokens += int64(value)
 					changed = true
 				}
 			}
 		case "claude_code.cost.usage", "claude_code.cost":
-			recv.totalCostUSD += value
+			acc.totalCostUSD += value
 			changed = true
 		case "claude_code.api.requests", "claude_code.api_calls", "claude_code.session.count":
-			recv.totalAPICalls += int(value)
+			acc.totalAPICalls += int(value)
 			changed = true
 		}
-		recv.mu.Unlock()
 	}
 	return changed
 }
@@ -305,13 +349,19 @@ func (h *otelLogsHandler) Export(_ context.Context, req *collogspb.ExportLogsSer
 	}
 
 	for _, rl := range req.GetResourceLogs() {
+		resAttrs := rl.GetResource().GetAttributes()
 		// Filter: only process logs from our own child processes.
-		if !isOwnResource(rl.GetResource().GetAttributes()) {
+		if !isOwnResource(resAttrs) {
+			continue
+		}
+		// Extract workflow.feature; drop telemetry without it.
+		featureName := extractWorkflowFeature(resAttrs)
+		if featureName == "" {
 			continue
 		}
 		for _, sl := range rl.GetScopeLogs() {
 			for _, lr := range sl.GetLogRecords() {
-				h.recv.processLogRecord(lr)
+				h.recv.processLogRecord(featureName, lr)
 			}
 		}
 	}
@@ -323,7 +373,7 @@ func (h *otelLogsHandler) Export(_ context.Context, req *collogspb.ExportLogsSer
 // Log processing
 // ---------------------------------------------------------------------------
 
-func (recv *OTELReceiver) processLogRecord(lr *logspb.LogRecord) {
+func (recv *OTELReceiver) processLogRecord(featureName string, lr *logspb.LogRecord) {
 	// Determine event name: prefer EventName field, fall back to body string.
 	eventName := lr.GetEventName()
 	if eventName == "" && lr.GetBody() != nil {
@@ -352,7 +402,8 @@ func (recv *OTELReceiver) processLogRecord(lr *logspb.LogRecord) {
 		}
 
 		recv.mu.Lock()
-		recv.toolResults = append(recv.toolResults, toolEvent)
+		acc := recv.getOrCreateAccumulatorLocked(featureName)
+		acc.toolResults = append(acc.toolResults, toolEvent)
 		recv.mu.Unlock()
 
 		// Broadcast individual tool event.
@@ -367,7 +418,7 @@ func (recv *OTELReceiver) processLogRecord(lr *logspb.LogRecord) {
 		})
 
 		// Persist tool event to SQLite.
-		recv.persistEvent(MetricEvent{
+		recv.persistEvent(featureName, MetricEvent{
 			EventType:  "tool",
 			ToolName:   toolName,
 			Success:    success,
@@ -382,22 +433,23 @@ func (recv *OTELReceiver) processLogRecord(lr *logspb.LogRecord) {
 
 		// Accumulate from log events as well.
 		recv.mu.Lock()
-		recv.totalAPICalls++
+		acc := recv.getOrCreateAccumulatorLocked(featureName)
+		acc.totalAPICalls++
 		if costUSD > 0 {
-			recv.totalCostUSD += costUSD
+			acc.totalCostUSD += costUSD
 		}
 		if inTok := attrFloat(attrs, "input_tokens"); inTok > 0 {
-			recv.inputTokens += int64(inTok)
+			acc.inputTokens += int64(inTok)
 		}
 		if outTok := attrFloat(attrs, "output_tokens"); outTok > 0 {
-			recv.outputTokens += int64(outTok)
+			acc.outputTokens += int64(outTok)
 		}
 		if cacheTok := attrFloat(attrs, "cache_read_tokens"); cacheTok > 0 {
-			recv.cacheReadTokens += int64(cacheTok)
+			acc.cacheReadTokens += int64(cacheTok)
 		}
 		recv.mu.Unlock()
 
-		recv.emitMetricsEvent()
+		recv.emitMetricsEvent(featureName)
 
 		recv.hub.Broadcast(specworkflow.EventEnvelope{
 			Event: specworkflow.EventAgentAPIEvent,
@@ -410,7 +462,7 @@ func (recv *OTELReceiver) processLogRecord(lr *logspb.LogRecord) {
 		})
 
 		// Persist API event to SQLite.
-		recv.persistEvent(MetricEvent{
+		recv.persistEvent(featureName, MetricEvent{
 			EventType:  "api",
 			Model:      model,
 			Success:    true,
@@ -432,33 +484,36 @@ func (recv *OTELReceiver) processLogRecord(lr *logspb.LogRecord) {
 // Event emission
 // ---------------------------------------------------------------------------
 
-func (recv *OTELReceiver) emitMetricsEvent() {
+func (recv *OTELReceiver) emitMetricsEvent(featureName string) {
 	recv.mu.Lock()
-	total := recv.inputTokens + recv.outputTokens + recv.cacheReadTokens
+	acc := recv.getOrCreateAccumulatorLocked(featureName)
+	total := acc.inputTokens + acc.outputTokens + acc.cacheReadTokens
 
 	// Keep only the last 10 tool results.
-	recent := recv.toolResults
+	recent := acc.toolResults
 	if len(recent) > 10 {
 		recent = recent[len(recent)-10:]
 	}
 
 	payload := AgentMetricsPayload{
+		FeatureName:     featureName,
 		TotalTokens:     total,
-		TotalCostUSD:    recv.totalCostUSD,
-		TotalAPICalls:   recv.totalAPICalls,
-		InputTokens:     recv.inputTokens,
-		OutputTokens:    recv.outputTokens,
-		CacheReadTokens: recv.cacheReadTokens,
+		TotalCostUSD:    acc.totalCostUSD,
+		TotalAPICalls:   acc.totalAPICalls,
+		InputTokens:     acc.inputTokens,
+		OutputTokens:    acc.outputTokens,
+		CacheReadTokens: acc.cacheReadTokens,
 		RecentTools:     recent,
 		Timestamp:       time.Now().UTC().Format(time.RFC3339),
 	}
+	acc.broadcastCount++
+	bc := acc.broadcastCount
 	recv.mu.Unlock()
 
 	// Log every 10th update to avoid noise (metrics arrive every 5s).
-	recv.broadcastCount++
-	if recv.broadcastCount%10 == 1 {
-		log.Printf("[otel] metrics: in=%d out=%d cache=%d cost=$%.4f api_calls=%d",
-			payload.InputTokens, payload.OutputTokens, payload.CacheReadTokens,
+	if bc%10 == 1 {
+		log.Printf("[otel] metrics [%s]: in=%d out=%d cache=%d cost=$%.4f api_calls=%d",
+			featureName, payload.InputTokens, payload.OutputTokens, payload.CacheReadTokens,
 			payload.TotalCostUSD, payload.TotalAPICalls)
 	}
 
@@ -469,22 +524,21 @@ func (recv *OTELReceiver) emitMetricsEvent() {
 	recv.hub.Broadcast(event)
 
 	// Persist aggregate metrics to SQLite.
-	recv.persistAggregateMetrics(payload)
+	recv.persistAggregateMetrics(featureName, payload)
 }
 
 // persistAggregateMetrics writes the current aggregate counters to SQLite.
 // Runs asynchronously to avoid blocking the gRPC handler.
-func (recv *OTELReceiver) persistAggregateMetrics(p AgentMetricsPayload) {
-	if recv.metricsStore == nil || recv.featureNameFn == nil {
+func (recv *OTELReceiver) persistAggregateMetrics(featureName string, p AgentMetricsPayload) {
+	if recv.metricsStore == nil {
 		return
 	}
-	feature := recv.featureNameFn()
-	if feature == "" {
+	if featureName == "" {
 		return
 	}
 	go func() {
 		if err := recv.metricsStore.UpsertWorkflowMetrics(WorkflowMetrics{
-			FeatureName:     feature,
+			FeatureName:     featureName,
 			InputTokens:     p.InputTokens,
 			OutputTokens:    p.OutputTokens,
 			CacheReadTokens: p.CacheReadTokens,
@@ -499,15 +553,14 @@ func (recv *OTELReceiver) persistAggregateMetrics(p AgentMetricsPayload) {
 
 // persistEvent writes a single tool or API event to SQLite.
 // Runs asynchronously to avoid blocking the gRPC handler.
-func (recv *OTELReceiver) persistEvent(e MetricEvent) {
-	if recv.metricsStore == nil || recv.featureNameFn == nil {
+func (recv *OTELReceiver) persistEvent(featureName string, e MetricEvent) {
+	if recv.metricsStore == nil {
 		return
 	}
-	feature := recv.featureNameFn()
-	if feature == "" {
+	if featureName == "" {
 		return
 	}
-	e.FeatureName = feature
+	e.FeatureName = featureName
 	go func() {
 		if err := recv.metricsStore.RecordEvent(e); err != nil {
 			log.Printf("[otel] persist event: %v", err)
@@ -608,27 +661,41 @@ func attrFloat(attrs map[string]interface{}, key string) float64 {
 }
 
 // ---------------------------------------------------------------------------
-// ResetMetrics
+// GetCostUSD / ResetMetrics
 // ---------------------------------------------------------------------------
 
-// ResetMetrics resets accumulated metrics. Useful when a new workflow starts.
 // GetCostUSD returns the cumulative cost in USD tracked by the receiver.
-// It implements the specworkflow.CostProvider interface so the orchestrator
-// can sync authoritative OTEL cost data into workflow state.
-func (recv *OTELReceiver) GetCostUSD() float64 {
-	recv.mu.Lock()
-	defer recv.mu.Unlock()
-	return recv.totalCostUSD
+// If featureName is provided, returns cost for that specific workflow.
+// If no featureName is provided, returns the sum across all workflows.
+// It implements the specworkflow.CostProvider interface (zero-arg form)
+// so the orchestrator can sync authoritative OTEL cost data into workflow state.
+func (recv *OTELReceiver) GetCostUSD(featureName ...string) float64 {
+	recv.mu.RLock()
+	defer recv.mu.RUnlock()
+	if len(featureName) > 0 && featureName[0] != "" {
+		if acc, ok := recv.accumulators[featureName[0]]; ok {
+			return acc.totalCostUSD
+		}
+		return 0
+	}
+	// Sum across all workflows.
+	var total float64
+	for _, acc := range recv.accumulators {
+		total += acc.totalCostUSD
+	}
+	return total
 }
 
-func (recv *OTELReceiver) ResetMetrics() {
+// ResetMetrics resets accumulated metrics. If featureName is provided,
+// resets only that workflow's accumulators. If no featureName is provided,
+// resets all workflows.
+func (recv *OTELReceiver) ResetMetrics(featureName ...string) {
 	recv.mu.Lock()
 	defer recv.mu.Unlock()
-	recv.inputTokens = 0
-	recv.outputTokens = 0
-	recv.cacheReadTokens = 0
-	recv.cacheCreateTokens = 0
-	recv.totalCostUSD = 0
-	recv.totalAPICalls = 0
-	recv.toolResults = nil
+	if len(featureName) > 0 && featureName[0] != "" {
+		delete(recv.accumulators, featureName[0])
+		return
+	}
+	// Reset all.
+	recv.accumulators = make(map[string]*MetricsAccumulator)
 }
