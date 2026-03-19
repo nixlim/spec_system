@@ -21,12 +21,14 @@ import (
 type SpecAPIConfig struct {
 	// WorkspaceDir is the directory containing spec-v*.md files.
 	WorkspaceDir string
-	// FeatureName is the human-readable name of the feature under review.
+	// FeatureName is the default feature name used as a fallback.
 	FeatureName string
-	// GetTracker returns the current issue tracker snapshot.
-	GetTracker func() *specworkflow.IssueTracker
-	// GetState returns the current workflow state snapshot.
-	GetState func() *specworkflow.WorkflowStateJSON
+	// GetTracker returns the issue tracker for the given feature name.
+	// If featureName is empty, returns the tracker for the active workflow.
+	GetTracker func(featureName ...string) *specworkflow.IssueTracker
+	// GetState returns the workflow state for the given feature name.
+	// If featureName is empty, returns the state for the active workflow.
+	GetState func(featureName ...string) *specworkflow.WorkflowStateJSON
 	// CancelFunc cancels the running workflow.
 	CancelFunc func() error
 }
@@ -55,16 +57,44 @@ func specFilePath(workspaceDir, featureName string, version int) string {
 	return filepath.Join(specVersionsDir(workspaceDir, featureName), fmt.Sprintf("spec-v%d.md", version))
 }
 
-// resolveFeatureName returns the dynamic feature name from the running
-// workflow state, falling back to the static config value. This ensures
-// spec endpoints work with any feature name, not just a hardcoded default.
-func resolveFeatureName(config SpecAPIConfig) string {
+// resolveFeatureFromRequest extracts the feature name from the ?feature=
+// query parameter when available. If absent, falls back to the active
+// workflow state, then to the static config default. This allows all spec
+// endpoints to be feature-aware without changing their URL structure.
+func resolveFeatureFromRequest(config SpecAPIConfig, r *http.Request) string {
+	if feature := r.URL.Query().Get("feature"); feature != "" {
+		return feature
+	}
 	if config.GetState != nil {
 		if state := config.GetState(); state != nil && state.FeatureName != "" {
 			return state.FeatureName
 		}
 	}
 	return config.FeatureName
+}
+
+// getStateForRequest returns the workflow state for the feature identified
+// by the ?feature= query param, falling back to the default behavior.
+func getStateForRequest(config SpecAPIConfig, r *http.Request) *specworkflow.WorkflowStateJSON {
+	if feature := r.URL.Query().Get("feature"); feature != "" && config.GetState != nil {
+		return config.GetState(feature)
+	}
+	if config.GetState != nil {
+		return config.GetState()
+	}
+	return nil
+}
+
+// getTrackerForRequest returns the issue tracker for the feature identified
+// by the ?feature= query param, falling back to the default behavior.
+func getTrackerForRequest(config SpecAPIConfig, r *http.Request) *specworkflow.IssueTracker {
+	if feature := r.URL.Query().Get("feature"); feature != "" && config.GetTracker != nil {
+		return config.GetTracker(feature)
+	}
+	if config.GetTracker != nil {
+		return config.GetTracker()
+	}
+	return nil
 }
 
 // listSpecFiles returns all spec-v*.md entries in the spec versions directory,
@@ -129,14 +159,14 @@ func HandleGetCurrentSpec(config SpecAPIConfig) http.HandlerFunc {
 			return
 		}
 
-		state := config.GetState()
+		state := getStateForRequest(config, r)
 		if state == nil {
 			writeError(w, http.StatusNotFound, "workflow state not available")
 			return
 		}
 
 		version := state.CurrentSpecVersion
-		path := specFilePath(config.WorkspaceDir, resolveFeatureName(config), version)
+		path := specFilePath(config.WorkspaceDir, resolveFeatureFromRequest(config, r), version)
 
 		content, err := os.ReadFile(path)
 		if err != nil {
@@ -162,7 +192,7 @@ func HandleListSpecVersions(config SpecAPIConfig) http.HandlerFunc {
 			return
 		}
 
-		versions, err := listSpecFiles(config.WorkspaceDir, resolveFeatureName(config))
+		versions, err := listSpecFiles(config.WorkspaceDir, resolveFeatureFromRequest(config, r))
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to list spec versions")
 			return
@@ -197,7 +227,7 @@ func HandleGetSpecVersion(config SpecAPIConfig) http.HandlerFunc {
 			return
 		}
 
-		path := specFilePath(config.WorkspaceDir, resolveFeatureName(config), n)
+		path := specFilePath(config.WorkspaceDir, resolveFeatureFromRequest(config, r), n)
 		content, err := os.ReadFile(path)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -240,7 +270,7 @@ func HandleGetSpecDiff(config SpecAPIConfig) http.HandlerFunc {
 			return
 		}
 
-		feature := resolveFeatureName(config)
+		feature := resolveFeatureFromRequest(config, r)
 		contentA, err := os.ReadFile(specFilePath(config.WorkspaceDir, feature, a))
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -276,7 +306,7 @@ func HandleGetIssues(config SpecAPIConfig) http.HandlerFunc {
 			return
 		}
 
-		tracker := config.GetTracker()
+		tracker := getTrackerForRequest(config, r)
 		if tracker == nil {
 			writeJSON(w, http.StatusOK, []interface{}{})
 			return
@@ -332,7 +362,7 @@ func HandleGetIssue(config SpecAPIConfig) http.HandlerFunc {
 		parts := strings.Split(strings.TrimRight(r.URL.Path, "/"), "/")
 		id := parts[len(parts)-1]
 
-		tracker := config.GetTracker()
+		tracker := getTrackerForRequest(config, r)
 		if tracker == nil {
 			writeError(w, http.StatusNotFound, fmt.Sprintf("issue %q not found", id))
 			return
@@ -368,7 +398,7 @@ func HandleGetConvergence(config SpecAPIConfig) http.HandlerFunc {
 			return
 		}
 
-		state := config.GetState()
+		state := getStateForRequest(config, r)
 		if state == nil {
 			writeError(w, http.StatusNotFound, "workflow state not available")
 			return
@@ -383,7 +413,7 @@ func HandleGetConvergence(config SpecAPIConfig) http.HandlerFunc {
 		}
 
 		// Count open minor issues and compute progress from tracker.
-		tracker := config.GetTracker()
+		tracker := getTrackerForRequest(config, r)
 		if tracker != nil {
 			total := 0
 			terminal := 0

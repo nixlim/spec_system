@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -365,15 +366,13 @@ func TestHandleGetWorkflowStatus_NoOrchestrator(t *testing.T) {
 		t.Errorf("expected 200, got %d", rec.Code)
 	}
 
-	var resp map[string]interface{}
+	// With no workflows at all, should return an empty JSON array.
+	var resp []map[string]interface{}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp["state"] != "idle" {
-		t.Errorf("state = %q, want %q", resp["state"], "idle")
-	}
-	if resp["message"] != "No workflow running" {
-		t.Errorf("message = %q, want %q", resp["message"], "No workflow running")
+	if len(resp) != 0 {
+		t.Errorf("expected empty array, got %d items", len(resp))
 	}
 }
 
@@ -762,7 +761,9 @@ func TestHandleGetWorkflowStatus_DiskGateState(t *testing.T) {
 	os.WriteFile(filepath.Join(featureDir, "workflow-state.json"), []byte(stateJSON), 0o644)
 
 	handler := HandleGetWorkflowStatus(manager)
-	req := httptest.NewRequest(http.MethodGet, "/api/workflow/status", nil)
+
+	// Query with ?feature= to get single object.
+	req := httptest.NewRequest(http.MethodGet, "/api/workflow/status?feature=gate-feature", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -775,12 +776,28 @@ func TestHandleGetWorkflowStatus_DiskGateState(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 
-	// Should show the on-disk gate state, not "idle".
+	// Should show the on-disk gate state.
 	if resp["state"] != "HUMAN_GATE_1" {
 		t.Errorf("state = %q, want HUMAN_GATE_1", resp["state"])
 	}
 	if resp["paused"] != true {
 		t.Error("expected paused=true for disk-only gate state")
+	}
+
+	// Also verify the list endpoint includes it.
+	req2 := httptest.NewRequest(http.MethodGet, "/api/workflow/status", nil)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+
+	var arr []map[string]interface{}
+	if err := json.NewDecoder(rec2.Body).Decode(&arr); err != nil {
+		t.Fatalf("decode array response: %v", err)
+	}
+	if len(arr) != 1 {
+		t.Fatalf("expected 1 item in array, got %d", len(arr))
+	}
+	if arr[0]["state"] != "HUMAN_GATE_1" {
+		t.Errorf("array[0].state = %q, want HUMAN_GATE_1", arr[0]["state"])
 	}
 }
 
@@ -990,4 +1007,172 @@ func TestWorkflowManagerCancelSpecific(t *testing.T) {
 
 	// Wait for background goroutines to finish so TempDir cleanup succeeds.
 	time.Sleep(100 * time.Millisecond)
+}
+
+// ---------------------------------------------------------------------------
+// Multi-Workflow Status Endpoint Tests (460.5)
+// ---------------------------------------------------------------------------
+
+// TestStatusAllWorkflows verifies that GET /api/workflow/status with no
+// params returns a JSON array containing all workflow statuses from disk.
+func TestStatusAllWorkflows(t *testing.T) {
+	manager, dir := setupWorkflowManager(t)
+
+	// Create disk states for alpha and beta.
+	for _, feat := range []struct {
+		name  string
+		state string
+		round int
+	}{
+		{"alpha", "REVIEWING", 2},
+		{"beta", "DRAFTING", 1},
+	} {
+		featureDir := filepath.Join(dir, "specs", feat.name)
+		os.MkdirAll(featureDir, 0o755)
+		stateJSON := fmt.Sprintf(`{
+			"state": %q,
+			"round": %d,
+			"feature_name": %q,
+			"started_at": "2026-03-17T05:00:00Z",
+			"updated_at": "2026-03-17T06:00:00Z",
+			"cumulative_cost_usd": 0.5,
+			"agent_invocations": 3
+		}`, feat.state, feat.round, feat.name)
+		os.WriteFile(filepath.Join(featureDir, "workflow-state.json"), []byte(stateJSON), 0o644)
+	}
+
+	handler := HandleGetWorkflowStatus(manager)
+	req := httptest.NewRequest(http.MethodGet, "/api/workflow/status", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp []map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if len(resp) != 2 {
+		t.Fatalf("expected 2 statuses, got %d: %v", len(resp), resp)
+	}
+
+	// Array should be sorted by feature name: alpha, beta.
+	if resp[0]["feature_name"] != "alpha" {
+		t.Errorf("first feature_name = %q, want alpha", resp[0]["feature_name"])
+	}
+	if resp[1]["feature_name"] != "beta" {
+		t.Errorf("second feature_name = %q, want beta", resp[1]["feature_name"])
+	}
+
+	// Verify required fields exist on each entry.
+	for i, entry := range resp {
+		for _, field := range []string{"feature_name", "state", "round", "cost_usd", "wall_clock_seconds", "agent_invocations", "message"} {
+			if _, ok := entry[field]; !ok {
+				t.Errorf("resp[%d] missing field %q", i, field)
+			}
+		}
+	}
+
+	// Verify specific values.
+	if resp[0]["state"] != "REVIEWING" {
+		t.Errorf("alpha state = %q, want REVIEWING", resp[0]["state"])
+	}
+	if resp[1]["state"] != "DRAFTING" {
+		t.Errorf("beta state = %q, want DRAFTING", resp[1]["state"])
+	}
+}
+
+// TestStatusSingleWorkflow verifies that GET /api/workflow/status?feature=alpha
+// returns a single JSON object for that feature.
+func TestStatusSingleWorkflow(t *testing.T) {
+	manager, dir := setupWorkflowManager(t)
+
+	// Create disk state for alpha.
+	featureDir := filepath.Join(dir, "specs", "alpha")
+	os.MkdirAll(featureDir, 0o755)
+	stateJSON := `{
+		"state": "REVIEWING",
+		"round": 2,
+		"feature_name": "alpha",
+		"started_at": "2026-03-17T05:00:00Z",
+		"updated_at": "2026-03-17T06:00:00Z",
+		"cumulative_cost_usd": 1.25,
+		"agent_invocations": 5
+	}`
+	os.WriteFile(filepath.Join(featureDir, "workflow-state.json"), []byte(stateJSON), 0o644)
+
+	handler := HandleGetWorkflowStatus(manager)
+	req := httptest.NewRequest(http.MethodGet, "/api/workflow/status?feature=alpha", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	// Verify it's a single object (not an array).
+	if resp["feature_name"] != "alpha" {
+		t.Errorf("feature_name = %q, want alpha", resp["feature_name"])
+	}
+	if resp["state"] != "REVIEWING" {
+		t.Errorf("state = %q, want REVIEWING", resp["state"])
+	}
+	if resp["round"] != float64(2) {
+		t.Errorf("round = %v, want 2", resp["round"])
+	}
+
+	// Verify required fields.
+	for _, field := range []string{"feature_name", "state", "round", "cost_usd", "wall_clock_seconds", "agent_invocations", "message"} {
+		if _, ok := resp[field]; !ok {
+			t.Errorf("missing field %q", field)
+		}
+	}
+}
+
+// TestStatusNonexistentFeature verifies that GET /api/workflow/status?feature=nonexistent
+// returns HTTP 404.
+func TestStatusNonexistentFeature(t *testing.T) {
+	manager, _ := setupWorkflowManager(t)
+
+	handler := HandleGetWorkflowStatus(manager)
+	req := httptest.NewRequest(http.MethodGet, "/api/workflow/status?feature=nonexistent", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := resp["error"]; !ok {
+		t.Error("expected error field in 404 response")
+	}
+}
+
+// TestCancelWorkflowAPI_NonexistentFeature_Returns404 verifies that
+// POST /api/workflow/cancel with a non-existent feature_name returns 404.
+func TestCancelWorkflowAPI_NonexistentFeature_Returns404(t *testing.T) {
+	manager, _ := setupWorkflowManager(t)
+	handler := HandleCancelWorkflowAPI(manager)
+
+	body := `{"feature_name":"nonexistent"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflow/cancel", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for non-existent feature, got %d: %s", rec.Code, rec.Body.String())
+	}
 }

@@ -37,8 +37,8 @@ func setupSpecTestConfig(t *testing.T) (SpecAPIConfig, string) {
 	config := SpecAPIConfig{
 		WorkspaceDir: dir,
 		FeatureName:  "test-feature",
-		GetTracker:   func() *specworkflow.IssueTracker { return tracker },
-		GetState:     func() *specworkflow.WorkflowStateJSON { return state },
+		GetTracker:   func(featureName ...string) *specworkflow.IssueTracker { return tracker },
+		GetState:     func(featureName ...string) *specworkflow.WorkflowStateJSON { return state },
 		CancelFunc:   func() error { cancelled = true; _ = cancelled; return nil },
 	}
 
