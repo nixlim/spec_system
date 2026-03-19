@@ -28,6 +28,11 @@
   var convergenceHistory = [];
   var lensSet = new Set();
 
+  // Currently selected workflow (feature name) — drives all panel updates.
+  var selectedFeature = null;
+  // Cached array of all workflow statuses from /api/workflow/status.
+  var allWorkflowStatuses = [];
+
   // Gate state
   var gate1CorrectionCount = 0;
   var gate2AnswerDisabled = false;
@@ -284,6 +289,171 @@
     }
   }
 
+  // -----------------------------------------------------------------------
+  // Workflow Status List (Active Workflows Panel)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Returns a CSS class suffix for the workflow status list badge.
+   *   INIT / DISCOVERY / DRAFTING → active (blue)
+   *   HUMAN_GATE_* → gate (orange)
+   *   REVIEWING / REVISING / JUDGING → review (purple)
+   *   FINALIZED → done (green)
+   *   ESCALATED / ERROR → error (red)
+   *   idle / unknown → idle (gray)
+   */
+  function getWsiBadgeClass(state) {
+    var s = (state || "").toUpperCase();
+    switch (s) {
+      case "INIT":
+      case "DISCOVERY":
+      case "DRAFTING":
+        return "wsi-badge-active";
+      case "HUMAN_GATE_1":
+      case "HUMAN_GATE_2":
+      case "HUMAN_GATE_FINAL":
+        return "wsi-badge-gate";
+      case "REVIEWING":
+      case "REVISING":
+      case "JUDGING":
+        return "wsi-badge-review";
+      case "FINALIZED":
+        return "wsi-badge-done";
+      case "ESCALATED":
+      case "ERROR":
+        return "wsi-badge-error";
+      default:
+        return "wsi-badge-idle";
+    }
+  }
+
+  /**
+   * Renders the workflow status list panel from an array of status objects.
+   * Each object has: feature_name, state, round, cost_usd, wall_clock_seconds,
+   * agent_invocations, is_paused.
+   */
+  function renderWorkflowStatusList(statuses) {
+    allWorkflowStatuses = statuses || [];
+    var container = $("#workflow-status-items");
+    if (!container) return;
+    clearChildren(container);
+
+    if (allWorkflowStatuses.length === 0) {
+      container.appendChild(el("p", {
+        className: "workflow-status-empty",
+        textContent: "No active workflows. Start one below."
+      }));
+      return;
+    }
+
+    allWorkflowStatuses.forEach(function (wf) {
+      var featureName = wf.feature_name || "unknown";
+      var state = wf.state || "IDLE";
+      var isSelected = selectedFeature === featureName;
+
+      var item = el("div", {
+        className: "workflow-status-item" + (isSelected ? " selected" : ""),
+        "data-feature": featureName
+      });
+
+      // Feature name
+      item.appendChild(el("span", { className: "wsi-name", textContent: featureName }));
+
+      // State badge
+      item.appendChild(el("span", {
+        className: "wsi-badge " + getWsiBadgeClass(state),
+        textContent: state
+      }));
+
+      // Metrics: cost, elapsed time
+      var metrics = el("div", { className: "wsi-metrics" });
+      metrics.appendChild(el("span", { className: "wsi-metric" }, [
+        el("strong", { textContent: formatCost(wf.cost_usd) })
+      ]));
+      metrics.appendChild(el("span", { className: "wsi-metric" }, [
+        el("strong", { textContent: formatDuration(wf.wall_clock_seconds) })
+      ]));
+      if (wf.round > 0) {
+        metrics.appendChild(el("span", { className: "wsi-metric", textContent: "R" + wf.round }));
+      }
+      item.appendChild(metrics);
+
+      // View button
+      var actionsDiv = el("div", { className: "wsi-actions" });
+      var viewBtn = el("button", {
+        className: "btn btn-sm" + (isSelected ? " btn-primary" : ""),
+        textContent: isSelected ? "Selected" : "View"
+      });
+      viewBtn.addEventListener("click", (function (fname) {
+        return function (e) {
+          e.stopPropagation();
+          selectWorkflow(fname);
+        };
+      })(featureName));
+      actionsDiv.appendChild(viewBtn);
+      item.appendChild(actionsDiv);
+
+      container.appendChild(item);
+    });
+  }
+
+  /**
+   * Selects a workflow as the active context for the dashboard.
+   * Updates selectedFeature, highlights the list item, and refreshes
+   * all panels to show data for the selected workflow.
+   */
+  function selectWorkflow(featureName) {
+    selectedFeature = featureName;
+
+    // Re-render the status list to update selection highlight
+    renderWorkflowStatusList(allWorkflowStatuses);
+
+    // Update the workflow status detail panel with the selected workflow's data
+    var match = null;
+    for (var i = 0; i < allWorkflowStatuses.length; i++) {
+      if (allWorkflowStatuses[i].feature_name === featureName) {
+        match = allWorkflowStatuses[i];
+        break;
+      }
+    }
+    if (match) {
+      updateWorkflowStatus(match);
+      restorePersistedMetrics(featureName);
+    }
+
+    // Dispatch a custom event so other parts of the app can react
+    document.dispatchEvent(new CustomEvent("workflow-selected", {
+      detail: { feature_name: featureName }
+    }));
+  }
+
+  /**
+   * Fetches all workflow statuses and renders the status list.
+   * Called on init, on poll, and after WebSocket events.
+   */
+  function refreshWorkflowStatusList() {
+    fetchJSON("/api/workflow/status").then(function (data) {
+      if (!data) return;
+
+      // The endpoint returns an array when no ?feature= param.
+      var statuses = Array.isArray(data) ? data : [data];
+      renderWorkflowStatusList(statuses);
+
+      // If a workflow is selected, update the detail panel too.
+      if (selectedFeature) {
+        for (var i = 0; i < statuses.length; i++) {
+          if (statuses[i].feature_name === selectedFeature) {
+            updateWorkflowStatus(statuses[i]);
+            break;
+          }
+        }
+      }
+    }).catch(function () {
+      // Endpoint not available — render empty
+      renderWorkflowStatusList([]);
+    });
+  }
+
   // Client-side wall clock timer — ticks every second so the TIME display
   // updates live without needing a server round-trip.
   var wallClockTimer = null;
@@ -388,6 +558,9 @@
     var msg = "State: " + (data.from || "?") + " -> " + state;
     if (data.round != null) msg += " (round " + data.round + ")";
     addActivityEntry(msg, "info");
+
+    // Refresh the workflow status list so badges update in real-time.
+    refreshWorkflowStatusList();
   }
 
   function onAgentDispatch(data) {
@@ -409,6 +582,8 @@
 
   function onWorkflowStatus(data) {
     updateWorkflowStatus(data);
+    // Refresh the full status list so all workflows are up-to-date.
+    refreshWorkflowStatusList();
   }
 
   // -----------------------------------------------------------------------
@@ -503,21 +678,49 @@
 
   function pollWorkflowStatus() {
     fetchJSON("/api/workflow/status").then(function (data) {
-      if (!data || !data.state) return;
+      if (!data) return;
 
-      var state = data.state.toUpperCase();
+      // Handle array format: render the status list, then process
+      // the selected (or first active) workflow for the detail panel.
+      var statuses = Array.isArray(data) ? data : [data];
+      renderWorkflowStatusList(statuses);
+
+      // Find the status to display in the detail panel:
+      // prefer selectedFeature, otherwise first non-idle workflow.
+      var displayStatus = null;
+      for (var i = 0; i < statuses.length; i++) {
+        if (selectedFeature && statuses[i].feature_name === selectedFeature) {
+          displayStatus = statuses[i];
+          break;
+        }
+      }
+      if (!displayStatus) {
+        for (var j = 0; j < statuses.length; j++) {
+          if (statuses[j].state && statuses[j].state.toUpperCase() !== "IDLE") {
+            displayStatus = statuses[j];
+            break;
+          }
+        }
+      }
+
+      // Legacy single-status handling for detail panel
+      if (!displayStatus || !displayStatus.state) return;
+
+      var state = displayStatus.state.toUpperCase();
 
       // Don't overwrite an active workflow display with an "idle" response.
-      // This prevents the race where the poll returns idle before the
-      // orchestrator goroutine has started.
       if (state === "IDLE" && workflowActive) return;
 
       if (state !== "IDLE") {
-        updateWorkflowStatus(data);
+        updateWorkflowStatus(displayStatus);
       }
 
-      // If idle or terminal, stop the workflow poller.
-      if (state === "IDLE" || state === "FINALIZED" || state === "ESCALATED") {
+      // If all workflows are idle or terminal, stop the workflow poller.
+      var anyActive = statuses.some(function (s) {
+        var st = (s.state || "").toUpperCase();
+        return st !== "IDLE" && st !== "FINALIZED" && st !== "ESCALATED";
+      });
+      if (!anyActive) {
         stopWorkflowPoller();
         return;
       }
@@ -526,7 +729,7 @@
       if (state.indexOf("HUMAN_GATE") !== -1) {
         var gatePanel = $(".gate-panel");
         if (!gatePanel) {
-          var feature = data.feature_name;
+          var feature = displayStatus.feature_name;
           if (state === "HUMAN_GATE_1" && feature) {
             Promise.all([
               fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/discovery").catch(function () { return null; }),
@@ -755,12 +958,20 @@
       setWsStatus("connected");
       // Poll current workflow status to initialize panel if already running
       pollWorkflowStatus();
+      // Refresh the status list on connect/reconnect.
+      refreshWorkflowStatusList();
       // On reconnect, restore persisted metrics that may have been missed.
       if (wasReconnect) {
-        fetchJSON("/api/workflow/status").then(function (status) {
-          if (status && status.feature_name && status.state && status.state.toUpperCase() !== "IDLE") {
-            restorePersistedMetrics(status.feature_name);
-          }
+        fetchJSON("/api/workflow/status").then(function (data) {
+          if (!data) return;
+          var statuses = Array.isArray(data) ? data : [data];
+          statuses.forEach(function (status) {
+            if (status && status.feature_name && status.state && status.state.toUpperCase() !== "IDLE") {
+              if (!selectedFeature || status.feature_name === selectedFeature) {
+                restorePersistedMetrics(status.feature_name);
+              }
+            }
+          });
         }).catch(function () {});
       }
     };
@@ -2564,39 +2775,57 @@
     // Load workspace browser on startup and start auto-refresh
     loadFeatureList();
     startFeatureListPolling();
+    // Load the active workflows status list
+    refreshWorkflowStatusList();
 
     // Check if we need to show a gate panel on page load (e.g. after refresh).
     // Also restore persisted OTEL metrics so dashboard data survives refresh.
-    fetchJSON("/api/workflow/status").then(function (status) {
-      if (!status || !status.state) return;
-      var state = status.state.toUpperCase();
-      var feature = status.feature_name;
-      if (!feature) return;
+    fetchJSON("/api/workflow/status").then(function (data) {
+      if (!data) return;
 
-      // Restore persisted metrics for the active workflow.
-      if (state !== "IDLE") {
-        restorePersistedMetrics(feature);
-      }
+      // Handle array format — process each workflow.
+      var statuses = Array.isArray(data) ? data : [data];
+      renderWorkflowStatusList(statuses);
 
-      if (state === "HUMAN_GATE_1") {
-        // Fetch discovery output and any previous corrections in parallel.
-        Promise.all([
-          fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/discovery").catch(function () { return null; }),
-          fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/files/gate1-corrections.json").catch(function () { return null; })
-        ]).then(function (results) {
-          var discovery = results[0];
-          var corrections = results[1];
-          if (discovery) {
-            showGate1Panel({ gate_type: "requirements_confirmation", data: discovery, task_id: feature }, corrections);
+      // Process each workflow: restore metrics and show gate panels.
+      statuses.forEach(function (status) {
+        if (!status || !status.state) return;
+        var state = status.state.toUpperCase();
+        var feature = status.feature_name;
+        if (!feature) return;
+
+        // Restore persisted metrics for active workflows.
+        if (state !== "IDLE") {
+          // Auto-select the first non-idle workflow if none selected.
+          if (!selectedFeature) {
+            selectedFeature = feature;
+            renderWorkflowStatusList(statuses); // re-render with selection
+            updateWorkflowStatus(status);
           }
-        });
-      } else if (state === "HUMAN_GATE_2") {
-        fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/files/drafter-output.json").then(function (drafter) {
-          if (drafter) {
-            showGate2Panel({ gate_type: "ambiguity_resolution", data: drafter, task_id: feature });
+          if (feature === selectedFeature) {
+            restorePersistedMetrics(feature);
           }
-        }).catch(function () {});
-      }
+        }
+
+        if (state === "HUMAN_GATE_1") {
+          Promise.all([
+            fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/discovery").catch(function () { return null; }),
+            fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/files/gate1-corrections.json").catch(function () { return null; })
+          ]).then(function (results) {
+            var discovery = results[0];
+            var corrections = results[1];
+            if (discovery) {
+              showGate1Panel({ gate_type: "requirements_confirmation", data: discovery, task_id: feature }, corrections);
+            }
+          });
+        } else if (state === "HUMAN_GATE_2") {
+          fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/files/drafter-output.json").then(function (drafter) {
+            if (drafter) {
+              showGate2Panel({ gate_type: "ambiguity_resolution", data: drafter, task_id: feature });
+            }
+          }).catch(function () {});
+        }
+      });
     }).catch(function () {});
   }
 
