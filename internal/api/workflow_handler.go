@@ -360,6 +360,11 @@ type startWorkflowRequest struct {
 	SourceDocPaths []string `json:"source_doc_paths"`
 }
 
+// assignSourceDocsRequest is the JSON body for POST /api/workflow/{feature}/source-docs.
+type assignSourceDocsRequest struct {
+	SourceDocPaths []string `json:"source_doc_paths"`
+}
+
 // gateApproveRequest is the JSON body for POST /api/tasks/{id}/approve.
 type gateApproveRequest struct {
 	Action      string                             `json:"action"`
@@ -627,6 +632,17 @@ func extractFeatureFromTaskPath(path string) string {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	// Expected: ["api", "tasks", "{feature}", "approve"]
 	if len(parts) >= 4 && parts[0] == "api" && parts[1] == "tasks" {
+		return parts[2]
+	}
+	return ""
+}
+
+// extractFeatureFromWorkflowPath extracts the feature name from a URL path
+// like /api/workflow/{feature}/source-docs.
+func extractFeatureFromWorkflowPath(path string) string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	// Expected: ["api", "workflow", "{feature}", "source-docs"]
+	if len(parts) >= 3 && parts[0] == "api" && parts[1] == "workflow" {
 		return parts[2]
 	}
 	return ""
@@ -1881,6 +1897,133 @@ func findLatestDiskState(workspaceDir string) *specworkflow.WorkflowStateJSON {
 		}
 	}
 	return latest
+}
+
+// ---------------------------------------------------------------------------
+// Source-doc assignment handlers
+// ---------------------------------------------------------------------------
+
+// HandleAssignSourceDocs returns an HTTP handler for POST /api/workflow/{feature}/source-docs.
+// It copies the specified source documents from the global library into the
+// workflow's per-feature source-docs directory. This allows assigning docs
+// to a running workflow after it has been started.
+func HandleAssignSourceDocs(manager *WorkflowManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		featureName := extractFeatureFromWorkflowPath(r.URL.Path)
+		if featureName == "" {
+			writeError(w, http.StatusBadRequest, "missing feature name in URL")
+			return
+		}
+
+		if err := ValidateFeatureName(featureName); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid feature name: %v", err))
+			return
+		}
+
+		var req assignSourceDocsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+			return
+		}
+
+		if len(req.SourceDocPaths) == 0 {
+			writeError(w, http.StatusBadRequest, "source_doc_paths must not be empty")
+			return
+		}
+
+		// Resolve relative names to absolute paths within the global source-docs library.
+		globalDocsDir := filepath.Join(manager.workspaceDir, "source-docs")
+		var absPaths []string
+		for _, relPath := range req.SourceDocPaths {
+			// Reject path traversal in individual entries.
+			if strings.Contains(relPath, "..") {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("path traversal not allowed: %q", relPath))
+				return
+			}
+
+			absPath := filepath.Join(globalDocsDir, relPath)
+			if _, err := os.Stat(absPath); err != nil {
+				writeError(w, http.StatusNotFound, fmt.Sprintf("source document not found: %q", relPath))
+				return
+			}
+			absPaths = append(absPaths, absPath)
+		}
+
+		// Copy files into the per-workflow source-docs directory.
+		copiedPaths, err := copySourceDocsToWorkflow(manager.workspaceDir, featureName, absPaths)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to copy source docs: %v", err))
+			return
+		}
+
+		// Build response with just the base filenames.
+		copiedNames := make([]string, len(copiedPaths))
+		for i, p := range copiedPaths {
+			copiedNames[i] = filepath.Base(p)
+		}
+
+		log.Printf("[source-docs] assigned %d docs to feature %q: %v", len(copiedNames), featureName, copiedNames)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"feature":      featureName,
+			"copied_files": copiedNames,
+			"count":        len(copiedNames),
+		})
+	}
+}
+
+// sourceDocInfo represents metadata about a source document assigned to a workflow.
+type sourceDocInfo struct {
+	Name       string    `json:"name"`
+	Size       int64     `json:"size"`
+	ModifiedAt time.Time `json:"modified_at"`
+}
+
+// HandleGetWorkflowSourceDocs returns an HTTP handler for GET /api/workflow/{feature}/source-docs.
+// It lists all source documents currently assigned to the workflow.
+func HandleGetWorkflowSourceDocs(manager *WorkflowManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		featureName := extractFeatureFromWorkflowPath(r.URL.Path)
+		if featureName == "" {
+			writeError(w, http.StatusBadRequest, "missing feature name in URL")
+			return
+		}
+
+		if err := ValidateFeatureName(featureName); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid feature name: %v", err))
+			return
+		}
+
+		docsDir := filepath.Join(manager.workspaceDir, "specs", featureName, "source-docs")
+		entries, err := os.ReadDir(docsDir)
+		if err != nil {
+			// Directory doesn't exist — return empty array, not an error.
+			writeJSON(w, http.StatusOK, []sourceDocInfo{})
+			return
+		}
+
+		var docs []sourceDocInfo
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			docs = append(docs, sourceDocInfo{
+				Name:       e.Name(),
+				Size:       info.Size(),
+				ModifiedAt: info.ModTime().UTC(),
+			})
+		}
+
+		// Sort by name for deterministic output.
+		sort.Slice(docs, func(i, j int) bool {
+			return docs[i].Name < docs[j].Name
+		})
+
+		writeJSON(w, http.StatusOK, docs)
+	}
 }
 
 // findAllDiskStates scans workspace/specs/ and returns all workflow states

@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/foundry-zero/adversarial-spec-system/internal/api"
 	"github.com/foundry-zero/adversarial-spec-system/internal/specworkflow"
@@ -140,6 +141,11 @@ func main() {
 	mux.HandleFunc("/api/workflow/resume", api.HandleResumeWorkflow(workflowManager))
 	mux.HandleFunc("/api/workflow/rewind", api.HandleRewindWorkflow(workflowManager))
 
+	// --- Workflow sub-routing for /api/workflow/{feature}/source-docs ---
+	// This catch-all for /api/workflow/ only fires for paths NOT matched by the
+	// more specific routes above (start, cancel, status, retry, etc).
+	mux.HandleFunc("/api/workflow/", handleWorkflowSubRouting(workflowManager))
+
 	// --- Metrics endpoint (persisted OTEL telemetry) ---
 	mux.HandleFunc("/api/metrics", api.HandleGetMetrics(metricsStore))
 
@@ -223,6 +229,8 @@ func main() {
 	fmt.Printf("  GET  /api/workflow/status      Poll workflow status\n")
 	fmt.Printf("  POST /api/workflow/retry       Clear stale workflow state\n")
 	fmt.Printf("  POST /api/workflow/reset       Delete feature directory\n")
+	fmt.Printf("  POST /api/workflow/{f}/source-docs  Assign source docs to workflow\n")
+	fmt.Printf("  GET  /api/workflow/{f}/source-docs  List workflow source docs\n")
 	fmt.Printf("  POST /api/tasks/{id}/approve   Approve a gate task\n")
 	fmt.Printf("  POST /api/tasks/{id}/reject    Reject a gate task\n")
 	fmt.Printf("  GET  /ws                       WebSocket event stream\n")
@@ -262,6 +270,31 @@ func handleTaskRouting(manager *api.WorkflowManager) http.HandlerFunc {
 		default:
 			http.NotFound(w, r)
 		}
+	}
+}
+
+// handleWorkflowSubRouting routes /api/workflow/{feature}/source-docs
+// to the appropriate handlers based on the HTTP method.
+// It only handles paths that contain a feature name segment; paths like
+// /api/workflow/start are matched by more-specific ServeMux entries first.
+func handleWorkflowSubRouting(manager *api.WorkflowManager) http.HandlerFunc {
+	assignHandler := api.HandleAssignSourceDocs(manager)
+	listDocsHandler := api.HandleGetWorkflowSourceDocs(manager)
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if strings.HasSuffix(path, "/source-docs") {
+			switch r.Method {
+			case http.MethodPost:
+				assignHandler.ServeHTTP(w, r)
+			case http.MethodGet:
+				listDocsHandler.ServeHTTP(w, r)
+			default:
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			}
+			return
+		}
+		http.NotFound(w, r)
 	}
 }
 

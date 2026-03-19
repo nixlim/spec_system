@@ -1952,3 +1952,247 @@ func TestBackwardCompatCancelNoFeatureName(t *testing.T) {
 	// Wait for background goroutine to finish so TempDir cleanup succeeds.
 	time.Sleep(200 * time.Millisecond)
 }
+
+// ---------------------------------------------------------------------------
+// TestExtractFeatureFromWorkflowPath
+// ---------------------------------------------------------------------------
+
+func TestExtractFeatureFromWorkflowPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"/api/workflow/alpha/source-docs", "alpha"},
+		{"/api/workflow/my-feature/source-docs", "my-feature"},
+		{"/api/workflow/", ""},
+		{"/api/workflow", ""},
+		{"/api/other/alpha/source-docs", ""},
+		{"/api/workflow/alpha/source-docs/", "alpha"},
+	}
+
+	for _, tt := range tests {
+		got := extractFeatureFromWorkflowPath(tt.path)
+		if got != tt.want {
+			t.Errorf("extractFeatureFromWorkflowPath(%q) = %q, want %q", tt.path, got, tt.want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestAssignSourceDocs
+// ---------------------------------------------------------------------------
+
+func TestAssignSourceDocs(t *testing.T) {
+	manager, dir := setupWorkflowManager(t)
+
+	// Set up global source-docs library with test files.
+	globalDocsDir := filepath.Join(dir, "source-docs")
+	os.MkdirAll(globalDocsDir, 0o755)
+	os.WriteFile(filepath.Join(globalDocsDir, "design.md"), []byte("# Design Doc"), 0o644)
+	os.WriteFile(filepath.Join(globalDocsDir, "api-spec.md"), []byte("# API Spec"), 0o644)
+
+	handler := HandleAssignSourceDocs(manager)
+
+	body := `{"source_doc_paths": ["design.md", "api-spec.md"]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflow/alpha/source-docs", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if resp["feature"] != "alpha" {
+		t.Errorf("feature = %q, want %q", resp["feature"], "alpha")
+	}
+	count, ok := resp["count"].(float64)
+	if !ok || int(count) != 2 {
+		t.Errorf("count = %v, want 2", resp["count"])
+	}
+
+	// Verify files were actually copied.
+	targetDir := filepath.Join(dir, "specs", "alpha", "source-docs")
+	for _, name := range []string{"design.md", "api-spec.md"} {
+		path := filepath.Join(targetDir, name)
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected file %q to exist, got error: %v", path, err)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestAssignSourceDocs_FileNotFound
+// ---------------------------------------------------------------------------
+
+func TestAssignSourceDocs_FileNotFound(t *testing.T) {
+	manager, dir := setupWorkflowManager(t)
+
+	// Set up global source-docs library (empty).
+	globalDocsDir := filepath.Join(dir, "source-docs")
+	os.MkdirAll(globalDocsDir, 0o755)
+
+	handler := HandleAssignSourceDocs(manager)
+
+	body := `{"source_doc_paths": ["nonexistent.md"]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflow/alpha/source-docs", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestAssignSourceDocs_InvalidFeatureName
+// ---------------------------------------------------------------------------
+
+func TestAssignSourceDocs_InvalidFeatureName(t *testing.T) {
+	manager, _ := setupWorkflowManager(t)
+	handler := HandleAssignSourceDocs(manager)
+
+	body := `{"source_doc_paths": ["design.md"]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflow/../escape/source-docs", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify the error message mentions the validation failure.
+	var resp map[string]string
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if !strings.Contains(resp["error"], "traversal") && !strings.Contains(resp["error"], "invalid") {
+		t.Errorf("expected error about traversal/invalid, got: %s", resp["error"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestAssignSourceDocs_EmptyPaths
+// ---------------------------------------------------------------------------
+
+func TestAssignSourceDocs_EmptyPaths(t *testing.T) {
+	manager, _ := setupWorkflowManager(t)
+	handler := HandleAssignSourceDocs(manager)
+
+	body := `{"source_doc_paths": []}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflow/alpha/source-docs", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestAssignSourceDocs_PathTraversalInDoc
+// ---------------------------------------------------------------------------
+
+func TestAssignSourceDocs_PathTraversalInDoc(t *testing.T) {
+	manager, _ := setupWorkflowManager(t)
+	handler := HandleAssignSourceDocs(manager)
+
+	body := `{"source_doc_paths": ["../../etc/passwd"]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflow/alpha/source-docs", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestGetWorkflowSourceDocs
+// ---------------------------------------------------------------------------
+
+func TestGetWorkflowSourceDocs(t *testing.T) {
+	manager, dir := setupWorkflowManager(t)
+
+	// Create some files in specs/alpha/source-docs/.
+	docsDir := filepath.Join(dir, "specs", "alpha", "source-docs")
+	os.MkdirAll(docsDir, 0o755)
+	os.WriteFile(filepath.Join(docsDir, "design.md"), []byte("# Design"), 0o644)
+	os.WriteFile(filepath.Join(docsDir, "api-spec.md"), []byte("# API"), 0o644)
+
+	handler := HandleGetWorkflowSourceDocs(manager)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workflow/alpha/source-docs", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var docs []sourceDocInfo
+	if err := json.NewDecoder(rec.Body).Decode(&docs); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if len(docs) != 2 {
+		t.Fatalf("expected 2 docs, got %d", len(docs))
+	}
+
+	// Should be sorted by name.
+	if docs[0].Name != "api-spec.md" {
+		t.Errorf("docs[0].Name = %q, want %q", docs[0].Name, "api-spec.md")
+	}
+	if docs[1].Name != "design.md" {
+		t.Errorf("docs[1].Name = %q, want %q", docs[1].Name, "design.md")
+	}
+
+	// Check that sizes are reasonable.
+	if docs[0].Size == 0 {
+		t.Error("expected non-zero size for api-spec.md")
+	}
+	if docs[1].Size == 0 {
+		t.Error("expected non-zero size for design.md")
+	}
+
+	// Check that ModifiedAt is populated.
+	for _, d := range docs {
+		if d.ModifiedAt.IsZero() {
+			t.Errorf("expected non-zero ModifiedAt for %q", d.Name)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestGetWorkflowSourceDocs_NoFeature
+// ---------------------------------------------------------------------------
+
+func TestGetWorkflowSourceDocs_NoFeature(t *testing.T) {
+	manager, _ := setupWorkflowManager(t)
+	handler := HandleGetWorkflowSourceDocs(manager)
+
+	// Request for a feature that doesn't exist.
+	req := httptest.NewRequest(http.MethodGet, "/api/workflow/nonexistent/source-docs", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var docs []sourceDocInfo
+	if err := json.NewDecoder(rec.Body).Decode(&docs); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if len(docs) != 0 {
+		t.Errorf("expected empty array, got %d docs", len(docs))
+	}
+}
