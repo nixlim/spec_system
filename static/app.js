@@ -1218,6 +1218,77 @@
         })(f.feature_name));
         actions.appendChild(deleteBtn);
 
+        // Rewind controls — stage dropdown + rewind button.
+        // Available for any workflow that has progressed past INIT.
+        if (stateUpper !== "UNKNOWN" && stateUpper !== "INIT") {
+          var rewindRow = el("div", { className: "workflow-rewind", style: "display:flex;gap:6px;align-items:center;margin-top:6px;" });
+
+          var stageSelect = el("select", { className: "rewind-select", style: "font-size:12px;padding:2px 4px;" });
+          var stages = ["DISCOVERY", "DRAFTING", "REVIEWING", "REVISING", "JUDGING"];
+          stages.forEach(function (s) {
+            var opt = el("option", { value: s, textContent: s });
+            stageSelect.appendChild(opt);
+          });
+          // Default to the current state if it's rewindable, otherwise first option.
+          if (stages.indexOf(stateUpper) !== -1) {
+            stageSelect.value = stateUpper;
+          }
+          rewindRow.appendChild(el("span", { textContent: "Rewind to:", style: "font-size:12px;color:#666;" }));
+          rewindRow.appendChild(stageSelect);
+
+          var roundInput = el("input", {
+            type: "number",
+            min: "1",
+            value: String(f.round || 1),
+            style: "width:50px;font-size:12px;padding:2px 4px;",
+            title: "Round number"
+          });
+          rewindRow.appendChild(roundInput);
+
+          var rewindBtn = el("button", {
+            className: "btn btn-sm",
+            textContent: "Rewind",
+            style: "background:#fff3cd;color:#856404;border-color:#ffc107;font-size:12px;"
+          });
+          rewindBtn.addEventListener("click", (function (featureName, selectEl, roundEl) {
+            return function () {
+              var targetState = selectEl.value;
+              var round = parseInt(roundEl.value, 10) || 1;
+              if (!confirm("Rewind '" + featureName + "' to " + targetState + " round " + round + "? Artefacts after this stage will be deleted.")) return;
+              rewindBtn.disabled = true;
+              rewindBtn.textContent = "Rewinding...";
+              fetchJSON("/api/workflow/rewind", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ feature_name: featureName, target_state: targetState, round: round })
+              }).then(function (data) {
+                addActivityEntry("Workflow rewound: " + featureName + " to " + targetState + " round " + round + " (" + (data.files_removed || 0) + " files removed)", "info");
+                // Clear status if this workflow is displayed.
+                var displayed = ($("#status-feature").textContent || "").trim();
+                if (displayed === featureName) {
+                  updateWorkflowStatus({
+                    state: targetState,
+                    feature_name: featureName,
+                    round: round,
+                    cost_usd: 0,
+                    wall_clock_seconds: 0,
+                    agent_invocations: 0
+                  });
+                }
+                loadFeatureList();
+              }).catch(function (err) {
+                alert("Rewind failed: " + err.message);
+              }).finally(function () {
+                rewindBtn.disabled = false;
+                rewindBtn.textContent = "Rewind";
+              });
+            };
+          })(f.feature_name, stageSelect, roundInput));
+          rewindRow.appendChild(rewindBtn);
+
+          actions.appendChild(rewindRow);
+        }
+
         card.appendChild(actions);
         container.appendChild(card);
       });

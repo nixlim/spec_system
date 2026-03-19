@@ -1058,6 +1058,90 @@ func HandleRestartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 	}
 }
 
+// HandleRewindWorkflow returns an HTTP handler for POST /api/workflow/rewind.
+// It rewinds a workflow to a previous stage, preserving all accumulated context
+// that feeds into the target stage while removing artefacts that come after it.
+// After rewinding, the workflow can be resumed from the target state.
+func HandleRewindWorkflow(manager *WorkflowManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			FeatureName string `json:"feature_name"`
+			TargetState string `json:"target_state"`
+			Round       int    `json:"round"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+			return
+		}
+		if req.FeatureName == "" {
+			writeError(w, http.StatusBadRequest, "feature_name is required")
+			return
+		}
+		if req.TargetState == "" {
+			writeError(w, http.StatusBadRequest, "target_state is required")
+			return
+		}
+
+		// Parse target state.
+		targetState, err := specworkflow.ParseWorkflowState(req.TargetState)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid target_state: %v", err))
+			return
+		}
+		if !specworkflow.IsRewindable(targetState) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot rewind to %s", req.TargetState))
+			return
+		}
+
+		if req.Round < 1 {
+			req.Round = 1
+		}
+
+		// Cancel any running orchestrator for this feature.
+		manager.mu.Lock()
+		if orch := manager.orchestrator; orch != nil {
+			if st := orch.State(); st != nil && st.FeatureName == req.FeatureName {
+				orch.Cancel()
+				manager.orchestrator = nil
+				time.Sleep(500 * time.Millisecond)
+			}
+		}
+		manager.mu.Unlock()
+
+		// Load current state from disk.
+		specDir := filepath.Join(manager.workspaceDir, "specs", req.FeatureName)
+		state, loadErr := specworkflow.LoadState(specDir)
+		if loadErr != nil {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("no workflow state found for %q", req.FeatureName))
+			return
+		}
+
+		// Perform the rewind.
+		result, err := specworkflow.RewindWorkflow(specDir, state, targetState, req.Round)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("rewind failed: %v", err))
+			return
+		}
+
+		log.Printf("[workflow] rewound %q from %s to %s round %d, removed %d files",
+			req.FeatureName, result.PreviousState, result.TargetState, result.Round, len(result.FilesRemoved))
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":         "rewound",
+			"previous_state": result.PreviousState.String(),
+			"target_state":   result.TargetState.String(),
+			"round":          result.Round,
+			"files_removed":  len(result.FilesRemoved),
+			"message":        fmt.Sprintf("Workflow rewound to %s round %d. Use Resume to continue.", result.TargetState, result.Round),
+		})
+	}
+}
+
 // HandleResetWorkflow returns an HTTP handler for POST /api/workflow/reset.
 // It deletes the entire workspace/specs/{feature}/ directory so the feature
 // can be started completely fresh.
