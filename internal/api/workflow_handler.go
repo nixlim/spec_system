@@ -29,19 +29,20 @@ func isTerminalWorkflowState(s specworkflow.WorkflowState) bool {
 // WorkflowManager
 // ---------------------------------------------------------------------------
 
-// WorkflowManager coordinates the lifecycle of a single workflow run.
-// It owns the Orchestrator, ChannelEmitter, and WebSocketHub, and provides
-// HTTP handler factories for the workflow control endpoints.
+// WorkflowManager coordinates the lifecycle of concurrent workflow runs.
+// It owns a map of Orchestrators keyed by feature name, a ChannelEmitter,
+// and WebSocketHub, and provides HTTP handler factories for the workflow
+// control endpoints. All map operations are protected by a sync.RWMutex.
 type WorkflowManager struct {
-	orchestrator *specworkflow.Orchestrator
-	emitter      *specworkflow.ChannelEmitter
-	hub          *WebSocketHub
-	workspaceDir string
-	config       specworkflow.SpecWorkflowConfig
-	otelPort     int
-	metricsStore *MetricsStore
-	otelReceiver *OTELReceiver
-	mu           sync.Mutex
+	orchestrators map[string]*specworkflow.Orchestrator
+	emitter       *specworkflow.ChannelEmitter
+	hub           *WebSocketHub
+	workspaceDir  string
+	config        specworkflow.SpecWorkflowConfig
+	otelPort      int
+	metricsStore  *MetricsStore
+	otelReceiver  *OTELReceiver
+	mu            sync.RWMutex
 }
 
 // NewWorkflowManager creates a WorkflowManager with the given dependencies.
@@ -52,10 +53,11 @@ func NewWorkflowManager(
 	config specworkflow.SpecWorkflowConfig,
 ) *WorkflowManager {
 	return &WorkflowManager{
-		emitter:      emitter,
-		hub:          hub,
-		workspaceDir: workspaceDir,
-		config:       config,
+		orchestrators: make(map[string]*specworkflow.Orchestrator),
+		emitter:       emitter,
+		hub:           hub,
+		workspaceDir:  workspaceDir,
+		config:        config,
 	}
 }
 
@@ -83,20 +85,21 @@ func (m *WorkflowManager) SetOTELReceiver(recv *OTELReceiver) {
 	m.otelReceiver = recv
 }
 
-// GetCurrentFeatureName returns the feature name of the currently running
-// workflow. Falls back to on-disk state so OTEL metrics can still be
+// GetCurrentFeatureName returns the feature name of a currently running
+// workflow. If multiple workflows are running, returns the first one found.
+// Falls back to on-disk state so OTEL metrics can still be
 // associated with the correct feature after a server restart (when the
 // parent Claude Code process continues sending telemetry even though
 // no orchestrator is running).
 func (m *WorkflowManager) GetCurrentFeatureName() string {
-	m.mu.Lock()
-	orch := m.orchestrator
-	m.mu.Unlock()
-	if orch != nil {
-		if state := orch.State(); state != nil && state.FeatureName != "" {
-			return state.FeatureName
+	m.mu.RLock()
+	for name, orch := range m.orchestrators {
+		if orch != nil && orch.IsRunning() {
+			m.mu.RUnlock()
+			return name
 		}
 	}
+	m.mu.RUnlock()
 	// Fall back to on-disk state.
 	if diskState := findLatestDiskState(m.workspaceDir); diskState != nil {
 		return diskState.FeatureName
@@ -104,21 +107,79 @@ func (m *WorkflowManager) GetCurrentFeatureName() string {
 	return ""
 }
 
-// GetOrchestrator returns the current orchestrator, or nil if no workflow
-// has been started.
-func (m *WorkflowManager) GetOrchestrator() *specworkflow.Orchestrator {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.orchestrator
+// GetOrchestrator returns the orchestrator for the given feature name,
+// or nil if no workflow is running for that feature. If featureName is
+// empty, returns any running orchestrator (for backward compatibility).
+func (m *WorkflowManager) GetOrchestrator(featureName ...string) *specworkflow.Orchestrator {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if len(featureName) > 0 && featureName[0] != "" {
+		return m.orchestrators[featureName[0]]
+	}
+	// Backward compat: return any running orchestrator.
+	for _, orch := range m.orchestrators {
+		if orch != nil {
+			return orch
+		}
+	}
+	return nil
+}
+
+// GetAllOrchestrators returns a snapshot of all active orchestrators
+// as a map keyed by feature name.
+func (m *WorkflowManager) GetAllOrchestrators() map[string]*specworkflow.Orchestrator {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make(map[string]*specworkflow.Orchestrator, len(m.orchestrators))
+	for k, v := range m.orchestrators {
+		result[k] = v
+	}
+	return result
+}
+
+// HasRunningWorkflow returns true if any orchestrator is currently running.
+func (m *WorkflowManager) HasRunningWorkflow() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, orch := range m.orchestrators {
+		if orch != nil && orch.IsRunning() {
+			return true
+		}
+	}
+	return false
+}
+
+// IsFeatureRunning returns true if the given feature has a running orchestrator.
+func (m *WorkflowManager) IsFeatureRunning(featureName string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	orch, ok := m.orchestrators[featureName]
+	return ok && orch != nil && orch.IsRunning()
 }
 
 // GetTracker returns the issue tracker from the current orchestrator.
+// If featureName is provided, returns the tracker for that specific feature.
 // If no orchestrator is running, it falls back to loading merged findings
 // from disk so the dashboard shows issues after a server restart.
-func (m *WorkflowManager) GetTracker() *specworkflow.IssueTracker {
-	m.mu.Lock()
-	orch := m.orchestrator
-	m.mu.Unlock()
+func (m *WorkflowManager) GetTracker(featureName ...string) *specworkflow.IssueTracker {
+	var orch *specworkflow.Orchestrator
+	var feature string
+
+	m.mu.RLock()
+	if len(featureName) > 0 && featureName[0] != "" {
+		feature = featureName[0]
+		orch = m.orchestrators[feature]
+	} else {
+		// Backward compat: try any orchestrator.
+		for name, o := range m.orchestrators {
+			if o != nil {
+				orch = o
+				feature = name
+				break
+			}
+		}
+	}
+	m.mu.RUnlock()
 
 	if orch != nil {
 		return orch.Tracker()
@@ -126,6 +187,14 @@ func (m *WorkflowManager) GetTracker() *specworkflow.IssueTracker {
 
 	// Fall back to disk: find the latest workflow state and load its
 	// merged findings into a fresh tracker.
+	if feature != "" {
+		tracker := specworkflow.NewIssueTracker()
+		specDir := filepath.Join(m.workspaceDir, "specs", feature)
+		if state, err := specworkflow.LoadState(specDir); err == nil && state != nil {
+			specworkflow.ReloadFindings(tracker, specDir, state.Round)
+			return tracker
+		}
+	}
 	if diskState := findLatestDiskState(m.workspaceDir); diskState != nil {
 		tracker := specworkflow.NewIssueTracker()
 		specDir := filepath.Join(m.workspaceDir, "specs", diskState.FeatureName)
@@ -136,37 +205,73 @@ func (m *WorkflowManager) GetTracker() *specworkflow.IssueTracker {
 }
 
 // GetState returns the workflow state from the current orchestrator.
+// If featureName is provided, returns state for that specific feature.
 // If no orchestrator is running, it falls back to the most recent
 // on-disk state so that spec endpoints can still serve data after a
 // server restart. Returns an empty state only when nothing is found.
-func (m *WorkflowManager) GetState() *specworkflow.WorkflowStateJSON {
-	m.mu.Lock()
-	orch := m.orchestrator
-	m.mu.Unlock()
+func (m *WorkflowManager) GetState(featureName ...string) *specworkflow.WorkflowStateJSON {
+	var orch *specworkflow.Orchestrator
+	var feature string
+
+	m.mu.RLock()
+	if len(featureName) > 0 && featureName[0] != "" {
+		feature = featureName[0]
+		orch = m.orchestrators[feature]
+	} else {
+		for name, o := range m.orchestrators {
+			if o != nil {
+				orch = o
+				feature = name
+				break
+			}
+		}
+	}
+	m.mu.RUnlock()
 
 	if orch != nil {
 		return orch.State()
 	}
 
-	// Fall back to on-disk state so spec/issue/convergence endpoints
-	// work even when no orchestrator is running (e.g. after restart).
+	// Fall back to on-disk state.
+	if feature != "" {
+		specDir := filepath.Join(m.workspaceDir, "specs", feature)
+		if state, err := specworkflow.LoadState(specDir); err == nil && state != nil {
+			return state
+		}
+	}
 	if diskState := findLatestDiskState(m.workspaceDir); diskState != nil {
 		return diskState
 	}
 	return &specworkflow.WorkflowStateJSON{}
 }
 
-// CancelWorkflow cancels the running workflow, if any.
-func (m *WorkflowManager) CancelWorkflow() error {
+// CancelWorkflow cancels a running workflow by feature name. If featureName
+// is provided, cancels that specific workflow. Otherwise cancels any running
+// workflow (backward compatibility).
+func (m *WorkflowManager) CancelWorkflow(featureName ...string) error {
 	m.mu.Lock()
-	orch := m.orchestrator
-	m.mu.Unlock()
+	defer m.mu.Unlock()
 
-	if orch == nil {
-		return fmt.Errorf("no active workflow to cancel")
+	if len(featureName) > 0 && featureName[0] != "" {
+		name := featureName[0]
+		orch, ok := m.orchestrators[name]
+		if !ok || orch == nil {
+			return fmt.Errorf("no running workflow for feature: %s", name)
+		}
+		orch.Cancel()
+		delete(m.orchestrators, name)
+		return nil
 	}
-	orch.Cancel()
-	return nil
+
+	// Backward compat: cancel any running orchestrator.
+	for name, orch := range m.orchestrators {
+		if orch != nil {
+			orch.Cancel()
+			delete(m.orchestrators, name)
+			return nil
+		}
+	}
+	return fmt.Errorf("no active workflow to cancel")
 }
 
 // ResumeFromGate re-creates the orchestrator and resumes the workflow when the
@@ -181,9 +286,9 @@ func (m *WorkflowManager) ResumeFromGate(featureName string) (*specworkflow.Orch
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// If there's already a running orchestrator, return it directly.
-	if m.orchestrator != nil && m.orchestrator.IsRunning() {
-		return m.orchestrator, nil
+	// If there's already a running orchestrator for this feature, return it directly.
+	if orch, ok := m.orchestrators[featureName]; ok && orch != nil && orch.IsRunning() {
+		return orch, nil
 	}
 
 	// Load state from disk to verify it's a gate state.
@@ -217,7 +322,7 @@ func (m *WorkflowManager) ResumeFromGate(featureName string) (*specworkflow.Orch
 		return nil, fmt.Errorf("create orchestrator: %w", err)
 	}
 
-	m.orchestrator = orch
+	m.orchestrators[featureName] = orch
 
 	// Run workflow in background — it will resume from the gate state and
 	// block waiting on gateCh for the human response.
@@ -311,10 +416,15 @@ func HandleStartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 		}
 
 		manager.mu.Lock()
-		if manager.orchestrator != nil && manager.orchestrator.IsRunning() {
-			manager.mu.Unlock()
-			writeError(w, http.StatusConflict, "a workflow is already running")
-			return
+		// Check if a workflow is already running for this feature.
+		if existingOrch, ok := manager.orchestrators[req.FeatureName]; ok && existingOrch != nil {
+			if existingOrch.IsRunning() {
+				manager.mu.Unlock()
+				writeError(w, http.StatusConflict, fmt.Sprintf("workflow already running for feature: %s", req.FeatureName))
+				return
+			}
+			// Orchestrator exists but is not running — clean it up.
+			delete(manager.orchestrators, req.FeatureName)
 		}
 
 		// Resolve source doc paths — if none provided, scan source-docs directory.
@@ -349,7 +459,7 @@ func HandleStartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			return
 		}
 
-		manager.orchestrator = orch
+		manager.orchestrators[req.FeatureName] = orch
 		manager.mu.Unlock()
 
 		// Run workflow in background.
@@ -361,9 +471,9 @@ func HandleStartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 
 		go func() {
 			if err := orch.RunWorkflow(goal); err != nil {
-				log.Printf("workflow completed with error: %v", err)
+				log.Printf("[workflow] %s completed with error: %v", req.FeatureName, err)
 			} else {
-				log.Printf("workflow completed successfully")
+				log.Printf("[workflow] %s completed successfully", req.FeatureName)
 			}
 		}()
 
@@ -579,7 +689,9 @@ func HandleGateReject(manager *WorkflowManager) http.HandlerFunc {
 
 // HandleCancelWorkflowAPI returns an HTTP handler for POST /api/workflow/cancel
 // (and also POST /api/spec/cancel for backwards compatibility). It cancels
-// the running workflow via the WorkflowManager.
+// the running workflow via the WorkflowManager. If the request body contains
+// a feature_name, cancels that specific workflow; otherwise cancels any
+// running workflow.
 func HandleCancelWorkflowAPI(manager *WorkflowManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -587,7 +699,20 @@ func HandleCancelWorkflowAPI(manager *WorkflowManager) http.HandlerFunc {
 			return
 		}
 
-		if err := manager.CancelWorkflow(); err != nil {
+		// Try to read feature_name from body (optional).
+		var req struct {
+			FeatureName string `json:"feature_name"`
+		}
+		// Body may be empty for backward compat.
+		json.NewDecoder(r.Body).Decode(&req)
+
+		var err error
+		if req.FeatureName != "" {
+			err = manager.CancelWorkflow(req.FeatureName)
+		} else {
+			err = manager.CancelWorkflow()
+		}
+		if err != nil {
 			writeError(w, http.StatusConflict, fmt.Sprintf("cancel failed: %v", err))
 			return
 		}
@@ -833,10 +958,10 @@ func HandleResumeWorkflow(manager *WorkflowManager) http.HandlerFunc {
 		}
 
 		manager.mu.Lock()
-		// Cancel existing orchestrator if any.
-		if orch := manager.orchestrator; orch != nil && orch.IsRunning() {
+		// Cancel existing orchestrator for this feature if any.
+		if orch, ok := manager.orchestrators[req.FeatureName]; ok && orch != nil && orch.IsRunning() {
 			orch.Cancel()
-			manager.orchestrator = nil
+			delete(manager.orchestrators, req.FeatureName)
 			time.Sleep(500 * time.Millisecond)
 		}
 		manager.mu.Unlock()
@@ -892,20 +1017,21 @@ func HandleResumeWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			return
 		}
 
+		featureName := req.FeatureName // capture for goroutine
 		manager.mu.Lock()
-		manager.orchestrator = orch
+		manager.orchestrators[featureName] = orch
 		manager.mu.Unlock()
 
 		go func() {
 			goal := specworkflow.GoalInput{
-				Title:          req.FeatureName,
+				Title:          featureName,
 				Description:    "Resumed workflow",
 				SourceDocPaths: sourcePaths,
 			}
 			if err := orch.RunWorkflow(goal); err != nil {
-				log.Printf("[workflow] resumed workflow %q completed with error: %v", req.FeatureName, err)
+				log.Printf("[workflow] resumed workflow %q completed with error: %v", featureName, err)
 			} else {
-				log.Printf("[workflow] resumed workflow %q completed successfully", req.FeatureName)
+				log.Printf("[workflow] resumed workflow %q completed successfully", featureName)
 			}
 		}()
 
@@ -1021,11 +1147,11 @@ func HandleRestartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			return
 		}
 
-		// 1. Cancel running workflow if any.
+		// 1. Cancel running workflow for this feature if any.
 		manager.mu.Lock()
-		if orch := manager.orchestrator; orch != nil {
+		if orch, ok := manager.orchestrators[req.FeatureName]; ok && orch != nil {
 			orch.Cancel()
-			manager.orchestrator = nil
+			delete(manager.orchestrators, req.FeatureName)
 		}
 		manager.mu.Unlock()
 
@@ -1104,12 +1230,10 @@ func HandleRewindWorkflow(manager *WorkflowManager) http.HandlerFunc {
 
 		// Cancel any running orchestrator for this feature.
 		manager.mu.Lock()
-		if orch := manager.orchestrator; orch != nil {
-			if st := orch.State(); st != nil && st.FeatureName == req.FeatureName {
-				orch.Cancel()
-				manager.orchestrator = nil
-				time.Sleep(500 * time.Millisecond)
-			}
+		if orch, ok := manager.orchestrators[req.FeatureName]; ok && orch != nil {
+			orch.Cancel()
+			delete(manager.orchestrators, req.FeatureName)
+			time.Sleep(500 * time.Millisecond)
 		}
 		manager.mu.Unlock()
 
@@ -1166,11 +1290,9 @@ func HandleResetWorkflow(manager *WorkflowManager) http.HandlerFunc {
 
 		// Cancel and clear the orchestrator if it's running this feature.
 		manager.mu.Lock()
-		if orch := manager.orchestrator; orch != nil {
-			if st := orch.State(); st != nil && st.FeatureName == req.FeatureName {
-				orch.Cancel()
-				manager.orchestrator = nil
-			}
+		if orch, ok := manager.orchestrators[req.FeatureName]; ok && orch != nil {
+			orch.Cancel()
+			delete(manager.orchestrators, req.FeatureName)
 		}
 		manager.mu.Unlock()
 
@@ -1260,12 +1382,7 @@ func HandleListFeatures(workspaceDir string, manager ...*WorkflowManager) http.H
 				if !fi.IsTerminal && !specworkflow.IsGateState(state.State) {
 					orchestratorRunning := false
 					if len(manager) > 0 && manager[0] != nil {
-						mgr := manager[0]
-						mgr.mu.Lock()
-						if mgr.orchestrator != nil && mgr.orchestrator.IsRunning() {
-							orchestratorRunning = true
-						}
-						mgr.mu.Unlock()
+						orchestratorRunning = manager[0].IsFeatureRunning(featureName)
 					}
 					if !orchestratorRunning {
 						fi.IsPaused = true

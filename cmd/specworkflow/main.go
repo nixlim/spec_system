@@ -156,9 +156,9 @@ func main() {
 	specConfig := api.SpecAPIConfig{
 		WorkspaceDir: absWorkspace,
 		FeatureName:  "adversarial-spec",
-		GetTracker:   workflowManager.GetTracker,
-		GetState:     workflowManager.GetState,
-		CancelFunc:   workflowManager.CancelWorkflow,
+		GetTracker:   func() *specworkflow.IssueTracker { return workflowManager.GetTracker() },
+		GetState:     func() *specworkflow.WorkflowStateJSON { return workflowManager.GetState() },
+		CancelFunc:   func() error { return workflowManager.CancelWorkflow() },
 	}
 	mux.HandleFunc("/api/spec/current", api.HandleGetCurrentSpec(specConfig))
 	mux.HandleFunc("/api/spec/versions", api.HandleListSpecVersions(specConfig))

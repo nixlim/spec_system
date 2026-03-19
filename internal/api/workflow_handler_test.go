@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/foundry-zero/adversarial-spec-system/internal/specworkflow"
 )
@@ -178,6 +179,9 @@ func TestHandleStartWorkflow_FeatureNameFromTitle(t *testing.T) {
 	if resp["round"] != float64(1) {
 		t.Errorf("expected round 1, got %v", resp["round"])
 	}
+
+	// Wait for background goroutine to finish so TempDir cleanup succeeds.
+	time.Sleep(100 * time.Millisecond)
 }
 
 // ---------------------------------------------------------------------------
@@ -793,4 +797,155 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// ---------------------------------------------------------------------------
+// Multi-Workflow WorkflowManager Tests (460.1)
+// ---------------------------------------------------------------------------
+
+// TestWorkflowManagerMapCRUD verifies that WorkflowManager supports
+// starting multiple workflows and retrieving them by feature name.
+func TestWorkflowManagerMapCRUD(t *testing.T) {
+	manager, dir := setupWorkflowManager(t)
+	handler := HandleStartWorkflow(manager)
+
+	// Start workflow "alpha".
+	body := `{"title":"Alpha","description":"test alpha","feature_name":"alpha"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflow/start", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("start alpha: expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Start workflow "beta".
+	body = `{"title":"Beta","description":"test beta","feature_name":"beta"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workflow/start", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("start beta: expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// GetOrchestrator for each feature should return non-nil.
+	alphaOrch := manager.GetOrchestrator("alpha")
+	if alphaOrch == nil {
+		t.Error("expected non-nil orchestrator for alpha")
+	}
+	betaOrch := manager.GetOrchestrator("beta")
+	if betaOrch == nil {
+		t.Error("expected non-nil orchestrator for beta")
+	}
+
+	// GetAllOrchestrators should return both.
+	all := manager.GetAllOrchestrators()
+	if len(all) != 2 {
+		t.Errorf("expected 2 orchestrators, got %d", len(all))
+	}
+
+	// Verify feature directories were created.
+	for _, name := range []string{"alpha", "beta"} {
+		featureDir := filepath.Join(dir, "specs", name)
+		if _, err := os.Stat(featureDir); os.IsNotExist(err) {
+			t.Errorf("expected feature directory for %q to exist", name)
+		}
+	}
+
+	// Wait for background goroutines to finish so TempDir cleanup succeeds.
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestWorkflowManagerDuplicateFeatureRejected verifies that starting a
+// workflow with a feature name that already has a non-terminal state on
+// disk returns HTTP 409.
+func TestWorkflowManagerDuplicateFeatureRejected(t *testing.T) {
+	manager, dir := setupWorkflowManager(t)
+	handler := HandleStartWorkflow(manager)
+
+	// Pre-create an active (non-terminal) workflow state on disk for alpha.
+	// This simulates a workflow that's in progress or at a gate state.
+	featureDir := filepath.Join(dir, "specs", "alpha")
+	os.MkdirAll(featureDir, 0o755)
+	stateJSON := `{
+		"state": "REVIEWING",
+		"round": 2,
+		"feature_name": "alpha",
+		"started_at": "2026-03-17T05:00:00Z",
+		"updated_at": "2026-03-17T06:00:00Z"
+	}`
+	os.WriteFile(filepath.Join(featureDir, "workflow-state.json"), []byte(stateJSON), 0o644)
+
+	// Try starting "alpha" — should get 409 because disk state is non-terminal.
+	body := `{"title":"Alpha","description":"test","feature_name":"alpha"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflow/start", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Errorf("duplicate start: expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// But starting "beta" should succeed.
+	body = `{"title":"Beta","description":"test","feature_name":"beta"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workflow/start", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Errorf("start beta: expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Wait for background goroutines to finish so TempDir cleanup succeeds.
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestWorkflowManagerCancelSpecific verifies that cancelling one workflow
+// does not affect others.
+func TestWorkflowManagerCancelSpecific(t *testing.T) {
+	manager, _ := setupWorkflowManager(t)
+	handler := HandleStartWorkflow(manager)
+
+	// Start alpha and beta.
+	for _, name := range []string{"alpha", "beta"} {
+		body := `{"title":"` + name + `","description":"test","feature_name":"` + name + `"}`
+		req := httptest.NewRequest(http.MethodPost, "/api/workflow/start", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("start %s: expected 202, got %d", name, rec.Code)
+		}
+	}
+
+	// Cancel alpha.
+	err := manager.CancelWorkflow("alpha")
+	if err != nil {
+		t.Fatalf("cancel alpha: %v", err)
+	}
+
+	// Alpha orchestrator should be gone.
+	if manager.GetOrchestrator("alpha") != nil {
+		t.Error("expected alpha orchestrator to be nil after cancel")
+	}
+
+	// Beta should still exist.
+	betaOrch := manager.GetOrchestrator("beta")
+	if betaOrch == nil {
+		t.Error("expected beta orchestrator to still exist after cancelling alpha")
+	}
+
+	// Cancel non-existent feature should return error.
+	err = manager.CancelWorkflow("nonexistent")
+	if err == nil {
+		t.Error("expected error when cancelling non-existent feature")
+	}
+
+	// Wait for background goroutines to finish so TempDir cleanup succeeds.
+	time.Sleep(100 * time.Millisecond)
 }
