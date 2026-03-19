@@ -45,10 +45,12 @@ const (
 // ---------------------------------------------------------------------------
 
 // EventEnvelope is the standard wrapper for all WebSocket events.
-// Every event follows the {event: string, data: object} pattern.
+// Every event follows the {event: string, feature_name: string, data: object} pattern.
 type EventEnvelope struct {
 	// Event is the event type identifier (e.g. "spec_version").
 	Event string `json:"event"`
+	// FeatureName identifies the workflow/feature that produced this event.
+	FeatureName string `json:"feature_name,omitempty"`
 	// Data is the event-specific payload.
 	Data interface{} `json:"data"`
 }
@@ -212,13 +214,21 @@ type EventEmitter interface {
 // It uses a buffered channel so that slow consumers do not block the
 // workflow. Events are dropped if the channel is full.
 type ChannelEmitter struct {
-	ch chan EventEnvelope
+	ch          chan EventEnvelope
+	featureName string
 }
 
 // NewChannelEmitter creates a new ChannelEmitter with the given buffer size.
-func NewChannelEmitter(bufSize int) *ChannelEmitter {
+// An optional featureName may be provided; if set, it is automatically
+// applied to every emitted event that does not already carry a FeatureName.
+func NewChannelEmitter(bufSize int, featureName ...string) *ChannelEmitter {
+	name := ""
+	if len(featureName) > 0 {
+		name = featureName[0]
+	}
 	return &ChannelEmitter{
-		ch: make(chan EventEnvelope, bufSize),
+		ch:          make(chan EventEnvelope, bufSize),
+		featureName: name,
 	}
 }
 
@@ -226,10 +236,21 @@ func NewChannelEmitter(bufSize int) *ChannelEmitter {
 // buffer is full and the event cannot be delivered.
 var ErrChannelFull = fmt.Errorf("event channel full: event dropped")
 
-// Emit sends an event to the channel. If the channel buffer is full the
-// event is dropped and ErrChannelFull is returned so the caller can decide
-// how to handle it (e.g. log a warning). Returns nil on success.
+// SetFeatureName sets (or updates) the feature name that is automatically
+// applied to every emitted event.
+func (e *ChannelEmitter) SetFeatureName(name string) {
+	e.featureName = name
+}
+
+// Emit sends an event to the channel. If the emitter has a featureName
+// configured and the event does not already carry one, it is set
+// automatically. If the channel buffer is full the event is dropped and
+// ErrChannelFull is returned so the caller can decide how to handle it
+// (e.g. log a warning). Returns nil on success.
 func (e *ChannelEmitter) Emit(event EventEnvelope) error {
+	if e.featureName != "" && event.FeatureName == "" {
+		event.FeatureName = e.featureName
+	}
 	select {
 	case e.ch <- event:
 		return nil

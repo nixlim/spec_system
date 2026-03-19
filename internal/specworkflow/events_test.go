@@ -522,6 +522,137 @@ func TestEventEnvelope_WorkflowStatusJSONFieldNames(t *testing.T) {
 	})
 }
 
+// ---------------------------------------------------------------------------
+// FeatureName tests
+// ---------------------------------------------------------------------------
+
+func TestEventEnvelopeCarriesFeatureName(t *testing.T) {
+	emitter := NewChannelEmitter(8, "alpha")
+	defer emitter.Close()
+
+	sent := NewSpecVersionEvent(1, 1, "/spec.md")
+	if err := emitter.Emit(sent); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	select {
+	case got := <-emitter.Events():
+		if got.FeatureName != "alpha" {
+			t.Errorf("FeatureName = %q, want %q", got.FeatureName, "alpha")
+		}
+		if got.Event != EventSpecVersion {
+			t.Errorf("Event = %q, want %q", got.Event, EventSpecVersion)
+		}
+	default:
+		t.Fatal("expected event on channel, got none")
+	}
+}
+
+func TestEventEnvelopeJSONSerialization(t *testing.T) {
+	env := EventEnvelope{
+		Event:       EventStateTransition,
+		FeatureName: "beta",
+		Data: StateTransitionEvent{
+			From: "INIT", To: "DISCOVERY", Round: 1, Timestamp: "2026-01-01T00:00:00Z",
+		},
+	}
+
+	data, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	fnRaw, ok := raw["feature_name"]
+	if !ok {
+		t.Fatal("missing \"feature_name\" key in JSON output")
+	}
+
+	var fn string
+	if err := json.Unmarshal(fnRaw, &fn); err != nil {
+		t.Fatalf("Unmarshal feature_name: %v", err)
+	}
+	if fn != "beta" {
+		t.Errorf("feature_name = %q, want %q", fn, "beta")
+	}
+}
+
+func TestChannelEmitterPreservesExplicitFeatureName(t *testing.T) {
+	emitter := NewChannelEmitter(8, "emitter-default")
+	defer emitter.Close()
+
+	explicit := EventEnvelope{
+		Event:       EventAgentDispatch,
+		FeatureName: "explicit-feature",
+		Data:        AgentDispatchEvent{Agent: "reviewer", Round: 1, Timestamp: "2026-01-01T00:00:00Z"},
+	}
+
+	if err := emitter.Emit(explicit); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	select {
+	case got := <-emitter.Events():
+		if got.FeatureName != "explicit-feature" {
+			t.Errorf("FeatureName = %q, want %q (emitter should not overwrite explicit value)",
+				got.FeatureName, "explicit-feature")
+		}
+	default:
+		t.Fatal("expected event on channel, got none")
+	}
+}
+
+func TestChannelEmitter_SetFeatureName(t *testing.T) {
+	emitter := NewChannelEmitter(8)
+	defer emitter.Close()
+
+	// Initially no feature name — event should pass through without one.
+	ev1 := NewAgentErrorEvent("a", "timeout", 1, 3)
+	if err := emitter.Emit(ev1); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	got1 := <-emitter.Events()
+	if got1.FeatureName != "" {
+		t.Errorf("FeatureName = %q, want empty", got1.FeatureName)
+	}
+
+	// After setting feature name, events should carry it.
+	emitter.SetFeatureName("gamma")
+	ev2 := NewAgentErrorEvent("b", "rate_limit", 0, 3)
+	if err := emitter.Emit(ev2); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	got2 := <-emitter.Events()
+	if got2.FeatureName != "gamma" {
+		t.Errorf("FeatureName = %q, want %q", got2.FeatureName, "gamma")
+	}
+}
+
+func TestEventEnvelopeJSONOmitsEmptyFeatureName(t *testing.T) {
+	env := EventEnvelope{
+		Event: EventCircuitBreaker,
+		Data:  CircuitBreakerEvent{Breaker: "max_rounds", Value: 5, Limit: 4},
+	}
+
+	data, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	if _, ok := raw["feature_name"]; ok {
+		t.Error("feature_name should be omitted from JSON when empty")
+	}
+}
+
 func TestEventEnvelope_NewEventsSerializeToValidJSON(t *testing.T) {
 	envelopes := []EventEnvelope{
 		NewStateTransitionEvent("INIT", "DISCOVERY", 1),
