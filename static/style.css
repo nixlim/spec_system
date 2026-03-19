@@ -1406,7 +1406,9 @@ html, body {
 
 .doc-picker-item {
   display: flex;
+  flex-direction: row;
   align-items: center;
+  justify-content: flex-start;
   padding: 4px 8px;
   gap: 8px;
   cursor: pointer;
@@ -1420,9 +1422,14 @@ html, body {
   flex: 1;
   cursor: pointer;
   font-size: 13px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.doc-picker-item input[type="checkbox"] {
+  flex-shrink: 0;
 }
 
 .doc-picker-item .doc-size {
