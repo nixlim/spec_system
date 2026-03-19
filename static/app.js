@@ -1674,6 +1674,20 @@
 
   function initGoalForm() {
     var form = $("#goal-form");
+
+    // Select all / deselect all for document picker
+    $("#doc-select-all").addEventListener("click", function () {
+      $$("#doc-picker input[type=checkbox]").forEach(function (cb) { cb.checked = true; });
+    });
+    $("#doc-deselect-all").addEventListener("click", function () {
+      $$("#doc-picker input[type=checkbox]").forEach(function (cb) { cb.checked = false; });
+    });
+
+    // Refresh doc picker when the start-workflow section is opened
+    $("#new-workflow-section").addEventListener("toggle", function () {
+      if (this.open) renderDocPicker();
+    });
+
     form.addEventListener("submit", function (e) {
       e.preventDefault();
       var payload = {
@@ -1681,6 +1695,15 @@
         feature_name: $("#goal-feature-name").value.trim(),
         description: $("#goal-description").value.trim()
       };
+
+      // Collect selected source documents
+      var selectedDocs = [];
+      $$("#doc-picker input[type=checkbox]:checked").forEach(function (cb) {
+        selectedDocs.push(cb.value);
+      });
+      if (selectedDocs.length > 0) {
+        payload.source_doc_paths = selectedDocs;
+      }
 
       var submitBtn = $("#goal-submit");
       submitBtn.disabled = true;
@@ -1851,6 +1874,37 @@
           ])
         ]);
         tbody.appendChild(tr);
+      });
+      // Also refresh the document picker so new uploads appear as checkable items
+      renderDocPicker();
+    }).catch(function () {});
+  }
+
+  // -----------------------------------------------------------------------
+  // Controls Tab — Document Picker
+  // -----------------------------------------------------------------------
+
+  function renderDocPicker() {
+    fetchJSON("/api/workspace/uploads").then(function (files) {
+      var picker = $("#doc-picker");
+      clearChildren(picker);
+
+      if (!files || files.length === 0) {
+        picker.appendChild(el("p", { className: "doc-picker-empty", textContent: "No documents uploaded yet. Upload documents below." }));
+        return;
+      }
+
+      files.forEach(function (f) {
+        var cbId = "doc-" + f.name.replace(/[^a-zA-Z0-9]/g, "-");
+        var checkbox = el("input", { type: "checkbox", id: cbId, value: f.name });
+        checkbox.checked = true;
+
+        var div = el("div", { className: "doc-picker-item" }, [
+          checkbox,
+          el("label", { htmlFor: cbId, textContent: f.name }),
+          el("span", { className: "doc-size", textContent: formatBytes(f.size) })
+        ]);
+        picker.appendChild(div);
       });
     }).catch(function () {});
   }
@@ -2916,6 +2970,7 @@
     initTabs();
     initGoalForm();
     initUpload();
+    renderDocPicker();
     initSpecControls();
     initIssueFilters();
     initCancelButton();
