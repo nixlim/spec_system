@@ -400,12 +400,14 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 }
 
 // ReloadFindings loads merged findings from all rounds up to maxRound back
-// into the IssueTracker. This is needed when resuming a workflow so the
-// dashboard and downstream agents have the full issue history. It is also
-// called by the API layer to populate the tracker from disk when no
-// orchestrator is running.
+// into the IssueTracker, then replays revision and judge outputs to restore
+// the full lifecycle state (raised → addressed → verified → closed). This is
+// needed when resuming a workflow so the dashboard and downstream agents have
+// accurate issue status. It is also called by the API layer to populate the
+// tracker from disk when no orchestrator is running.
 func ReloadFindings(tracker *IssueTracker, specDir string, maxRound int) {
 	for round := 1; round <= maxRound; round++ {
+		// Step 1: Load merged findings for this round.
 		mergedPath := filepath.Join(specDir, fmt.Sprintf("merged-findings-round-%d.json", round))
 		data, err := os.ReadFile(mergedPath)
 		if err != nil {
@@ -420,9 +422,40 @@ func ReloadFindings(tracker *IssueTracker, specDir string, maxRound int) {
 
 		tracker.AddFindings(merged.Findings)
 		log.Printf("[orchestrator] reloaded %d findings from round %d", len(merged.Findings), round)
+
+		// Step 2: Replay revision output (raised → addressed).
+		revisionPath := filepath.Join(specDir, fmt.Sprintf("revision-round-%d.json", round))
+		if revData, err := os.ReadFile(revisionPath); err == nil {
+			var revision RevisionOutput
+			if err := json.Unmarshal(revData, &revision); err == nil {
+				if warnings, err := tracker.ApplyRevisionChanges(&revision, round); err != nil {
+					log.Printf("[orchestrator] warning: replay revision round %d: %v", round, err)
+				} else {
+					for _, w := range warnings {
+						log.Printf("[orchestrator] replay revision round %d: %s", round, w)
+					}
+				}
+			}
+		}
+
+		// Step 3: Replay judge output (addressed → verified, etc.).
+		judgePath := filepath.Join(specDir, fmt.Sprintf("judge-round-%d.json", round))
+		if judgeData, err := os.ReadFile(judgePath); err == nil {
+			var judge JudgeOutput
+			if err := json.Unmarshal(judgeData, &judge); err == nil {
+				if warnings, err := tracker.ApplyJudgeUpdates(&judge, round); err != nil {
+					log.Printf("[orchestrator] warning: replay judge round %d: %v", round, err)
+				} else {
+					for _, w := range warnings {
+						log.Printf("[orchestrator] replay judge round %d: %s", round, w)
+					}
+				}
+				tracker.CloseVerifiedFindings(round)
+			}
+		}
 	}
 
 	summary := tracker.GetFindingSummary()
-	log.Printf("[orchestrator] issue tracker restored: %d raised, %d open critical, %d open major",
-		summary.Raised, summary.OpenCritical, summary.OpenMajor)
+	log.Printf("[orchestrator] issue tracker restored: %d raised, %d closed, %d open critical, %d open major",
+		summary.Raised, summary.Closed, summary.OpenCritical, summary.OpenMajor)
 }

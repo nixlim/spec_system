@@ -527,3 +527,69 @@ func TestReloadFindings_MultipleRounds(t *testing.T) {
 		t.Errorf("expected 2 raised findings (deduplicated), got %d", summary.Raised)
 	}
 }
+
+func TestReloadFindings_ReplaysRevisionAndJudge(t *testing.T) {
+	dir := t.TempDir()
+	specDir := filepath.Join(dir, "specs", "lifecycle")
+	os.MkdirAll(specDir, 0o755)
+
+	// Write merged findings with 2 findings.
+	merged := MergedFindings{
+		SchemaVersion: "1.0",
+		Round:         1,
+		Findings: []MergedFinding{
+			{ID: "F-001", Description: "Critical bug", Severity: SeverityCritical, Status: "open", RoundRaised: 1,
+				Impact: "High", Recommendation: "Fix", Lens: "security", AffectedSection: "1.0"},
+			{ID: "F-002", Description: "Major issue", Severity: SeverityMajor, Status: "open", RoundRaised: 1,
+				Impact: "Medium", Recommendation: "Address", Lens: "consistency", AffectedSection: "2.0"},
+		},
+	}
+	mergedData, _ := json.Marshal(merged)
+	os.WriteFile(filepath.Join(specDir, "merged-findings-round-1.json"), mergedData, 0o644)
+
+	// Write revision output that addresses both findings.
+	revision := RevisionOutput{
+		SchemaVersion: "1.0",
+		Agent:         "reviser",
+		Round:         1,
+		Changes: []Change{
+			{FindingID: "F-001", Action: "revised", Description: "Fixed critical bug", SectionsModified: []string{"1.0"}},
+			{FindingID: "F-002", Action: "revised", Description: "Addressed major issue", SectionsModified: []string{"2.0"}},
+		},
+	}
+	revData, _ := json.Marshal(revision)
+	os.WriteFile(filepath.Join(specDir, "revision-round-1.json"), revData, 0o644)
+
+	// Write judge output that verifies both findings.
+	judge := JudgeOutput{
+		SchemaVersion: "1.0",
+		Agent:         "judge",
+		Round:         1,
+		Verdict:       VerdictPass,
+		Rationale:     "All findings addressed",
+		IssueUpdates: []IssueUpdate{
+			{FindingID: "F-001", NewStatus: "verified", Explanation: "Fix confirmed"},
+			{FindingID: "F-002", NewStatus: "verified", Explanation: "Fix confirmed"},
+		},
+	}
+	judgeData, _ := json.Marshal(judge)
+	os.WriteFile(filepath.Join(specDir, "judge-round-1.json"), judgeData, 0o644)
+
+	tracker := NewIssueTracker()
+	ReloadFindings(tracker, specDir, 1)
+
+	summary := tracker.GetFindingSummary()
+	// Both findings should be closed (raised → addressed → verified → closed).
+	if summary.Raised != 2 {
+		t.Errorf("expected 2 total raised, got %d", summary.Raised)
+	}
+	if summary.Closed != 2 {
+		t.Errorf("expected 2 closed, got %d", summary.Closed)
+	}
+	if summary.OpenCritical != 0 {
+		t.Errorf("expected 0 open critical, got %d", summary.OpenCritical)
+	}
+	if summary.OpenMajor != 0 {
+		t.Errorf("expected 0 open major, got %d", summary.OpenMajor)
+	}
+}
