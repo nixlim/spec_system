@@ -1160,6 +1160,314 @@ func TestStatusNonexistentFeature(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Per-Workflow Source Document Isolation Tests (460.8)
+// ---------------------------------------------------------------------------
+
+// TestCopySourceDocsToWorkflow verifies that files are copied from the global
+// source-docs library into specs/{feature}/source-docs/.
+func TestCopySourceDocsToWorkflow(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create global source-docs with test files.
+	globalDir := filepath.Join(dir, "source-docs")
+	os.MkdirAll(globalDir, 0o755)
+	os.WriteFile(filepath.Join(globalDir, "design.md"), []byte("# Design Doc"), 0o644)
+	os.WriteFile(filepath.Join(globalDir, "requirements.txt"), []byte("requirement 1"), 0o644)
+
+	// Copy specific files.
+	sourcePaths := []string{
+		filepath.Join(globalDir, "design.md"),
+	}
+	newPaths, err := copySourceDocsToWorkflow(dir, "alpha", sourcePaths)
+	if err != nil {
+		t.Fatalf("copySourceDocsToWorkflow: %v", err)
+	}
+
+	if len(newPaths) != 1 {
+		t.Fatalf("expected 1 new path, got %d", len(newPaths))
+	}
+
+	expectedPath := filepath.Join(dir, "specs", "alpha", "source-docs", "design.md")
+	if newPaths[0] != expectedPath {
+		t.Errorf("new path = %q, want %q", newPaths[0], expectedPath)
+	}
+
+	// Verify the file was actually copied with correct content.
+	content, err := os.ReadFile(expectedPath)
+	if err != nil {
+		t.Fatalf("read copied file: %v", err)
+	}
+	if string(content) != "# Design Doc" {
+		t.Errorf("copied content = %q, want %q", string(content), "# Design Doc")
+	}
+}
+
+// TestCopySourceDocsToWorkflow_AllFiles verifies that when all global source
+// docs are passed, they are all copied to the workflow directory.
+func TestCopySourceDocsToWorkflow_AllFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	globalDir := filepath.Join(dir, "source-docs")
+	os.MkdirAll(globalDir, 0o755)
+	os.WriteFile(filepath.Join(globalDir, "a.md"), []byte("aaa"), 0o644)
+	os.WriteFile(filepath.Join(globalDir, "b.txt"), []byte("bbb"), 0o644)
+	os.WriteFile(filepath.Join(globalDir, "c.pdf"), []byte("ccc"), 0o644)
+
+	allPaths := discoverSourceDocs(dir)
+	if len(allPaths) != 3 {
+		t.Fatalf("expected 3 global docs, got %d", len(allPaths))
+	}
+
+	newPaths, err := copySourceDocsToWorkflow(dir, "beta", allPaths)
+	if err != nil {
+		t.Fatalf("copySourceDocsToWorkflow: %v", err)
+	}
+
+	if len(newPaths) != 3 {
+		t.Fatalf("expected 3 new paths, got %d", len(newPaths))
+	}
+
+	// Verify all files exist in the workflow directory.
+	workflowDir := filepath.Join(dir, "specs", "beta", "source-docs")
+	for _, name := range []string{"a.md", "b.txt", "c.pdf"} {
+		if _, err := os.Stat(filepath.Join(workflowDir, name)); os.IsNotExist(err) {
+			t.Errorf("expected %s to exist in workflow source-docs", name)
+		}
+	}
+}
+
+// TestCopySourceDocsToWorkflow_FilesAreCopiesNotSymlinks verifies that the
+// copied files are true copies — modifying the original does not affect the
+// workflow copy.
+func TestCopySourceDocsToWorkflow_FilesAreCopiesNotSymlinks(t *testing.T) {
+	dir := t.TempDir()
+
+	globalDir := filepath.Join(dir, "source-docs")
+	os.MkdirAll(globalDir, 0o755)
+	origPath := filepath.Join(globalDir, "doc.md")
+	os.WriteFile(origPath, []byte("original"), 0o644)
+
+	newPaths, err := copySourceDocsToWorkflow(dir, "gamma", []string{origPath})
+	if err != nil {
+		t.Fatalf("copySourceDocsToWorkflow: %v", err)
+	}
+
+	// Modify the original file.
+	os.WriteFile(origPath, []byte("modified"), 0o644)
+
+	// The workflow copy should still have the original content.
+	copiedContent, err := os.ReadFile(newPaths[0])
+	if err != nil {
+		t.Fatalf("read copied file: %v", err)
+	}
+	if string(copiedContent) != "original" {
+		t.Errorf("copied file was modified when original changed — got %q, want %q", string(copiedContent), "original")
+	}
+
+	// Verify it's not a symlink.
+	fi, err := os.Lstat(newPaths[0])
+	if err != nil {
+		t.Fatalf("lstat: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Error("copied file is a symlink, expected a regular file")
+	}
+}
+
+// TestCopySourceDocsToWorkflow_PathTraversalRejected verifies that source
+// paths containing path traversal are rejected.
+func TestCopySourceDocsToWorkflow_PathTraversalRejected(t *testing.T) {
+	dir := t.TempDir()
+
+	globalDir := filepath.Join(dir, "source-docs")
+	os.MkdirAll(globalDir, 0o755)
+	os.WriteFile(filepath.Join(globalDir, "legit.md"), []byte("ok"), 0o644)
+
+	// Also create a file outside the source-docs directory.
+	os.WriteFile(filepath.Join(dir, "secret.env"), []byte("SECRET=123"), 0o644)
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"parent traversal", filepath.Join(globalDir, "..", "secret.env")},
+		{"absolute outside", filepath.Join(dir, "secret.env")},
+		{"different directory", "/etc/passwd"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := copySourceDocsToWorkflow(dir, "evil", []string{tt.path})
+			if err == nil {
+				t.Errorf("expected error for path traversal with %q, got nil", tt.path)
+			}
+			if err != nil && !strings.Contains(err.Error(), "outside the global source-docs directory") {
+				t.Errorf("unexpected error message: %v", err)
+			}
+		})
+	}
+}
+
+// TestCopySourceDocsToWorkflow_CreatesDirectory verifies that the target
+// directory is created on demand.
+func TestCopySourceDocsToWorkflow_CreatesDirectory(t *testing.T) {
+	dir := t.TempDir()
+
+	globalDir := filepath.Join(dir, "source-docs")
+	os.MkdirAll(globalDir, 0o755)
+	os.WriteFile(filepath.Join(globalDir, "doc.md"), []byte("hello"), 0o644)
+
+	// Verify specs/newfeature/source-docs doesn't exist yet.
+	targetDir := filepath.Join(dir, "specs", "newfeature", "source-docs")
+	if _, err := os.Stat(targetDir); !os.IsNotExist(err) {
+		t.Fatal("expected target dir to not exist before copy")
+	}
+
+	_, err := copySourceDocsToWorkflow(dir, "newfeature", []string{filepath.Join(globalDir, "doc.md")})
+	if err != nil {
+		t.Fatalf("copySourceDocsToWorkflow: %v", err)
+	}
+
+	// Directory should now exist.
+	if _, err := os.Stat(targetDir); os.IsNotExist(err) {
+		t.Error("expected target directory to be created")
+	}
+}
+
+// TestDiscoverWorkflowSourceDocs verifies that discoverWorkflowSourceDocs
+// returns files from the per-workflow source-docs directory.
+func TestDiscoverWorkflowSourceDocs(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create per-workflow source docs.
+	workflowDocsDir := filepath.Join(dir, "specs", "alpha", "source-docs")
+	os.MkdirAll(workflowDocsDir, 0o755)
+	os.WriteFile(filepath.Join(workflowDocsDir, "design.md"), []byte("# Design"), 0o644)
+	os.WriteFile(filepath.Join(workflowDocsDir, "reqs.txt"), []byte("req"), 0o644)
+
+	paths := discoverWorkflowSourceDocs(dir, "alpha")
+	if len(paths) != 2 {
+		t.Fatalf("expected 2 paths, got %d: %v", len(paths), paths)
+	}
+
+	// Should all be under the workflow directory.
+	for _, p := range paths {
+		if !strings.Contains(p, filepath.Join("specs", "alpha", "source-docs")) {
+			t.Errorf("path %q is not under workflow source-docs", p)
+		}
+	}
+}
+
+// TestDiscoverWorkflowSourceDocs_NoDir verifies that missing workflow
+// source-docs returns empty.
+func TestDiscoverWorkflowSourceDocs_NoDir(t *testing.T) {
+	paths := discoverWorkflowSourceDocs("/nonexistent", "alpha")
+	if len(paths) != 0 {
+		t.Errorf("expected 0 paths for missing dir, got %d", len(paths))
+	}
+}
+
+// TestStartWorkflow_CopiesSourceDocs verifies that HandleStartWorkflow copies
+// source docs from the global library to the per-workflow directory.
+func TestStartWorkflow_CopiesSourceDocs(t *testing.T) {
+	manager, dir := setupWorkflowManager(t)
+
+	// Create global source docs.
+	globalDir := filepath.Join(dir, "source-docs")
+	os.MkdirAll(globalDir, 0o755)
+	os.WriteFile(filepath.Join(globalDir, "design.md"), []byte("# Design"), 0o644)
+	os.WriteFile(filepath.Join(globalDir, "reqs.txt"), []byte("requirements"), 0o644)
+
+	handler := HandleStartWorkflow(manager)
+
+	// Start with specific source_doc_paths.
+	body := fmt.Sprintf(`{"title":"Test","feature_name":"doc-test","source_doc_paths":[%q]}`,
+		filepath.Join(globalDir, "design.md"))
+	req := httptest.NewRequest(http.MethodPost, "/api/workflow/start", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify the file was copied to specs/doc-test/source-docs/.
+	copiedPath := filepath.Join(dir, "specs", "doc-test", "source-docs", "design.md")
+	content, err := os.ReadFile(copiedPath)
+	if err != nil {
+		t.Fatalf("read copied file: %v", err)
+	}
+	if string(content) != "# Design" {
+		t.Errorf("copied content = %q, want %q", string(content), "# Design")
+	}
+
+	// reqs.txt should NOT be copied (we only specified design.md).
+	reqsPath := filepath.Join(dir, "specs", "doc-test", "source-docs", "reqs.txt")
+	if _, err := os.Stat(reqsPath); !os.IsNotExist(err) {
+		t.Error("expected reqs.txt to NOT be copied when only design.md specified")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestStartWorkflow_CopiesAllDocsWhenNoneSpecified verifies that starting a
+// workflow with no source_doc_paths copies all global docs.
+func TestStartWorkflow_CopiesAllDocsWhenNoneSpecified(t *testing.T) {
+	manager, dir := setupWorkflowManager(t)
+
+	// Create global source docs.
+	globalDir := filepath.Join(dir, "source-docs")
+	os.MkdirAll(globalDir, 0o755)
+	os.WriteFile(filepath.Join(globalDir, "a.md"), []byte("aaa"), 0o644)
+	os.WriteFile(filepath.Join(globalDir, "b.txt"), []byte("bbb"), 0o644)
+
+	handler := HandleStartWorkflow(manager)
+
+	body := `{"title":"All Docs","feature_name":"all-docs-test"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflow/start", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Both files should be copied.
+	workflowDocsDir := filepath.Join(dir, "specs", "all-docs-test", "source-docs")
+	for _, name := range []string{"a.md", "b.txt"} {
+		path := filepath.Join(workflowDocsDir, name)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			t.Errorf("expected %s to be copied to workflow source-docs", name)
+		}
+	}
+
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestStartWorkflow_PathTraversalInSourceDocPaths verifies that path traversal
+// in source_doc_paths is rejected at the HTTP level.
+func TestStartWorkflow_PathTraversalInSourceDocPaths(t *testing.T) {
+	manager, dir := setupWorkflowManager(t)
+
+	// Create global source-docs dir (empty is fine, the traversal is the point).
+	os.MkdirAll(filepath.Join(dir, "source-docs"), 0o755)
+
+	handler := HandleStartWorkflow(manager)
+
+	body := `{"title":"Evil","feature_name":"evil-test","source_doc_paths":["/etc/passwd"]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflow/start", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for path traversal, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestCancelWorkflowAPI_NonexistentFeature_Returns404 verifies that
 // POST /api/workflow/cancel with a non-existent feature_name returns 404.
 func TestCancelWorkflowAPI_NonexistentFeature_Returns404(t *testing.T) {

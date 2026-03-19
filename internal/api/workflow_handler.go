@@ -7,6 +7,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -304,7 +305,8 @@ func (m *WorkflowManager) ResumeFromGate(featureName string) (*specworkflow.Orch
 
 	// Create orchestrator — it will restore the persisted state from disk.
 	// Wrap the shared emitter so events carry this workflow's feature name.
-	sourcePaths := discoverSourceDocs(m.workspaceDir)
+	// Use per-workflow source docs for isolation.
+	sourcePaths := discoverWorkflowSourceDocs(m.workspaceDir, featureName)
 	orchConfig := specworkflow.OrchestratorConfig{
 		WorkspaceDir:   m.workspaceDir,
 		FeatureName:    featureName,
@@ -434,9 +436,22 @@ func HandleStartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 		}
 
 		// Resolve source doc paths — if none provided, scan source-docs directory.
-		sourcePaths := req.SourceDocPaths
-		if len(sourcePaths) == 0 {
-			sourcePaths = discoverSourceDocs(manager.workspaceDir)
+		// These are paths in the global library that will be copied below.
+		globalPaths := req.SourceDocPaths
+		if len(globalPaths) == 0 {
+			globalPaths = discoverSourceDocs(manager.workspaceDir)
+		}
+
+		// Copy source docs into the per-workflow directory for isolation.
+		var sourcePaths []string
+		if len(globalPaths) > 0 {
+			copied, copyErr := copySourceDocsToWorkflow(manager.workspaceDir, req.FeatureName, globalPaths)
+			if copyErr != nil {
+				manager.mu.Unlock()
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("failed to copy source docs: %v", copyErr))
+				return
+			}
+			sourcePaths = copied
 		}
 
 		// Create orchestrator config.
@@ -1064,17 +1079,8 @@ func HandleResumeWorkflow(manager *WorkflowManager) http.HandlerFunc {
 
 		log.Printf("[workflow] resuming %q from %s (was %s, started_at reset)", req.FeatureName, resumeState, state.State)
 
-		// Create and start a new orchestrator.
-		sourcePaths := discoverSourceDocs(manager.workspaceDir)
-		// Also check per-workflow source docs.
-		featureSourceDir := filepath.Join(specDir, "source-docs")
-		if entries, err := os.ReadDir(featureSourceDir); err == nil {
-			for _, e := range entries {
-				if !e.IsDir() {
-					sourcePaths = append(sourcePaths, filepath.Join(featureSourceDir, e.Name()))
-				}
-			}
-		}
+		// Create and start a new orchestrator using per-workflow source docs.
+		sourcePaths := discoverWorkflowSourceDocs(manager.workspaceDir, req.FeatureName)
 
 		// Wrap the shared emitter so events carry this workflow's feature name.
 		orchConfig := specworkflow.OrchestratorConfig{
@@ -1656,8 +1662,9 @@ func sanitizeFeatureName(title string) string {
 	return result
 }
 
-// discoverSourceDocs scans the workspace's source-docs directory and returns
-// absolute paths to all files found there.
+// discoverSourceDocs scans the workspace's global source-docs directory and
+// returns absolute paths to all files found there. This is used only as the
+// source library for copying into per-workflow directories.
 func discoverSourceDocs(workspaceDir string) []string {
 	docsDir := filepath.Join(workspaceDir, "source-docs")
 	entries, err := os.ReadDir(docsDir)
@@ -1673,6 +1680,95 @@ func discoverSourceDocs(workspaceDir string) []string {
 		paths = append(paths, filepath.Join(docsDir, e.Name()))
 	}
 	return paths
+}
+
+// discoverWorkflowSourceDocs scans the per-workflow source-docs directory
+// (specs/{feature}/source-docs/) and returns absolute paths to all files.
+// This is the authoritative source of documents for a running workflow.
+func discoverWorkflowSourceDocs(workspaceDir, featureName string) []string {
+	docsDir := filepath.Join(workspaceDir, "specs", featureName, "source-docs")
+	entries, err := os.ReadDir(docsDir)
+	if err != nil {
+		return nil
+	}
+
+	var paths []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		paths = append(paths, filepath.Join(docsDir, e.Name()))
+	}
+	return paths
+}
+
+// copySourceDocsToWorkflow copies source documents from the global
+// source-docs library into the per-workflow directory at
+// specs/{feature}/source-docs/. It creates the target directory on demand.
+//
+// sourcePaths must be absolute paths to files in the global source-docs
+// directory. Path traversal in source paths is rejected.
+//
+// Returns the new paths (under specs/{feature}/source-docs/) or an error.
+func copySourceDocsToWorkflow(workspaceDir, featureName string, sourcePaths []string) ([]string, error) {
+	targetDir := filepath.Join(workspaceDir, "specs", featureName, "source-docs")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create workflow source-docs dir: %w", err)
+	}
+
+	// Resolve the canonical global source-docs directory for validation.
+	globalDocsDir := filepath.Join(workspaceDir, "source-docs")
+	absGlobalDir, err := filepath.Abs(globalDocsDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve global source-docs dir: %w", err)
+	}
+
+	var newPaths []string
+	for _, srcPath := range sourcePaths {
+		// Validate: reject path traversal.
+		absSrc, err := filepath.Abs(srcPath)
+		if err != nil {
+			return nil, fmt.Errorf("resolve source path %q: %w", srcPath, err)
+		}
+		if !strings.HasPrefix(absSrc, absGlobalDir+string(filepath.Separator)) {
+			return nil, fmt.Errorf("source path %q is outside the global source-docs directory", srcPath)
+		}
+
+		// Extract filename — reject any embedded path separators or traversals.
+		baseName := filepath.Base(absSrc)
+		if baseName == "." || baseName == ".." || baseName == "" {
+			return nil, fmt.Errorf("invalid source filename: %q", srcPath)
+		}
+
+		// Copy the file using io.Copy.
+		dstPath := filepath.Join(targetDir, baseName)
+		if err := copyFile(absSrc, dstPath); err != nil {
+			return nil, fmt.Errorf("copy %q to %q: %w", srcPath, dstPath, err)
+		}
+		newPaths = append(newPaths, dstPath)
+	}
+
+	return newPaths, nil
+}
+
+// copyFile copies a single file from src to dst using io.Copy.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Close()
 }
 
 // hasAnswerResolution checks if any resolution has the "answer" action.
