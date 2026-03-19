@@ -1419,13 +1419,17 @@ html, body {
 }
 
 .doc-picker-item label {
+  display: inline;
   flex: 1;
   cursor: pointer;
   font-size: 13px;
+  font-weight: 400;
+  margin-bottom: 0;
   text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--color-text);
 }
 
 .doc-picker-item input[type="checkbox"] {
