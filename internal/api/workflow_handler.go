@@ -529,7 +529,7 @@ func HandleGateApprove(manager *WorkflowManager) http.HandlerFunc {
 		// Extract feature name from URL: /api/tasks/{feature}/approve
 		featureName := extractFeatureFromTaskPath(r.URL.Path)
 
-		orch := manager.GetOrchestrator()
+		orch := manager.GetOrchestrator(featureName)
 		if orch == nil {
 			// No orchestrator running — try to resume from on-disk gate state.
 			orch = tryResumeFromDiskState(manager, w)
@@ -692,7 +692,10 @@ func HandleGateReject(manager *WorkflowManager) http.HandlerFunc {
 			return
 		}
 
-		orch := manager.GetOrchestrator()
+		// Extract feature name from URL: /api/tasks/{feature}/reject
+		featureName := extractFeatureFromTaskPath(r.URL.Path)
+
+		orch := manager.GetOrchestrator(featureName)
 		if orch == nil {
 			// No orchestrator running — try to resume from on-disk gate state.
 			orch = tryResumeFromDiskState(manager, w)
@@ -1068,6 +1071,7 @@ func HandleResumeWorkflow(manager *WorkflowManager) http.HandlerFunc {
 
 		// Determine the best state to resume from based on artefacts on disk.
 		resumeState := determineResumeState(state, manager.workspaceDir, req.FeatureName)
+		previousState := state.State
 
 		// Update the persisted state: reset timer, set resumable state.
 		state.State = resumeState
@@ -1077,7 +1081,7 @@ func HandleResumeWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("[workflow] resuming %q from %s (was %s, started_at reset)", req.FeatureName, resumeState, state.State)
+		log.Printf("[workflow] resuming %q from %s (was %s, started_at reset)", req.FeatureName, resumeState, previousState)
 
 		// Create and start a new orchestrator using per-workflow source docs.
 		sourcePaths := discoverWorkflowSourceDocs(manager.workspaceDir, req.FeatureName)
