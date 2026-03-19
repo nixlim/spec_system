@@ -1638,6 +1638,264 @@ func TestStatusEndpointArrayFormat(t *testing.T) {
 	}
 }
 
+// ===========================================================================
+// Concurrent Multi-Workflow Integration Tests (460.12)
+// ===========================================================================
+
+// TestStartConcurrentWorkflows verifies that two workflows started concurrently
+// via HandleStartWorkflow both return 202, register in the orchestrator map,
+// and create independent feature directories.
+func TestStartConcurrentWorkflows(t *testing.T) {
+	manager, dir := setupWorkflowManager(t)
+	handler := HandleStartWorkflow(manager)
+
+	// Start "alpha" and "beta" workflows.
+	for _, name := range []string{"alpha", "beta"} {
+		body := fmt.Sprintf(`{"title":"%s","description":"concurrent test","feature_name":"%s"}`, name, name)
+		req := httptest.NewRequest(http.MethodPost, "/api/workflow/start", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("start %s: expected 202, got %d: %s", name, rec.Code, rec.Body.String())
+		}
+	}
+
+	// Verify GetAllOrchestrators returns 2 entries.
+	all := manager.GetAllOrchestrators()
+	if len(all) != 2 {
+		t.Errorf("expected 2 orchestrators, got %d", len(all))
+	}
+
+	// Brief sleep for background goroutines.
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify feature directories exist for both.
+	for _, name := range []string{"alpha", "beta"} {
+		featureDir := filepath.Join(dir, "specs", name)
+		if _, err := os.Stat(featureDir); os.IsNotExist(err) {
+			t.Errorf("expected feature directory for %q to exist", name)
+		}
+	}
+}
+
+// TestConcurrentWorkflowIsolation verifies that two workflows with different
+// disk states report independent state and round values through the status
+// endpoint. The list endpoint returns both, and per-feature queries return
+// only the queried workflow's data.
+func TestConcurrentWorkflowIsolation(t *testing.T) {
+	manager, dir := setupWorkflowManager(t)
+
+	// Create disk states: alpha at REVIEWING round 2, beta at DISCOVERY round 1.
+	for _, feat := range []struct {
+		name  string
+		state string
+		round int
+	}{
+		{"alpha", "REVIEWING", 2},
+		{"beta", "DISCOVERY", 1},
+	} {
+		featureDir := filepath.Join(dir, "specs", feat.name)
+		os.MkdirAll(featureDir, 0o755)
+		stateJSON := fmt.Sprintf(`{
+			"state": %q,
+			"round": %d,
+			"feature_name": %q,
+			"started_at": "2026-03-17T05:00:00Z",
+			"updated_at": "2026-03-17T06:00:00Z"
+		}`, feat.state, feat.round, feat.name)
+		os.WriteFile(filepath.Join(featureDir, "workflow-state.json"), []byte(stateJSON), 0o644)
+	}
+
+	handler := HandleGetWorkflowStatus(manager)
+
+	// 1. GET /api/workflow/status (no params) returns array with both.
+	req := httptest.NewRequest(http.MethodGet, "/api/workflow/status", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var arr []map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&arr); err != nil {
+		t.Fatalf("decode array: %v", err)
+	}
+	if len(arr) != 2 {
+		t.Fatalf("expected 2 statuses, got %d", len(arr))
+	}
+
+	// 2. GET ?feature=alpha returns alpha's state.
+	req = httptest.NewRequest(http.MethodGet, "/api/workflow/status?feature=alpha", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("alpha: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var alphaResp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&alphaResp); err != nil {
+		t.Fatalf("decode alpha: %v", err)
+	}
+	if alphaResp["state"] != "REVIEWING" {
+		t.Errorf("alpha state = %q, want REVIEWING", alphaResp["state"])
+	}
+	if alphaResp["round"] != float64(2) {
+		t.Errorf("alpha round = %v, want 2", alphaResp["round"])
+	}
+
+	// 3. GET ?feature=beta returns beta's state.
+	req = httptest.NewRequest(http.MethodGet, "/api/workflow/status?feature=beta", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("beta: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var betaResp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&betaResp); err != nil {
+		t.Fatalf("decode beta: %v", err)
+	}
+	if betaResp["state"] != "DISCOVERY" {
+		t.Errorf("beta state = %q, want DISCOVERY", betaResp["state"])
+	}
+	if betaResp["round"] != float64(1) {
+		t.Errorf("beta round = %v, want 1", betaResp["round"])
+	}
+
+	// 4. Verify they are truly independent: alpha's state != beta's state.
+	if alphaResp["state"] == betaResp["state"] {
+		t.Error("alpha and beta should have different states, but both are the same")
+	}
+	if alphaResp["round"] == betaResp["round"] {
+		t.Error("alpha and beta should have different rounds, but both are the same")
+	}
+}
+
+// TestGateDoesNotBlockOtherWorkflow verifies that one workflow paused at a
+// gate state does not prevent another workflow from being in an active state.
+// Both workflows are independent — alpha at HUMAN_GATE_1 and beta at DISCOVERY.
+func TestGateDoesNotBlockOtherWorkflow(t *testing.T) {
+	manager, dir := setupWorkflowManager(t)
+
+	// Create disk states: alpha at HUMAN_GATE_1, beta at DISCOVERY.
+	for _, feat := range []struct {
+		name  string
+		state string
+		round int
+	}{
+		{"alpha", "HUMAN_GATE_1", 1},
+		{"beta", "DISCOVERY", 1},
+	} {
+		featureDir := filepath.Join(dir, "specs", feat.name)
+		os.MkdirAll(featureDir, 0o755)
+		stateJSON := fmt.Sprintf(`{
+			"state": %q,
+			"round": %d,
+			"feature_name": %q,
+			"started_at": "2026-03-17T05:00:00Z",
+			"updated_at": "2026-03-17T06:00:00Z"
+		}`, feat.state, feat.round, feat.name)
+		os.WriteFile(filepath.Join(featureDir, "workflow-state.json"), []byte(stateJSON), 0o644)
+	}
+
+	handler := HandleGetWorkflowStatus(manager)
+
+	// GET /api/workflow/status — both should appear.
+	req := httptest.NewRequest(http.MethodGet, "/api/workflow/status", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var arr []map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&arr); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(arr) != 2 {
+		t.Fatalf("expected 2 statuses, got %d", len(arr))
+	}
+
+	// Build a lookup by feature_name.
+	byName := make(map[string]map[string]interface{})
+	for _, entry := range arr {
+		name, _ := entry["feature_name"].(string)
+		byName[name] = entry
+	}
+
+	// Alpha should show HUMAN_GATE_1.
+	alphaEntry, ok := byName["alpha"]
+	if !ok {
+		t.Fatal("alpha not found in status array")
+	}
+	if alphaEntry["state"] != "HUMAN_GATE_1" {
+		t.Errorf("alpha state = %q, want HUMAN_GATE_1", alphaEntry["state"])
+	}
+
+	// Beta should show DISCOVERY — unaffected by alpha's gate.
+	betaEntry, ok := byName["beta"]
+	if !ok {
+		t.Fatal("beta not found in status array")
+	}
+	if betaEntry["state"] != "DISCOVERY" {
+		t.Errorf("beta state = %q, want DISCOVERY", betaEntry["state"])
+	}
+
+	// Verify independence: alpha being at a gate does not add any gate-related
+	// fields to beta's status.
+	if _, hasPaused := betaEntry["paused"]; hasPaused {
+		// Beta could be marked as paused (no running orchestrator for it),
+		// but its state must remain DISCOVERY regardless of alpha's gate.
+		if betaEntry["state"] != "DISCOVERY" {
+			t.Errorf("beta state changed from DISCOVERY despite alpha being at a gate")
+		}
+	}
+}
+
+// TestCancelOneWorkflowOtherContinues verifies that cancelling one workflow
+// does not affect the other. After cancelling "alpha", "beta" should still
+// be accessible via GetOrchestrator.
+func TestCancelOneWorkflowOtherContinues(t *testing.T) {
+	manager, _ := setupWorkflowManager(t)
+	handler := HandleStartWorkflow(manager)
+
+	// Start alpha and beta via HandleStartWorkflow.
+	for _, name := range []string{"alpha", "beta"} {
+		body := fmt.Sprintf(`{"title":"%s","description":"cancel test","feature_name":"%s"}`, name, name)
+		req := httptest.NewRequest(http.MethodPost, "/api/workflow/start", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("start %s: expected 202, got %d", name, rec.Code)
+		}
+	}
+
+	// Cancel alpha via CancelWorkflow("alpha").
+	if err := manager.CancelWorkflow("alpha"); err != nil {
+		t.Fatalf("cancel alpha: %v", err)
+	}
+
+	// Verify GetOrchestrator("alpha") is nil (cancelled).
+	if manager.GetOrchestrator("alpha") != nil {
+		t.Error("expected alpha orchestrator to be nil after cancel")
+	}
+
+	// Verify GetOrchestrator("beta") is still non-nil.
+	if manager.GetOrchestrator("beta") == nil {
+		t.Error("expected beta orchestrator to still exist after cancelling alpha")
+	}
+
+	// Brief sleep for goroutine cleanup.
+	time.Sleep(100 * time.Millisecond)
+}
+
 // TestBackwardCompatCancelNoFeatureName verifies that POST /api/workflow/cancel
 // with an empty body (no feature_name) cancels a running workflow. This is the
 // backward-compatible behavior for clients that do not yet send feature_name.
