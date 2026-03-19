@@ -37,6 +37,10 @@
   var gate1CorrectionCount = 0;
   var gate2AnswerDisabled = false;
 
+  // Notification badges for unselected workflows at gate states.
+  // Maps featureName -> true when a workflow needs operator attention.
+  var workflowBadges = {};
+
   // Workflow poller — periodically checks for state changes during active runs
   var workflowPoller = null;
 
@@ -357,7 +361,14 @@
       });
 
       // Feature name
-      item.appendChild(el("span", { className: "wsi-name", textContent: featureName }));
+      var nameSpan = el("span", { className: "wsi-name", textContent: featureName });
+
+      // Notification badge — red dot for unselected workflows needing attention
+      if (workflowBadges[featureName] && !isSelected) {
+        nameSpan.appendChild(el("span", { className: "wsi-notification-badge", title: "Needs attention" }));
+      }
+
+      item.appendChild(nameSpan);
 
       // State badge
       item.appendChild(el("span", {
@@ -405,6 +416,9 @@
   function selectWorkflow(featureName) {
     var previousFeature = selectedFeature;
     selectedFeature = featureName;
+
+    // Clear notification badge for the newly selected workflow.
+    delete workflowBadges[featureName];
 
     // Re-render the status list to update selection highlight
     renderWorkflowStatusList(allWorkflowStatuses);
@@ -1121,10 +1135,30 @@
     if (envelope.event === "state_transition") {
       // Always refresh the status list so all workflow badges stay current.
       refreshWorkflowStatusList();
+
+      // Set notification badge if transitioning to a gate state on an
+      // unselected workflow.
+      if (data.feature_name && data.feature_name !== selectedFeature) {
+        var toState = (data.to || "").toUpperCase();
+        if (toState === "HUMAN_GATE_1" || toState === "HUMAN_GATE_2" || toState === "HUMAN_GATE_FINAL") {
+          workflowBadges[data.feature_name] = true;
+          renderWorkflowStatusList(allWorkflowStatuses);
+        }
+      }
+
       if (eventMatchesSelectedFeature(data)) {
         onStateTransition(data);
       }
       return;
+    }
+
+    // gate_request: set notification badge for unselected workflows before
+    // the general filter drops the event.
+    if (envelope.event === "gate_request") {
+      if (data.feature_name && data.feature_name !== selectedFeature) {
+        workflowBadges[data.feature_name] = true;
+        renderWorkflowStatusList(allWorkflowStatuses);
+      }
     }
 
     // For all other events, only update UI panels if the event matches
