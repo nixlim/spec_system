@@ -235,6 +235,35 @@ func (s *MetricsStore) GetWorkflowMetrics(featureName string) (*WorkflowMetrics,
 	return &m, nil
 }
 
+// GetAllWorkflowMetrics returns the aggregate counters for all workflows
+// stored in the database. Used by RestoreFromStore to restore all per-workflow
+// accumulators after a server restart.
+func (s *MetricsStore) GetAllWorkflowMetrics() ([]WorkflowMetrics, error) {
+	const query = `
+	SELECT feature_name, input_tokens, output_tokens, cache_read_tokens,
+	       total_cost_usd, total_api_calls, started_at, updated_at
+	FROM workflow_metrics
+	`
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("get all workflow metrics: %w", err)
+	}
+	defer rows.Close()
+
+	var metrics []WorkflowMetrics
+	for rows.Next() {
+		var m WorkflowMetrics
+		if err := rows.Scan(
+			&m.FeatureName, &m.InputTokens, &m.OutputTokens, &m.CacheReadTokens,
+			&m.TotalCostUSD, &m.TotalAPICalls, &m.StartedAt, &m.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan workflow metrics: %w", err)
+		}
+		metrics = append(metrics, m)
+	}
+	return metrics, rows.Err()
+}
+
 // GetCurrentCostUSD returns the persisted cumulative cost for the given
 // feature. Returns 0 if no metrics exist.
 func (s *MetricsStore) GetCurrentCostUSD(featureName string) float64 {

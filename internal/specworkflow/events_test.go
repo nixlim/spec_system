@@ -632,6 +632,120 @@ func TestChannelEmitter_SetFeatureName(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// FeatureEmitter tests
+// ---------------------------------------------------------------------------
+
+func TestFeatureEmitterSetsFeatureName(t *testing.T) {
+	inner := NewChannelEmitter(8)
+	defer inner.Close()
+
+	fe := NewFeatureEmitter(inner, "alpha")
+
+	// Emit an event without a FeatureName — FeatureEmitter should set it.
+	ev := NewAgentDispatchEvent("discovery", 1)
+	if ev.FeatureName != "" {
+		t.Fatalf("precondition: event already has FeatureName %q", ev.FeatureName)
+	}
+
+	if err := fe.Emit(ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	select {
+	case got := <-inner.Events():
+		if got.FeatureName != "alpha" {
+			t.Errorf("FeatureName = %q, want %q", got.FeatureName, "alpha")
+		}
+		if got.Event != EventAgentDispatch {
+			t.Errorf("Event = %q, want %q", got.Event, EventAgentDispatch)
+		}
+	default:
+		t.Fatal("expected event on channel, got none")
+	}
+}
+
+func TestFeatureEmitterPreservesExisting(t *testing.T) {
+	inner := NewChannelEmitter(8)
+	defer inner.Close()
+
+	fe := NewFeatureEmitter(inner, "alpha")
+
+	// Emit an event that already carries a FeatureName — should NOT overwrite.
+	ev := EventEnvelope{
+		Event:       EventStateTransition,
+		FeatureName: "beta",
+		Data: StateTransitionEvent{
+			From: "INIT", To: "DISCOVERY", Round: 1, Timestamp: "2026-01-01T00:00:00Z",
+		},
+	}
+
+	if err := fe.Emit(ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	select {
+	case got := <-inner.Events():
+		if got.FeatureName != "beta" {
+			t.Errorf("FeatureName = %q, want %q (should preserve explicit value)", got.FeatureName, "beta")
+		}
+	default:
+		t.Fatal("expected event on channel, got none")
+	}
+}
+
+func TestFeatureEmitterDelegatesErrors(t *testing.T) {
+	// Use a buffer of 1 so the second emit returns ErrChannelFull.
+	inner := NewChannelEmitter(1)
+	defer inner.Close()
+
+	fe := NewFeatureEmitter(inner, "gamma")
+
+	// Fill the buffer.
+	if err := fe.Emit(NewAgentErrorEvent("a", "timeout", 0, 3)); err != nil {
+		t.Fatalf("first Emit: %v", err)
+	}
+
+	// Second emit should propagate the error from the inner emitter.
+	err := fe.Emit(NewAgentErrorEvent("b", "timeout", 1, 3))
+	if err != ErrChannelFull {
+		t.Errorf("got %v, want ErrChannelFull", err)
+	}
+}
+
+func TestFeatureEmitterMultipleWorkflows(t *testing.T) {
+	// Simulate two workflows sharing one ChannelEmitter.
+	shared := NewChannelEmitter(16)
+	defer shared.Close()
+
+	feAlpha := NewFeatureEmitter(shared, "alpha")
+	feBeta := NewFeatureEmitter(shared, "beta")
+
+	// Emit from both.
+	if err := feAlpha.Emit(NewAgentDispatchEvent("discovery", 1)); err != nil {
+		t.Fatalf("alpha Emit: %v", err)
+	}
+	if err := feBeta.Emit(NewAgentDispatchEvent("drafter", 1)); err != nil {
+		t.Fatalf("beta Emit: %v", err)
+	}
+
+	// Both events should arrive on the shared channel with correct feature names.
+	got1 := <-shared.Events()
+	got2 := <-shared.Events()
+
+	if got1.FeatureName != "alpha" {
+		t.Errorf("first event FeatureName = %q, want %q", got1.FeatureName, "alpha")
+	}
+	if got2.FeatureName != "beta" {
+		t.Errorf("second event FeatureName = %q, want %q", got2.FeatureName, "beta")
+	}
+}
+
+func TestFeatureEmitter_ImplementsEventEmitter(t *testing.T) {
+	// Compile-time interface check.
+	var _ EventEmitter = (*FeatureEmitter)(nil)
+}
+
 func TestEventEnvelopeJSONOmitsEmptyFeatureName(t *testing.T) {
 	env := EventEnvelope{
 		Event: EventCircuitBreaker,

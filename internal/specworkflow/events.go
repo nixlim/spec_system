@@ -271,6 +271,36 @@ func (e *ChannelEmitter) Close() {
 }
 
 // ---------------------------------------------------------------------------
+// FeatureEmitter — per-workflow emitter decorator
+// ---------------------------------------------------------------------------
+
+// FeatureEmitter wraps an EventEmitter and sets FeatureName on all events
+// before delegating to the wrapped emitter. This allows multiple concurrent
+// workflows to share a single ChannelEmitter while tagging each event with
+// the correct feature name. If an event already carries a FeatureName, the
+// existing value is preserved.
+type FeatureEmitter struct {
+	inner       EventEmitter
+	featureName string
+}
+
+// NewFeatureEmitter creates a FeatureEmitter that decorates the given inner
+// emitter. All events emitted through this wrapper that lack a FeatureName
+// will have it set to featureName.
+func NewFeatureEmitter(inner EventEmitter, featureName string) *FeatureEmitter {
+	return &FeatureEmitter{inner: inner, featureName: featureName}
+}
+
+// Emit sets FeatureName on the event (if not already set) and delegates to
+// the wrapped emitter.
+func (e *FeatureEmitter) Emit(event EventEnvelope) error {
+	if event.FeatureName == "" {
+		event.FeatureName = e.featureName
+	}
+	return e.inner.Emit(event)
+}
+
+// ---------------------------------------------------------------------------
 // Helper constructors
 // ---------------------------------------------------------------------------
 

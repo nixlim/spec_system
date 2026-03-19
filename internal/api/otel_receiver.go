@@ -130,24 +130,55 @@ func (recv *OTELReceiver) SetMetricsStore(store *MetricsStore, featureNameFn fun
 // the in-memory accumulators so the OTEL receiver continues from where
 // it left off after a server restart. Call after SetMetricsStore and
 // before Start.
-func (recv *OTELReceiver) RestoreFromStore(featureName string) {
-	if recv.metricsStore == nil || featureName == "" {
+//
+// If one or more feature names are provided, only those workflows are
+// restored. If called with no arguments, ALL persisted workflows are
+// restored from SQLite.
+func (recv *OTELReceiver) RestoreFromStore(featureNames ...string) {
+	if recv.metricsStore == nil {
 		return
 	}
-	m, err := recv.metricsStore.GetWorkflowMetrics(featureName)
-	if err != nil || m == nil {
+
+	var rows []WorkflowMetrics
+
+	if len(featureNames) > 0 {
+		// Restore specific workflows.
+		for _, name := range featureNames {
+			if name == "" {
+				continue
+			}
+			m, err := recv.metricsStore.GetWorkflowMetrics(name)
+			if err != nil || m == nil {
+				continue
+			}
+			rows = append(rows, *m)
+		}
+	} else {
+		// Restore all workflows.
+		all, err := recv.metricsStore.GetAllWorkflowMetrics()
+		if err != nil {
+			log.Printf("[otel] failed to restore all workflow metrics: %v", err)
+			return
+		}
+		rows = all
+	}
+
+	if len(rows) == 0 {
 		return
 	}
+
 	recv.mu.Lock()
 	defer recv.mu.Unlock()
-	acc := recv.getOrCreateAccumulatorLocked(featureName)
-	acc.inputTokens = m.InputTokens
-	acc.outputTokens = m.OutputTokens
-	acc.cacheReadTokens = m.CacheReadTokens
-	acc.totalCostUSD = m.TotalCostUSD
-	acc.totalAPICalls = m.TotalAPICalls
-	log.Printf("[otel] restored metrics from store: feature=%s cost=$%.4f api_calls=%d",
-		featureName, m.TotalCostUSD, m.TotalAPICalls)
+	for _, m := range rows {
+		acc := recv.getOrCreateAccumulatorLocked(m.FeatureName)
+		acc.inputTokens = m.InputTokens
+		acc.outputTokens = m.OutputTokens
+		acc.cacheReadTokens = m.CacheReadTokens
+		acc.totalCostUSD = m.TotalCostUSD
+		acc.totalAPICalls = m.TotalAPICalls
+		log.Printf("[otel] restored metrics from store: feature=%s cost=$%.4f api_calls=%d",
+			m.FeatureName, m.TotalCostUSD, m.TotalAPICalls)
+	}
 }
 
 // getOrCreateAccumulatorLocked returns the accumulator for the given feature,
@@ -408,7 +439,8 @@ func (recv *OTELReceiver) processLogRecord(featureName string, lr *logspb.LogRec
 
 		// Broadcast individual tool event.
 		recv.hub.Broadcast(specworkflow.EventEnvelope{
-			Event: specworkflow.EventAgentToolEvent,
+			Event:       specworkflow.EventAgentToolEvent,
+			FeatureName: featureName,
 			Data: AgentToolPayload{
 				ToolName:   toolName,
 				Success:    success,
@@ -452,7 +484,8 @@ func (recv *OTELReceiver) processLogRecord(featureName string, lr *logspb.LogRec
 		recv.emitMetricsEvent(featureName)
 
 		recv.hub.Broadcast(specworkflow.EventEnvelope{
-			Event: specworkflow.EventAgentAPIEvent,
+			Event:       specworkflow.EventAgentAPIEvent,
+			FeatureName: featureName,
 			Data: AgentAPIPayload{
 				Model:      model,
 				CostUSD:    costUSD,
@@ -518,8 +551,9 @@ func (recv *OTELReceiver) emitMetricsEvent(featureName string) {
 	}
 
 	event := specworkflow.EventEnvelope{
-		Event: specworkflow.EventAgentMetrics,
-		Data:  payload,
+		Event:       specworkflow.EventAgentMetrics,
+		FeatureName: featureName,
+		Data:        payload,
 	}
 	recv.hub.Broadcast(event)
 

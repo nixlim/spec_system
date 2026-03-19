@@ -303,6 +303,7 @@ func (m *WorkflowManager) ResumeFromGate(featureName string) (*specworkflow.Orch
 	}
 
 	// Create orchestrator — it will restore the persisted state from disk.
+	// Wrap the shared emitter so events carry this workflow's feature name.
 	sourcePaths := discoverSourceDocs(m.workspaceDir)
 	orchConfig := specworkflow.OrchestratorConfig{
 		WorkspaceDir:   m.workspaceDir,
@@ -310,7 +311,7 @@ func (m *WorkflowManager) ResumeFromGate(featureName string) (*specworkflow.Orch
 		SourceDocPaths: sourcePaths,
 		Config:         m.config,
 		Runner:         specworkflow.DefaultClaudeRunner(m.workspaceDir, m.otelPort, featureName),
-		Emitter:        m.emitter,
+		Emitter:        specworkflow.NewFeatureEmitter(m.emitter, featureName),
 	}
 	// Wire cost provider if metrics store is available.
 	if m.metricsStore != nil {
@@ -439,13 +440,16 @@ func HandleStartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 		}
 
 		// Create orchestrator config.
+		// Wrap the shared emitter so events from this workflow carry its
+		// feature name — enabling client-side filtering when multiple
+		// workflows run concurrently.
 		orchConfig := specworkflow.OrchestratorConfig{
 			WorkspaceDir:   manager.workspaceDir,
 			FeatureName:    req.FeatureName,
 			SourceDocPaths: sourcePaths,
 			Config:         manager.config,
 			Runner:         specworkflow.DefaultClaudeRunner(manager.workspaceDir, manager.otelPort, req.FeatureName),
-			Emitter:        manager.emitter,
+			Emitter:        specworkflow.NewFeatureEmitter(manager.emitter, req.FeatureName),
 		}
 
 		// Wire cost provider if metrics store is available.
@@ -725,7 +729,13 @@ func HandleCancelWorkflowAPI(manager *WorkflowManager) http.HandlerFunc {
 			err = manager.CancelWorkflow()
 		}
 		if err != nil {
-			writeError(w, http.StatusConflict, fmt.Sprintf("cancel failed: %v", err))
+			// If a specific feature was requested and not found, return 404.
+			// Otherwise (no feature specified, nothing running) return 409.
+			if req.FeatureName != "" {
+				writeError(w, http.StatusNotFound, fmt.Sprintf("cancel failed: %v", err))
+			} else {
+				writeError(w, http.StatusConflict, fmt.Sprintf("cancel failed: %v", err))
+			}
 			return
 		}
 
@@ -751,8 +761,13 @@ func (m *WorkflowManager) bestCostUSD(stateCost float64, featureName string) flo
 }
 
 // HandleGetWorkflowStatus returns an HTTP handler for GET /api/workflow/status.
-// It returns the current workflow state as a JSON object with a human-readable
-// message describing what the workflow is doing.
+//
+// Behavior varies by query parameter:
+//   - GET /api/workflow/status (no params) → JSON array of ALL workflow statuses
+//   - GET /api/workflow/status?feature=alpha → single JSON object for alpha, or 404
+//
+// Each status object contains: feature_name, state, round, cost_usd,
+// wall_clock_seconds, agent_invocations, message.
 func HandleGetWorkflowStatus(manager *WorkflowManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -760,71 +775,113 @@ func HandleGetWorkflowStatus(manager *WorkflowManager) http.HandlerFunc {
 			return
 		}
 
-		orch := manager.GetOrchestrator()
-		if orch == nil {
-			// No orchestrator running — check for on-disk workflow state
-			// so that gate states survive server restarts.
-			diskState := findLatestDiskState(manager.workspaceDir)
-			if diskState != nil && !isTerminalWorkflowState(diskState.State) {
-				// Compute wall clock dynamically from StartedAt.
-				var wallClockSec float64
-				if startTime, parseErr := time.Parse(time.RFC3339, diskState.StartedAt); parseErr == nil {
-					wallClockSec = time.Since(startTime).Seconds()
-				}
+		featureParam := r.URL.Query().Get("feature")
 
-				// Best cost from all sources (state, OTEL in-memory, SQLite).
-				costUSD := manager.bestCostUSD(diskState.CumulativeCostUSD, diskState.FeatureName)
-
-				writeJSON(w, http.StatusOK, map[string]interface{}{
-					"state":              diskState.State.String(),
-					"round":              diskState.Round,
-					"feature_name":       diskState.FeatureName,
-					"cost_usd":           costUSD,
-					"wall_clock_seconds": wallClockSec,
-					"agent_invocations":  diskState.AgentInvocations,
-					"message":            StatusMessage(diskState.State, diskState.Round) + " (server restarted — workflow paused)",
-					"paused":             true,
-				})
-				return
-			}
-			writeJSON(w, http.StatusOK, map[string]interface{}{
-				"state":   "idle",
-				"message": "No workflow running",
-			})
+		if featureParam != "" {
+			// Single-feature query.
+			handleSingleWorkflowStatus(w, manager, featureParam)
 			return
 		}
 
-		// Check state even if the goroutine hasn't set running=true yet,
-		// to avoid a race where the UI polls before RunWorkflow enters its loop.
-		state := orch.State()
-		if state == nil || (!orch.IsRunning() && isTerminalWorkflowState(state.State)) {
-			writeJSON(w, http.StatusOK, map[string]interface{}{
-				"state":   "idle",
-				"message": "No workflow running",
-			})
-			return
-		}
-
-		// Compute wall clock dynamically from StartedAt so the HTTP
-		// endpoint returns real elapsed time (not the stale struct field).
-		var wallClockSec float64
-		if startTime, parseErr := time.Parse(time.RFC3339, state.StartedAt); parseErr == nil {
-			wallClockSec = time.Since(startTime).Seconds()
-		}
-
-		// Best cost from all sources (state, OTEL in-memory, SQLite).
-		costUSD := manager.bestCostUSD(state.CumulativeCostUSD, state.FeatureName)
-
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"state":              state.State.String(),
-			"round":              state.Round,
-			"feature_name":       state.FeatureName,
-			"cost_usd":           costUSD,
-			"wall_clock_seconds": wallClockSec,
-			"agent_invocations":  state.AgentInvocations,
-			"message":            StatusMessage(state.State, state.Round),
-		})
+		// No feature param — return array of all workflow statuses.
+		handleAllWorkflowStatuses(w, manager)
 	}
+}
+
+// handleSingleWorkflowStatus returns a single JSON status object for the
+// requested feature, or 404 if it doesn't exist.
+func handleSingleWorkflowStatus(w http.ResponseWriter, manager *WorkflowManager, featureName string) {
+	// First check in-memory orchestrators.
+	orch := manager.GetOrchestrator(featureName)
+	if orch != nil {
+		state := orch.State()
+		if state != nil {
+			writeJSON(w, http.StatusOK, buildStatusObject(manager, state, false))
+			return
+		}
+	}
+
+	// Fall back to on-disk state.
+	specDir := filepath.Join(manager.workspaceDir, "specs", featureName)
+	diskState, err := specworkflow.LoadState(specDir)
+	if err != nil || diskState == nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("no workflow found for feature: %s", featureName))
+		return
+	}
+
+	// Determine if paused: non-terminal, no running orchestrator.
+	paused := !isTerminalWorkflowState(diskState.State) && !manager.IsFeatureRunning(featureName)
+	writeJSON(w, http.StatusOK, buildStatusObject(manager, diskState, paused))
+}
+
+// handleAllWorkflowStatuses returns a JSON array of status objects for every
+// known workflow, merging in-memory orchestrator state with on-disk state.
+func handleAllWorkflowStatuses(w http.ResponseWriter, manager *WorkflowManager) {
+	// Gather all known features from disk.
+	allStates := findAllDiskStates(manager.workspaceDir)
+	if allStates == nil {
+		allStates = make(map[string]*specworkflow.WorkflowStateJSON)
+	}
+
+	// Override with live orchestrator state where available.
+	for name, orch := range manager.GetAllOrchestrators() {
+		if orch == nil {
+			continue
+		}
+		if state := orch.State(); state != nil {
+			allStates[name] = state
+		}
+	}
+
+	// Build status objects and sort by feature name for stable output.
+	var names []string
+	for name := range allStates {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	result := make([]map[string]interface{}, 0, len(names))
+	for _, name := range names {
+		state := allStates[name]
+		paused := !isTerminalWorkflowState(state.State) && !manager.IsFeatureRunning(name)
+		obj := buildStatusObject(manager, state, paused)
+		result = append(result, obj)
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// buildStatusObject constructs the standard status response fields from a
+// workflow state. If paused is true, a "(server restarted — workflow paused)"
+// suffix is added to the message.
+func buildStatusObject(manager *WorkflowManager, state *specworkflow.WorkflowStateJSON, paused bool) map[string]interface{} {
+	// Compute wall clock dynamically from StartedAt.
+	var wallClockSec float64
+	if startTime, parseErr := time.Parse(time.RFC3339, state.StartedAt); parseErr == nil {
+		wallClockSec = time.Since(startTime).Seconds()
+	}
+
+	// Best cost from all sources (state, OTEL in-memory, SQLite).
+	costUSD := manager.bestCostUSD(state.CumulativeCostUSD, state.FeatureName)
+
+	msg := StatusMessage(state.State, state.Round)
+	if paused {
+		msg += " (server restarted — workflow paused)"
+	}
+
+	obj := map[string]interface{}{
+		"state":              state.State.String(),
+		"round":              state.Round,
+		"feature_name":       state.FeatureName,
+		"cost_usd":           costUSD,
+		"wall_clock_seconds": wallClockSec,
+		"agent_invocations":  state.AgentInvocations,
+		"message":            msg,
+	}
+	if paused {
+		obj["paused"] = true
+	}
+	return obj
 }
 
 // HandleGetMetrics returns an HTTP handler for GET /api/metrics.
@@ -1019,13 +1076,14 @@ func HandleResumeWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			}
 		}
 
+		// Wrap the shared emitter so events carry this workflow's feature name.
 		orchConfig := specworkflow.OrchestratorConfig{
 			WorkspaceDir:   manager.workspaceDir,
 			FeatureName:    req.FeatureName,
 			SourceDocPaths: sourcePaths,
 			Config:         manager.config,
 			Runner:         specworkflow.DefaultClaudeRunner(manager.workspaceDir, manager.otelPort, req.FeatureName),
-			Emitter:        manager.emitter,
+			Emitter:        specworkflow.NewFeatureEmitter(manager.emitter, req.FeatureName),
 		}
 		if manager.metricsStore != nil {
 			orchConfig.CostProvider = NewMetricsCostProvider(manager.metricsStore, req.FeatureName)
@@ -1680,4 +1738,32 @@ func findLatestDiskState(workspaceDir string) *specworkflow.WorkflowStateJSON {
 		}
 	}
 	return latest
+}
+
+// findAllDiskStates scans workspace/specs/ and returns all workflow states
+// found on disk, keyed by feature name. This is used by the status endpoint
+// to return a complete list of all known workflows.
+func findAllDiskStates(workspaceDir string) map[string]*specworkflow.WorkflowStateJSON {
+	specsDir := filepath.Join(workspaceDir, "specs")
+	entries, err := os.ReadDir(specsDir)
+	if err != nil {
+		return nil
+	}
+
+	result := make(map[string]*specworkflow.WorkflowStateJSON)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		state, err := specworkflow.LoadState(filepath.Join(specsDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		name := e.Name()
+		if state.FeatureName != "" {
+			name = state.FeatureName
+		}
+		result[name] = state
+	}
+	return result
 }

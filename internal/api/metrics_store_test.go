@@ -268,6 +268,175 @@ func TestResetForFeature(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-workflow SQLite persistence
+// ---------------------------------------------------------------------------
+
+func TestPerWorkflowSQLitePersistence(t *testing.T) {
+	store := newTestStore(t)
+
+	// Upsert metrics for two independent workflows.
+	if err := store.UpsertWorkflowMetrics(WorkflowMetrics{
+		FeatureName:     "alpha",
+		InputTokens:     5000,
+		OutputTokens:    1000,
+		CacheReadTokens: 2000,
+		TotalCostUSD:    5.00,
+		TotalAPICalls:   25,
+		StartedAt:       "2025-06-01T00:00:00Z",
+		UpdatedAt:       "2025-06-01T00:05:00Z",
+	}); err != nil {
+		t.Fatalf("UpsertWorkflowMetrics(alpha): %v", err)
+	}
+
+	if err := store.UpsertWorkflowMetrics(WorkflowMetrics{
+		FeatureName:     "beta",
+		InputTokens:     3000,
+		OutputTokens:    600,
+		CacheReadTokens: 1000,
+		TotalCostUSD:    3.00,
+		TotalAPICalls:   15,
+		StartedAt:       "2025-06-01T00:10:00Z",
+		UpdatedAt:       "2025-06-01T00:15:00Z",
+	}); err != nil {
+		t.Fatalf("UpsertWorkflowMetrics(beta): %v", err)
+	}
+
+	// Verify alpha independently.
+	alpha, err := store.GetWorkflowMetrics("alpha")
+	if err != nil {
+		t.Fatalf("GetWorkflowMetrics(alpha): %v", err)
+	}
+	if alpha == nil {
+		t.Fatal("expected alpha metrics, got nil")
+	}
+	if alpha.TotalCostUSD != 5.00 {
+		t.Errorf("alpha cost: got %f, want 5.00", alpha.TotalCostUSD)
+	}
+	if alpha.InputTokens != 5000 {
+		t.Errorf("alpha input tokens: got %d, want 5000", alpha.InputTokens)
+	}
+	if alpha.TotalAPICalls != 25 {
+		t.Errorf("alpha api calls: got %d, want 25", alpha.TotalAPICalls)
+	}
+
+	// Verify beta independently.
+	beta, err := store.GetWorkflowMetrics("beta")
+	if err != nil {
+		t.Fatalf("GetWorkflowMetrics(beta): %v", err)
+	}
+	if beta == nil {
+		t.Fatal("expected beta metrics, got nil")
+	}
+	if beta.TotalCostUSD != 3.00 {
+		t.Errorf("beta cost: got %f, want 3.00", beta.TotalCostUSD)
+	}
+	if beta.InputTokens != 3000 {
+		t.Errorf("beta input tokens: got %d, want 3000", beta.InputTokens)
+	}
+	if beta.TotalAPICalls != 15 {
+		t.Errorf("beta api calls: got %d, want 15", beta.TotalAPICalls)
+	}
+
+	// Reset beta — alpha must survive.
+	if err := store.ResetForFeature("beta"); err != nil {
+		t.Fatalf("ResetForFeature(beta): %v", err)
+	}
+
+	betaAfter, _ := store.GetWorkflowMetrics("beta")
+	if betaAfter != nil {
+		t.Error("expected nil beta metrics after reset")
+	}
+
+	alphaAfter, _ := store.GetWorkflowMetrics("alpha")
+	if alphaAfter == nil {
+		t.Fatal("alpha should survive beta reset")
+	}
+	if alphaAfter.TotalCostUSD != 5.00 {
+		t.Errorf("alpha cost after beta reset: got %f, want 5.00", alphaAfter.TotalCostUSD)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GetAllWorkflowMetrics
+// ---------------------------------------------------------------------------
+
+func TestGetAllWorkflowMetrics(t *testing.T) {
+	store := newTestStore(t)
+
+	// Empty table returns empty slice.
+	all, err := store.GetAllWorkflowMetrics()
+	if err != nil {
+		t.Fatalf("GetAllWorkflowMetrics (empty): %v", err)
+	}
+	if len(all) != 0 {
+		t.Errorf("expected 0 rows, got %d", len(all))
+	}
+
+	// Insert two workflows.
+	if err := store.UpsertWorkflowMetrics(WorkflowMetrics{
+		FeatureName:     "alpha",
+		InputTokens:     5000,
+		OutputTokens:    1000,
+		CacheReadTokens: 2000,
+		TotalCostUSD:    5.00,
+		TotalAPICalls:   25,
+		StartedAt:       "2025-06-01T00:00:00Z",
+		UpdatedAt:       "2025-06-01T00:05:00Z",
+	}); err != nil {
+		t.Fatalf("Upsert(alpha): %v", err)
+	}
+
+	if err := store.UpsertWorkflowMetrics(WorkflowMetrics{
+		FeatureName:     "beta",
+		InputTokens:     3000,
+		OutputTokens:    600,
+		CacheReadTokens: 1000,
+		TotalCostUSD:    3.00,
+		TotalAPICalls:   15,
+		StartedAt:       "2025-06-01T00:10:00Z",
+		UpdatedAt:       "2025-06-01T00:15:00Z",
+	}); err != nil {
+		t.Fatalf("Upsert(beta): %v", err)
+	}
+
+	all, err = store.GetAllWorkflowMetrics()
+	if err != nil {
+		t.Fatalf("GetAllWorkflowMetrics: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(all))
+	}
+
+	// Build a lookup map for order-independent assertions.
+	byName := make(map[string]WorkflowMetrics)
+	for _, m := range all {
+		byName[m.FeatureName] = m
+	}
+
+	alphaM, ok := byName["alpha"]
+	if !ok {
+		t.Fatal("alpha not found in GetAllWorkflowMetrics result")
+	}
+	if alphaM.TotalCostUSD != 5.00 {
+		t.Errorf("alpha cost: got %f, want 5.00", alphaM.TotalCostUSD)
+	}
+	if alphaM.InputTokens != 5000 {
+		t.Errorf("alpha input tokens: got %d, want 5000", alphaM.InputTokens)
+	}
+
+	betaM, ok := byName["beta"]
+	if !ok {
+		t.Fatal("beta not found in GetAllWorkflowMetrics result")
+	}
+	if betaM.TotalCostUSD != 3.00 {
+		t.Errorf("beta cost: got %f, want 3.00", betaM.TotalCostUSD)
+	}
+	if betaM.InputTokens != 3000 {
+		t.Errorf("beta input tokens: got %d, want 3000", betaM.InputTokens)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Database file creation
 // ---------------------------------------------------------------------------
 
