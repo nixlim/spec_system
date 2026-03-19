@@ -1176,3 +1176,213 @@ func TestCancelWorkflowAPI_NonexistentFeature_Returns404(t *testing.T) {
 		t.Errorf("expected 404 for non-existent feature, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// ===========================================================================
+// Regression Tests: Single-Workflow Backward Compatibility (460.9)
+// ===========================================================================
+
+// TestSingleWorkflowStillWorks verifies that the existing single-workflow
+// path continues to work correctly after the multi-workflow refactor.
+// It starts a single workflow via HandleStartWorkflow, checks the 202
+// response, then verifies that GetOrchestrator() (no feature name) and
+// GetState() return correct values for backward compatibility.
+func TestSingleWorkflowStillWorks(t *testing.T) {
+	manager, _ := setupWorkflowManager(t)
+	handler := HandleStartWorkflow(manager)
+
+	// Start a single workflow.
+	body := `{"title":"Single Feature","description":"regression test","feature_name":"single-compat"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflow/start", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	// 1. Verify 202 Accepted.
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["feature_name"] != "single-compat" {
+		t.Errorf("feature_name = %q, want single-compat", resp["feature_name"])
+	}
+	if resp["status"] != "started" {
+		t.Errorf("status = %q, want started", resp["status"])
+	}
+
+	// 2. GetOrchestrator() with no feature name (backward compat) returns non-nil.
+	orch := manager.GetOrchestrator()
+	if orch == nil {
+		t.Fatal("GetOrchestrator() with no feature name returned nil; expected non-nil for single workflow")
+	}
+
+	// 3. GetOrchestrator("single-compat") also returns the same orchestrator.
+	orchByName := manager.GetOrchestrator("single-compat")
+	if orchByName == nil {
+		t.Fatal("GetOrchestrator(\"single-compat\") returned nil")
+	}
+	if orch != orchByName {
+		t.Error("GetOrchestrator() and GetOrchestrator(\"single-compat\") returned different orchestrators")
+	}
+
+	// 4. GetState() with no feature name returns state with correct feature name.
+	state := manager.GetState()
+	if state == nil {
+		t.Fatal("GetState() returned nil")
+	}
+	if state.FeatureName != "single-compat" {
+		t.Errorf("GetState().FeatureName = %q, want single-compat", state.FeatureName)
+	}
+
+	// 5. HasRunningWorkflow should be true while the orchestrator goroutine is alive.
+	// (The workflow will fail quickly since claude CLI isn't available, but
+	// the orchestrator is registered in the map.)
+	if manager.GetAllOrchestrators() == nil || len(manager.GetAllOrchestrators()) != 1 {
+		t.Errorf("expected exactly 1 orchestrator in map, got %d", len(manager.GetAllOrchestrators()))
+	}
+
+	// Wait for background goroutine to finish so TempDir cleanup succeeds.
+	time.Sleep(200 * time.Millisecond)
+}
+
+// TestStatusEndpointArrayFormat verifies that GET /api/workflow/status (no
+// params) returns a JSON array even when there is only one workflow. This
+// is the expected response format after the multi-workflow refactor — older
+// clients that expected an object must be updated. Each entry in the array
+// must contain all required status fields.
+func TestStatusEndpointArrayFormat(t *testing.T) {
+	manager, dir := setupWorkflowManager(t)
+
+	// Create a single workflow state on disk.
+	featureDir := filepath.Join(dir, "specs", "solo-feature")
+	os.MkdirAll(featureDir, 0o755)
+	stateJSON := `{
+		"state": "REVIEWING",
+		"round": 2,
+		"feature_name": "solo-feature",
+		"started_at": "2026-03-17T05:00:00Z",
+		"updated_at": "2026-03-17T06:00:00Z",
+		"cumulative_cost_usd": 0.42,
+		"agent_invocations": 7
+	}`
+	os.WriteFile(filepath.Join(featureDir, "workflow-state.json"), []byte(stateJSON), 0o644)
+
+	handler := HandleGetWorkflowStatus(manager)
+	req := httptest.NewRequest(http.MethodGet, "/api/workflow/status", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// The response body must be a JSON array, not a JSON object.
+	raw := rec.Body.Bytes()
+	if len(raw) == 0 {
+		t.Fatal("empty response body")
+	}
+	// First non-whitespace character must be '['.
+	for _, b := range raw {
+		if b == ' ' || b == '\t' || b == '\n' || b == '\r' {
+			continue
+		}
+		if b != '[' {
+			t.Fatalf("expected JSON array (first char '['), got %q", string(b))
+		}
+		break
+	}
+
+	var arr []map[string]interface{}
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		t.Fatalf("failed to decode as JSON array: %v", err)
+	}
+
+	// Exactly one entry.
+	if len(arr) != 1 {
+		t.Fatalf("expected 1 entry in array, got %d", len(arr))
+	}
+
+	entry := arr[0]
+
+	// Verify all required fields.
+	requiredFields := []string{
+		"feature_name", "state", "round",
+		"cost_usd", "wall_clock_seconds", "agent_invocations", "message",
+	}
+	for _, field := range requiredFields {
+		if _, ok := entry[field]; !ok {
+			t.Errorf("missing required field %q in status entry", field)
+		}
+	}
+
+	// Verify values.
+	if entry["feature_name"] != "solo-feature" {
+		t.Errorf("feature_name = %q, want solo-feature", entry["feature_name"])
+	}
+	if entry["state"] != "REVIEWING" {
+		t.Errorf("state = %q, want REVIEWING", entry["state"])
+	}
+	if entry["round"] != float64(2) {
+		t.Errorf("round = %v, want 2", entry["round"])
+	}
+}
+
+// TestBackwardCompatCancelNoFeatureName verifies that POST /api/workflow/cancel
+// with an empty body (no feature_name) cancels a running workflow. This is the
+// backward-compatible behavior for clients that do not yet send feature_name.
+func TestBackwardCompatCancelNoFeatureName(t *testing.T) {
+	manager, _ := setupWorkflowManager(t)
+
+	// Start a workflow so there is something to cancel.
+	startHandler := HandleStartWorkflow(manager)
+	body := `{"title":"Cancel Me","description":"test","feature_name":"cancel-compat"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflow/start", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	startHandler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("start: expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify the orchestrator exists.
+	if manager.GetOrchestrator() == nil {
+		t.Fatal("expected non-nil orchestrator after starting workflow")
+	}
+
+	// Cancel with empty body (backward compat: no feature_name).
+	cancelHandler := HandleCancelWorkflowAPI(manager)
+	cancelReq := httptest.NewRequest(http.MethodPost, "/api/workflow/cancel", bytes.NewBufferString("{}"))
+	cancelReq.Header.Set("Content-Type", "application/json")
+	cancelRec := httptest.NewRecorder()
+	cancelHandler.ServeHTTP(cancelRec, cancelReq)
+
+	if cancelRec.Code != http.StatusOK {
+		t.Fatalf("cancel: expected 200, got %d: %s", cancelRec.Code, cancelRec.Body.String())
+	}
+
+	var cancelResp map[string]interface{}
+	if err := json.NewDecoder(cancelRec.Body).Decode(&cancelResp); err != nil {
+		t.Fatalf("decode cancel response: %v", err)
+	}
+	if cancelResp["status"] != "cancelled" {
+		t.Errorf("cancel status = %q, want cancelled", cancelResp["status"])
+	}
+
+	// After cancellation, GetOrchestrator() should return nil.
+	if manager.GetOrchestrator() != nil {
+		t.Error("expected nil orchestrator after cancel, but got non-nil")
+	}
+
+	// Also verify that GetAllOrchestrators map is empty.
+	all := manager.GetAllOrchestrators()
+	if len(all) != 0 {
+		t.Errorf("expected 0 orchestrators after cancel, got %d", len(all))
+	}
+
+	// Wait for background goroutine to finish so TempDir cleanup succeeds.
+	time.Sleep(200 * time.Millisecond)
+}
