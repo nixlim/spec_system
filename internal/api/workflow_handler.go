@@ -889,10 +889,19 @@ func handleAllWorkflowStatuses(w http.ResponseWriter, manager *WorkflowManager) 
 // workflow state. If paused is true, a "(server restarted — workflow paused)"
 // suffix is added to the message.
 func buildStatusObject(manager *WorkflowManager, state *specworkflow.WorkflowStateJSON, paused bool) map[string]interface{} {
-	// Compute wall clock dynamically from StartedAt.
+	// Compute wall clock from StartedAt. For terminal or paused workflows,
+	// use UpdatedAt as the end time so the clock stops ticking.
 	var wallClockSec float64
 	if startTime, parseErr := time.Parse(time.RFC3339, state.StartedAt); parseErr == nil {
-		wallClockSec = time.Since(startTime).Seconds()
+		if paused || isTerminalWorkflowState(state.State) {
+			if endTime, endErr := time.Parse(time.RFC3339, state.UpdatedAt); endErr == nil {
+				wallClockSec = endTime.Sub(startTime).Seconds()
+			} else {
+				wallClockSec = time.Since(startTime).Seconds()
+			}
+		} else {
+			wallClockSec = time.Since(startTime).Seconds()
+		}
 	}
 
 	// Best cost from all sources (state, OTEL in-memory, SQLite).
@@ -1378,6 +1387,72 @@ func HandleRewindWorkflow(manager *WorkflowManager) http.HandlerFunc {
 	}
 }
 
+// HandleFinalizeWorkflow returns an HTTP handler for POST /api/workflow/finalize.
+// It force-transitions a workflow to FINALIZED state, cancelling any running
+// orchestrator. This is useful when a workflow is stuck in a non-terminal state
+// (e.g. JUDGING) and the user wants to mark it as done without deleting it.
+func HandleFinalizeWorkflow(manager *WorkflowManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			FeatureName string `json:"feature_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+			return
+		}
+		if req.FeatureName == "" {
+			writeError(w, http.StatusBadRequest, "feature_name is required")
+			return
+		}
+		if err := ValidateFeatureName(req.FeatureName); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid feature_name: %v", err))
+			return
+		}
+
+		// Cancel running orchestrator if any.
+		manager.mu.Lock()
+		if orch, ok := manager.orchestrators[req.FeatureName]; ok && orch != nil {
+			orch.Cancel()
+			delete(manager.orchestrators, req.FeatureName)
+		}
+		manager.mu.Unlock()
+
+		// Load state from disk and update to FINALIZED.
+		featureDir := filepath.Join(manager.workspaceDir, "specs", req.FeatureName)
+		state, err := specworkflow.LoadState(featureDir)
+		if err != nil {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("no workflow state found for feature: %s", req.FeatureName))
+			return
+		}
+
+		if isTerminalWorkflowState(state.State) {
+			writeJSON(w, http.StatusOK, map[string]string{
+				"status":  "already_terminal",
+				"message": fmt.Sprintf("Workflow %q is already in %s state", req.FeatureName, state.State),
+			})
+			return
+		}
+
+		state.State = specworkflow.StateFinalized
+		state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		if err := specworkflow.SaveState(featureDir, state); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save state: %v", err))
+			return
+		}
+
+		log.Printf("[workflow] force-finalized feature %q from previous state", req.FeatureName)
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":  "finalized",
+			"message": fmt.Sprintf("Workflow %q has been finalized", req.FeatureName),
+		})
+	}
+}
+
 // HandleResetWorkflow returns an HTTP handler for POST /api/workflow/reset.
 // It deletes the entire workspace/specs/{feature}/ directory so the feature
 // can be started completely fresh.
@@ -1749,8 +1824,14 @@ func copySourceDocsToWorkflow(workspaceDir, featureName string, sourcePaths []st
 
 	var newPaths []string
 	for _, srcPath := range sourcePaths {
+		// If the path is relative, resolve it against the global source-docs directory.
+		resolved := srcPath
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(globalDocsDir, resolved)
+		}
+
 		// Validate: reject path traversal.
-		absSrc, err := filepath.Abs(srcPath)
+		absSrc, err := filepath.Abs(resolved)
 		if err != nil {
 			return nil, fmt.Errorf("resolve source path %q: %w", srcPath, err)
 		}

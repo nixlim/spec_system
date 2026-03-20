@@ -42,6 +42,8 @@ Source Documents
           [ FINALIZED ]
 ```
 
+The dashboard displays this as a visual pipeline stepper showing all stages, with completed stages in green, the current stage pulsing, and future stages grayed out.
+
 ### Agents
 
 | Agent | Role | Lenses |
@@ -136,22 +138,34 @@ The system requires two Claude skill directories containing the templates that g
 
 ## Dashboard
 
-The web dashboard provides real-time visibility into the workflow:
+The web dashboard provides real-time visibility into workflow execution. Multiple workflows can run concurrently, each tracked independently.
 
-- **Controls** — Start new workflows, upload source documents, manage workspace
+### Tabs
+
+- **Controls** — Active workflow list, start new workflows, upload source documents, assign documents to workflows, manage workspace
 - **Spec** — View and diff spec versions as they evolve through rounds
-- **Issues** — Track findings with severity filtering and status lifecycle
-- **Convergence** — Monitor review/revision convergence metrics
-- **Messages** — Raw WebSocket event stream and server logs
+- **Issues** — Track findings with severity/status/lens filtering and lifecycle management
+- **Convergence** — Monitor review/revision convergence metrics and round history
+- **Messages** — Filtered workflow log (OTEL, Orchestrator, Claude Runner, Agent Events, State Transitions)
 
 ### Workflow Status Panel
 
-The top panel shows aggregate metrics updated in real-time via WebSocket:
+A persistent top panel shows aggregate metrics updated in real-time via SSE:
 
-- Feature name, round number, workflow state
+- **Pipeline stepper** — visual chain of all workflow stages with progress indication
+- Feature name, round number, workflow state badge
 - Cost (from OTEL telemetry), elapsed wall clock time
 - Token usage (input, output, cache read), API call count, agent cost
 - Activity feed of individual tool and API events
+
+### Multi-Workflow Support
+
+Multiple workflows can execute concurrently, each processing a different feature:
+
+- The active workflow list shows all running workflows with state badges
+- Notification badges appear on workflows needing attention (at gate states)
+- Click a workflow to switch context — the status panel, gates, and all tabs update
+- Each workflow has isolated source documents, state, and artefacts
 
 ### Human Gates
 
@@ -161,12 +175,67 @@ Gate panels appear when the workflow requires human input:
 - **Gate 2** — Resolve ambiguity warnings (accept/answer/defer per warning), add reviewer comments
 - **Gate Final** — Approve or reject when critical findings persist after convergence
 
+### Workflow Rewind
+
+Workflows can be rewound to any previous stage (DISCOVERY, DRAFTING, REVIEWING, REVISING, JUDGING) while preserving prerequisite artefacts. Downstream outputs are deleted and the workflow resumes from the target stage. Available via the rewind controls on each workflow card.
+
+## API Reference
+
+### Workflow Lifecycle
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/workflow/start` | Start new workflow with feature name and source docs |
+| POST | `/api/workflow/cancel` | Cancel running workflow |
+| GET | `/api/workflow/status` | Poll workflow status (single or all) |
+| POST | `/api/workflow/resume` | Resume from ESCALATED/ERROR/paused state |
+| POST | `/api/workflow/rewind` | Rewind to target state and round |
+| POST | `/api/workflow/finalize` | Force transition to FINALIZED |
+| POST | `/api/workflow/reset` | Delete feature directory entirely |
+| POST | `/api/workflow/restart` | Stop, delete, and restart workflow |
+| POST | `/api/workflow/retry` | Clear stale state file |
+
+### Source Documents
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/upload` | Upload source documents to global library |
+| GET | `/api/uploads` | List uploaded files |
+| POST | `/api/workflow/{feature}/source-docs` | Assign documents to a workflow |
+| GET | `/api/workflow/{feature}/source-docs` | List documents assigned to a workflow |
+
+### Gates
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/tasks/{id}/approve` | Approve gate (with corrections/resolutions) |
+| POST | `/api/tasks/{id}/reject` | Reject gate (cancel workflow) |
+
+### Data Access
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/workspace/features` | List all features with metadata |
+| GET | `/api/workspace/features/{name}/discovery` | Feature discovery output |
+| GET | `/api/workspace/features/{name}/state` | Feature workflow state |
+| GET | `/api/workspace/features/{name}/files/{f}` | Specific feature file |
+| GET | `/api/spec/*` | Spec versions, diffs, issues, convergence |
+| GET | `/api/metrics` | Persisted OTEL telemetry |
+| GET | `/api/messages` | Workflow log messages |
+| GET | `/api/logs/server` | Server log ring buffer |
+
+### Real-Time
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/ws` | WebSocket event stream |
+
 ## Architecture
 
 ```
 cmd/specworkflow/main.go          CLI entry point, HTTP routing
 internal/api/
-  workflow_handler.go             HTTP handlers, WorkflowManager
+  workflow_handler.go             HTTP handlers, WorkflowManager (concurrent map)
   otel_receiver.go                OTLP gRPC receiver for Claude telemetry
   metrics_store.go                SQLite persistence for telemetry
   websocket.go                    WebSocket hub and broadcasting
@@ -190,10 +259,11 @@ internal/specworkflow/
   persistence.go                  Atomic state persistence
   recovery.go                     Agent failure detection and retry
   resume.go                       Crash/restart recovery
+  rewind.go                       Workflow rewind to previous stages
   security.go                     Prompt injection mitigation
   config.go                       Configuration parsing and validation
   types.go                        Core type definitions
-  events.go                       Event system (12 event types)
+  events.go                       Event system (14 event types)
   team.go                         Agent team definition
 static/
   index.html                      Dashboard HTML
@@ -224,8 +294,9 @@ OTEL telemetry from Claude Code is persisted to `workspace/metrics.db` (SQLite, 
 ```
 workspace/
   metrics.db                       SQLite telemetry database
-  source-docs/                     Uploaded reference documents
+  source-docs/                     Uploaded reference documents (global library)
   specs/{feature}/
+    source-docs/                   Per-workflow document copies
     workflow-state.json            Persisted workflow state
     workflow-log.jsonl             Structured workflow log
     discovery-output.json          Discovery agent output
@@ -248,7 +319,7 @@ workspace/
 go test ./...
 ```
 
-32 test files cover all major components including the state machine, orchestrator, convergence protocol, circuit breakers, issue lifecycle, agent output validation, prompt construction, persistence, recovery, resume, security, configuration, and all HTTP/WebSocket handlers.
+32 test files cover all major components including the state machine, orchestrator, convergence protocol, circuit breakers, issue lifecycle, agent output validation, prompt construction, persistence, recovery, resume, rewind, security, configuration, and all HTTP/WebSocket handlers.
 
 ## Development
 

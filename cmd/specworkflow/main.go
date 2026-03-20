@@ -136,6 +136,7 @@ func main() {
 
 	// --- Workflow control endpoints (retry/reset/restart/resume/rewind) ---
 	mux.HandleFunc("/api/workflow/retry", api.HandleRetryWorkflow(workflowManager))
+	mux.HandleFunc("/api/workflow/finalize", api.HandleFinalizeWorkflow(workflowManager))
 	mux.HandleFunc("/api/workflow/reset", api.HandleResetWorkflow(workflowManager))
 	mux.HandleFunc("/api/workflow/restart", api.HandleRestartWorkflow(workflowManager))
 	mux.HandleFunc("/api/workflow/resume", api.HandleResumeWorkflow(workflowManager))

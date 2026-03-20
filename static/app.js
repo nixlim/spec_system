@@ -61,6 +61,7 @@
         if (k === "className") node.className = attrs[k];
         else if (k === "textContent") node.textContent = attrs[k];
         else if (k === "innerHTML") node.innerHTML = attrs[k];
+        else if (k === "htmlFor") node.setAttribute("for", attrs[k]);
         else if (k.startsWith("on")) node.addEventListener(k.slice(2).toLowerCase(), attrs[k]);
         else node.setAttribute(k, attrs[k]);
       });
@@ -290,6 +291,105 @@
         return "state-badge-red";
       default:
         return "state-badge-idle";
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Workflow Pipeline (state machine stepper)
+  // -----------------------------------------------------------------------
+
+  // The ordered stages of the happy-path workflow.
+  // Labels are shortened for space; gates show a gate icon.
+  var PIPELINE_STAGES = [
+    { state: "INIT",             label: "Init",     gate: false },
+    { state: "DISCOVERY",        label: "Discover",  gate: false },
+    { state: "HUMAN_GATE_1",     label: "Gate 1",   gate: true  },
+    { state: "DRAFTING",         label: "Draft",    gate: false },
+    { state: "HUMAN_GATE_2",     label: "Gate 2",   gate: true  },
+    { state: "REVIEWING",        label: "Review",   gate: false },
+    { state: "REVISING",         label: "Revise",   gate: false },
+    { state: "JUDGING",          label: "Judge",    gate: false },
+    { state: "HUMAN_GATE_FINAL", label: "Gate F",   gate: true  },
+    { state: "FINALIZED",        label: "Done",     gate: false }
+  ];
+
+  /**
+   * Renders or updates the workflow pipeline stepper.
+   * @param {string} currentState - The current workflow state (e.g. "REVIEWING").
+   * @param {number} [round] - Current review round (shown on REVIEWING+ stages).
+   */
+  function updateWorkflowPipeline(currentState) {
+    var container = $("#workflow-pipeline");
+    if (!container) return;
+
+    var state = (currentState || "IDLE").toUpperCase();
+
+    // Find the index of the current state in the pipeline (-1 if not in happy path).
+    var currentIdx = -1;
+    for (var i = 0; i < PIPELINE_STAGES.length; i++) {
+      if (PIPELINE_STAGES[i].state === state) {
+        currentIdx = i;
+        break;
+      }
+    }
+
+    // For ERROR/ESCALATED, find the furthest stage reached
+    // by looking at the pipeline and marking everything up to current as completed.
+    var isError = state === "ERROR";
+    var isEscalated = state === "ESCALATED";
+
+    // Build the pipeline HTML
+    container.innerHTML = "";
+    for (var j = 0; j < PIPELINE_STAGES.length; j++) {
+      var stage = PIPELINE_STAGES[j];
+
+      // Connector between steps (skip before first)
+      if (j > 0) {
+        var conn = document.createElement("div");
+        conn.className = "pipeline-connector";
+        if (currentIdx >= 0 && j <= currentIdx) {
+          conn.classList.add("completed");
+        }
+        container.appendChild(conn);
+      }
+
+      // Node
+      var node = document.createElement("div");
+      node.className = "pipeline-node";
+      node.textContent = stage.label;
+
+      if (stage.gate) {
+        node.classList.add("gate");
+      }
+
+      if (currentIdx >= 0) {
+        if (j < currentIdx) {
+          node.classList.add("completed");
+        } else if (j === currentIdx) {
+          node.classList.add("current");
+        }
+      }
+
+      var step = document.createElement("div");
+      step.className = "pipeline-step";
+      step.appendChild(node);
+      container.appendChild(step);
+    }
+
+    // If ERROR or ESCALATED, append a special terminal node
+    if (isError || isEscalated) {
+      var connTerm = document.createElement("div");
+      connTerm.className = "pipeline-connector";
+      container.appendChild(connTerm);
+
+      var termNode = document.createElement("div");
+      termNode.className = "pipeline-node current";
+      termNode.classList.add(isError ? "error" : "escalated");
+      termNode.textContent = isError ? "Error" : "Escalated";
+      var termStep = document.createElement("div");
+      termStep.className = "pipeline-step";
+      termStep.appendChild(termNode);
+      container.appendChild(termStep);
     }
   }
 
@@ -567,6 +667,7 @@
     var state = data.state || "IDLE";
     badge.textContent = state;
     badge.className = "state-badge " + getStateBadgeClass(state);
+    updateWorkflowPipeline(state);
 
     // Track whether a workflow is active (non-idle) so pollWorkflowStatus
     // doesn't overwrite with stale "idle" responses during startup.
@@ -591,7 +692,8 @@
 
     // Start or stop the client-side timer based on workflow state.
     var upper = state.toUpperCase();
-    if (upper !== "IDLE" && upper !== "FINALIZED" && upper !== "ESCALATED") {
+    var shouldTick = upper !== "IDLE" && upper !== "FINALIZED" && upper !== "ESCALATED" && !data.paused;
+    if (shouldTick) {
       startWallClockTimer();
     } else {
       stopWallClockTimer();
@@ -632,6 +734,7 @@
     var state = data.to || "IDLE";
     badge.textContent = state;
     badge.className = "state-badge " + getStateBadgeClass(state);
+    updateWorkflowPipeline(state);
 
     // Show the panel when a transition happens
     $("#workflow-status").hidden = false;
@@ -1530,6 +1633,36 @@
             };
           })(f.feature_name));
           actions.appendChild(liveRestartBtn);
+        }
+
+        // Finalize button — force-finish a stuck workflow
+        if (!isTerminal && stateUpper !== "UNKNOWN") {
+          var finalizeBtn = el("button", {
+            className: "btn btn-sm",
+            textContent: "Finalize",
+            style: "background:#d4edda;color:#155724;border-color:#c3e6cb;"
+          });
+          finalizeBtn.addEventListener("click", (function (featureName) {
+            return function () {
+              if (!confirm("Force-finalize workflow \"" + featureName + "\"? This will mark it as done and stop any running agents.")) return;
+              finalizeBtn.disabled = true;
+              finalizeBtn.textContent = "Finalizing...";
+              fetchJSON("/api/workflow/finalize", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ feature_name: featureName })
+              }).then(function () {
+                addActivityEntry("Workflow finalized: " + featureName, "info");
+                loadFeatureList();
+                refreshWorkflowStatusList();
+              }).catch(function (err) {
+                alert("Finalize failed: " + err.message);
+                finalizeBtn.disabled = false;
+                finalizeBtn.textContent = "Finalize";
+              });
+            };
+          })(f.feature_name));
+          actions.appendChild(finalizeBtn);
         }
 
         // Delete button (always shown for features with content)
@@ -2940,6 +3073,7 @@
           if (panel) panel.hidden = true;
           var badge = $("#workflow-state");
           if (badge) { badge.textContent = "IDLE"; badge.className = "state-badge state-badge-idle"; }
+          updateWorkflowPipeline("IDLE");
           addActivityEntry("Workflow reset for " + featureName, "info");
           loadFeatureList();
         }).catch(function (err) {
@@ -2955,9 +3089,19 @@
 
   function initCancelButton() {
     $("#btn-cancel-workflow").addEventListener("click", function () {
-      if (!confirm("Cancel the running workflow?")) return;
-      fetchJSON("/api/workflow/cancel", { method: "POST" })
-        .then(function () { alert("Workflow cancelled."); })
+      var target = selectedFeature || "the running workflow";
+      if (!confirm("Cancel workflow \"" + target + "\"?")) return;
+      var opts = {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(selectedFeature ? { feature_name: selectedFeature } : {})
+      };
+      fetchJSON("/api/workflow/cancel", opts)
+        .then(function () {
+          alert("Workflow cancelled.");
+          loadFeatureList();
+          refreshWorkflowStatusList();
+        })
         .catch(function (err) { alert("Cancel failed: " + err.message); });
     });
   }
