@@ -63,13 +63,15 @@ func (pb *PromptBuilder) specDir() string {
 // DiscoveryContext holds optional corrections and user answers from a previous
 // discovery round (HUMAN_GATE_1 -> DISCOVERY correction loop).
 type DiscoveryContext struct {
+	// Round is the correction round number (1-based). Zero means unversioned/legacy.
+	Round int
 	// Corrections from the human reviewer (field name -> corrected text).
 	Corrections map[string]string
 	// UserAnswers from the human reviewer (open_questions and assumption answers).
 	UserAnswers map[string]interface{}
 	// ReviewerComment is free-text feedback from the human reviewer.
 	ReviewerComment string
-	// PreviousOutput is the previous discovery output JSON (for context).
+	// PreviousOutput is the discovery output that was reviewed in this round.
 	PreviousOutput *DiscoveryOutput
 }
 
@@ -108,17 +110,32 @@ func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string, ctx ...Di
 	}
 	b.WriteString("\nRead ALL of these files before producing your output.\n\n")
 
-	// Human corrections and answers from previous round (if any).
+	// Human corrections and answers from previous rounds (if any).
+	// Multiple rounds are shown in chronological order so the agent sees
+	// the full history of human feedback and can avoid regressing.
 	if len(ctx) > 0 {
-		dc := ctx[0]
-		hasFeedback := len(dc.Corrections) > 0 || dc.UserAnswers != nil
-		if hasFeedback {
-			b.WriteString("## Human Reviewer Feedback\n\n")
+		b.WriteString("## Human Reviewer Feedback\n\n")
+		if len(ctx) == 1 {
 			b.WriteString("A human reviewer has examined your previous discovery output and provided the following feedback.\n")
-			b.WriteString("You MUST incorporate this feedback into your revised discovery output.\n\n")
+		} else {
+			fmt.Fprintf(&b, "A human reviewer has provided feedback across %d correction rounds.\n", len(ctx))
+			b.WriteString("ALL prior corrections and answers are shown below in chronological order.\n")
+			b.WriteString("You MUST incorporate ALL of this feedback — do not regress on earlier corrections.\n")
+		}
+		b.WriteString("You MUST incorporate this feedback into your revised discovery output.\n\n")
+
+		for _, dc := range ctx {
+			hasFeedback := len(dc.Corrections) > 0 || dc.UserAnswers != nil || dc.ReviewerComment != ""
+			if !hasFeedback {
+				continue
+			}
+
+			if dc.Round > 0 && len(ctx) > 1 {
+				fmt.Fprintf(&b, "### Round %d Feedback\n\n", dc.Round)
+			}
 
 			if len(dc.Corrections) > 0 {
-				b.WriteString("### Corrections\n\n")
+				b.WriteString("#### Corrections\n\n")
 				b.WriteString("The reviewer made the following corrections to specific fields:\n\n")
 				for field, value := range dc.Corrections {
 					fmt.Fprintf(&b, "- **%s**: %s\n", field, value)
@@ -129,7 +146,7 @@ func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string, ctx ...Di
 			if dc.UserAnswers != nil {
 				if oq, ok := dc.UserAnswers["open_questions"]; ok {
 					if answers, ok := oq.(map[string]interface{}); ok && len(answers) > 0 {
-						b.WriteString("### Answers to Open Questions\n\n")
+						b.WriteString("#### Answers to Open Questions\n\n")
 						b.WriteString("The reviewer answered the following open questions. Use these answers to refine your analysis.\n")
 						b.WriteString("Remove answered questions from the open_questions list and incorporate the answers into the relevant sections.\n\n")
 						for idx, answer := range answers {
@@ -140,7 +157,7 @@ func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string, ctx ...Di
 				}
 				if aa, ok := dc.UserAnswers["assumptions"]; ok {
 					if answers, ok := aa.(map[string]interface{}); ok && len(answers) > 0 {
-						b.WriteString("### Answers to Assumption Questions\n\n")
+						b.WriteString("#### Answers to Assumption Questions\n\n")
 						b.WriteString("The reviewer clarified the following assumptions. Update confidence levels and remove question_for_user where answered.\n\n")
 						for idx, answer := range answers {
 							fmt.Fprintf(&b, "- **Assumption %s answer**: %v\n", idx, answer)
@@ -151,7 +168,7 @@ func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string, ctx ...Di
 			}
 
 			if dc.ReviewerComment != "" {
-				b.WriteString("### Reviewer Comments\n\n")
+				b.WriteString("#### Reviewer Comments\n\n")
 				b.WriteString("The reviewer provided the following additional notes and observations.\n")
 				b.WriteString("Incorporate these into your analysis:\n\n")
 				b.WriteString(dc.ReviewerComment)
@@ -159,8 +176,13 @@ func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string, ctx ...Di
 			}
 
 			if dc.PreviousOutput != nil {
-				b.WriteString("### Previous Discovery Output\n\n")
-				b.WriteString("Your previous output is available in the output file. Build on it — don't start from scratch.\n")
+				if dc.Round > 0 && len(ctx) > 1 {
+					fmt.Fprintf(&b, "#### Discovery Output (Round %d)\n\n", dc.Round)
+					b.WriteString("The discovery output that was reviewed in this round is preserved for reference.\n\n")
+				} else {
+					b.WriteString("#### Previous Discovery Output\n\n")
+				}
+				b.WriteString("Build on your previous work — don't start from scratch.\n")
 				b.WriteString("Incorporate the corrections and answers above, and update any affected sections.\n\n")
 			}
 		}

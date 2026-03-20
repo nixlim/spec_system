@@ -136,14 +136,18 @@ func cleanArtefactsForRewind(specDir string, targetState WorkflowState, targetRo
 		// Keep nothing else — start fresh from discovery.
 
 	case StateDrafting:
-		// Keep discovery output and gate1 artefacts.
+		// Keep discovery output and gate1 artefacts (including versioned files).
 		keep["discovery-output.json"] = true
 		keep["gate1-corrections.json"] = true
+		keepPrefixed(keep, entries, "discovery-output-")
+		keepPrefixed(keep, entries, "gate1-corrections-")
 
 	case StateReviewing:
 		// Keep everything through the draft: discovery, gates, drafter, spec up to current.
 		keep["discovery-output.json"] = true
 		keep["gate1-corrections.json"] = true
+		keepPrefixed(keep, entries, "discovery-output-")
+		keepPrefixed(keep, entries, "gate1-corrections-")
 		keep["drafter-output.json"] = true
 		keep["gate2-resolutions.json"] = true
 		keepSpecVersions(keep, 0, targetRound-1) // spec-v0 through spec-v{round-1}
@@ -160,6 +164,8 @@ func cleanArtefactsForRewind(specDir string, targetState WorkflowState, targetRo
 		// Keep everything through reviews: discovery, gates, drafter, spec, reviews, merged.
 		keep["discovery-output.json"] = true
 		keep["gate1-corrections.json"] = true
+		keepPrefixed(keep, entries, "discovery-output-")
+		keepPrefixed(keep, entries, "gate1-corrections-")
 		keep["drafter-output.json"] = true
 		keep["gate2-resolutions.json"] = true
 		keepSpecVersions(keep, 0, targetRound-1)
@@ -178,6 +184,8 @@ func cleanArtefactsForRewind(specDir string, targetState WorkflowState, targetRo
 		// Keep everything through revision.
 		keep["discovery-output.json"] = true
 		keep["gate1-corrections.json"] = true
+		keepPrefixed(keep, entries, "discovery-output-")
+		keepPrefixed(keep, entries, "gate1-corrections-")
 		keep["drafter-output.json"] = true
 		keep["gate2-resolutions.json"] = true
 		keepSpecVersions(keep, 0, targetRound)
@@ -241,6 +249,15 @@ func keepRoundArtefacts(keep map[string]bool, entries []os.DirEntry, prefix stri
 			if strings.HasPrefix(name, prefix) && strings.Contains(name, roundStr) {
 				keep[name] = true
 			}
+		}
+	}
+}
+
+// keepPrefixed keeps all files matching a given prefix (e.g. "discovery-output-", "gate1-corrections-").
+func keepPrefixed(keep map[string]bool, entries []os.DirEntry, prefix string) {
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), prefix) {
+			keep[e.Name()] = true
 		}
 	}
 }

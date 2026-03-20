@@ -6,44 +6,16 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
 // handleDiscovery builds the discovery prompt, dispatches the discovery agent,
 // validates the output, and transitions to HUMAN_GATE_1.
 func (o *Orchestrator) handleDiscovery(goal GoalInput, state *WorkflowStateJSON, specDir string) error {
-	// Check for corrections from a previous gate 1 correction loop.
-	var discoveryCtx []DiscoveryContext
-	corrPath := filepath.Join(specDir, "gate1-corrections.json")
-	if corrData, readErr := os.ReadFile(corrPath); readErr == nil {
-		var corrFile map[string]interface{}
-		if json.Unmarshal(corrData, &corrFile) == nil {
-			dc := DiscoveryContext{}
-			if corrections, ok := corrFile["corrections"].(map[string]interface{}); ok {
-				dc.Corrections = make(map[string]string)
-				for k, v := range corrections {
-					dc.Corrections[k] = fmt.Sprintf("%v", v)
-				}
-			}
-			if ua, ok := corrFile["user_answers"].(map[string]interface{}); ok {
-				dc.UserAnswers = ua
-			}
-			if rc, ok := corrFile["reviewer_comment"].(string); ok {
-				dc.ReviewerComment = rc
-			}
-			// Load previous discovery output for context.
-			outPath := filepath.Join(specDir, "discovery-output.json")
-			if prevData, prevErr := os.ReadFile(outPath); prevErr == nil {
-				var prevOutput DiscoveryOutput
-				if json.Unmarshal(prevData, &prevOutput) == nil {
-					dc.PreviousOutput = &prevOutput
-				}
-			}
-			discoveryCtx = append(discoveryCtx, dc)
-			log.Printf("[orchestrator] loaded gate 1 corrections: %d corrections, has_user_answers=%v, has_previous_output=%v",
-				len(dc.Corrections), dc.UserAnswers != nil, dc.PreviousOutput != nil)
-		}
-	}
+	// Load the full correction history from numbered files
+	// (gate1-corrections-1.json, gate1-corrections-2.json, ...).
+	discoveryCtx := loadCorrectionHistory(specDir)
 
 	prompt, err := o.promptBuilder.BuildDiscoveryPrompt(goal.SourceDocPaths, discoveryCtx...)
 	if err != nil {
@@ -80,11 +52,110 @@ func (o *Orchestrator) handleDiscovery(goal GoalInput, state *WorkflowStateJSON,
 	log.Printf("[orchestrator] discovery output valid: %d actors, %d priorities, %d open questions",
 		len(discovery.Actors), len(discovery.Priorities), len(discovery.OpenQuestions))
 
+	// Save a numbered copy for history (discovery-output-{N}.json).
+	discoveryRound := state.Gate1CorrectionCount + 1
+	versionedPath := filepath.Join(specDir, fmt.Sprintf("discovery-output-%d.json", discoveryRound))
+	if copyErr := os.WriteFile(versionedPath, data, 0o644); copyErr != nil {
+		log.Printf("[orchestrator] warning: failed to write versioned discovery output %s: %v", versionedPath, copyErr)
+	}
+
 	o.logTransition(StateDiscovery, StateHumanGate1)
 	if err := o.sm.Transition(StateHumanGate1); err != nil {
 		return fmt.Errorf("transition DISCOVERY -> HUMAN_GATE_1: %w", err)
 	}
 	return nil
+}
+
+// loadCorrectionHistory loads all numbered gate1-corrections-{N}.json files
+// and their corresponding discovery-output-{N}.json files, returning a
+// DiscoveryContext per correction round in chronological order.
+// Falls back to the unversioned gate1-corrections.json for backward
+// compatibility with workspaces created before versioned corrections.
+func loadCorrectionHistory(specDir string) []DiscoveryContext {
+	// Try numbered files first.
+	var corrFiles []string
+	entries, _ := os.ReadDir(specDir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "gate1-corrections-") && strings.HasSuffix(e.Name(), ".json") {
+			corrFiles = append(corrFiles, e.Name())
+		}
+	}
+	sort.Strings(corrFiles) // lexicographic sort gives numeric order for single-digit
+
+	if len(corrFiles) == 0 {
+		// Backward compat: try the unversioned file.
+		return loadSingleCorrectionFile(specDir, "gate1-corrections.json", "discovery-output.json")
+	}
+
+	var history []DiscoveryContext
+	for i, filename := range corrFiles {
+		dc := parseCorrectionFile(specDir, filename)
+		if dc == nil {
+			continue
+		}
+		// Load the corresponding discovery output for this round.
+		// Round N corrections were made against discovery-output-{N}.json.
+		round := i + 1
+		outFile := fmt.Sprintf("discovery-output-%d.json", round)
+		outPath := filepath.Join(specDir, outFile)
+		if prevData, err := os.ReadFile(outPath); err == nil {
+			var prevOutput DiscoveryOutput
+			if json.Unmarshal(prevData, &prevOutput) == nil {
+				dc.PreviousOutput = &prevOutput
+			}
+		}
+		dc.Round = round
+		history = append(history, *dc)
+		log.Printf("[orchestrator] loaded correction round %d: %d corrections, has_user_answers=%v, has_previous_output=%v",
+			round, len(dc.Corrections), dc.UserAnswers != nil, dc.PreviousOutput != nil)
+	}
+	return history
+}
+
+// loadSingleCorrectionFile loads the unversioned gate1-corrections.json
+// (backward compat for workspaces created before versioned corrections).
+func loadSingleCorrectionFile(specDir, corrFilename, outFilename string) []DiscoveryContext {
+	dc := parseCorrectionFile(specDir, corrFilename)
+	if dc == nil {
+		return nil
+	}
+	outPath := filepath.Join(specDir, outFilename)
+	if prevData, err := os.ReadFile(outPath); err == nil {
+		var prevOutput DiscoveryOutput
+		if json.Unmarshal(prevData, &prevOutput) == nil {
+			dc.PreviousOutput = &prevOutput
+		}
+	}
+	log.Printf("[orchestrator] loaded gate 1 corrections (unversioned): %d corrections, has_user_answers=%v, has_previous_output=%v",
+		len(dc.Corrections), dc.UserAnswers != nil, dc.PreviousOutput != nil)
+	return []DiscoveryContext{*dc}
+}
+
+// parseCorrectionFile reads and parses a single correction JSON file.
+func parseCorrectionFile(specDir, filename string) *DiscoveryContext {
+	corrPath := filepath.Join(specDir, filename)
+	corrData, err := os.ReadFile(corrPath)
+	if err != nil {
+		return nil
+	}
+	var corrFile map[string]interface{}
+	if json.Unmarshal(corrData, &corrFile) != nil {
+		return nil
+	}
+	dc := &DiscoveryContext{}
+	if corrections, ok := corrFile["corrections"].(map[string]interface{}); ok {
+		dc.Corrections = make(map[string]string)
+		for k, v := range corrections {
+			dc.Corrections[k] = fmt.Sprintf("%v", v)
+		}
+	}
+	if ua, ok := corrFile["user_answers"].(map[string]interface{}); ok {
+		dc.UserAnswers = ua
+	}
+	if rc, ok := corrFile["reviewer_comment"].(string); ok {
+		dc.ReviewerComment = rc
+	}
+	return dc
 }
 
 // handleHumanGate1 waits for a human gate response and either confirms,
@@ -125,9 +196,9 @@ func (o *Orchestrator) handleHumanGate1(state *WorkflowStateJSON, specDir string
 		}
 
 	case "correct":
-		// Gate data already persisted to gate1-corrections.json and
+		// Gate data already persisted to gate1-corrections-{N}.json and
 		// human-comments.json by the HTTP handler.
-		// Read back from disk to compute statistics for the log message.
+		// Read back the latest corrections file from disk for stats.
 		nCorrections := 0
 		hasUserAnswers := false
 		hasComment := false

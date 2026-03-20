@@ -567,6 +567,8 @@ func HandleGateApprove(manager *WorkflowManager) http.HandlerFunc {
 				}
 			case "correct":
 				// Save corrections + user answers + reviewer comment.
+				// Use numbered files (gate1-corrections-1.json, -2.json, ...)
+				// so the full correction history is preserved across rounds.
 				corrData := map[string]interface{}{
 					"action":      "correct",
 					"corrections": req.Corrections,
@@ -577,6 +579,12 @@ func HandleGateApprove(manager *WorkflowManager) http.HandlerFunc {
 				if req.Comment != "" {
 					corrData["reviewer_comment"] = req.Comment
 				}
+				corrRound := nextGate1CorrectionRound(specDir)
+				corrFilename := fmt.Sprintf("gate1-corrections-%d.json", corrRound)
+				persistGateData(specDir, corrFilename, corrData)
+				// Also write to gate1-corrections.json for backward compat
+				// (orchestrator reads numbered files, but other tools may
+				// expect the unversioned file).
 				persistGateData(specDir, "gate1-corrections.json", corrData)
 			default:
 				// Gate 2 resolutions.
@@ -646,6 +654,19 @@ func extractFeatureFromWorkflowPath(path string) string {
 		return parts[2]
 	}
 	return ""
+}
+
+// nextGate1CorrectionRound returns the next sequential round number for
+// gate1-corrections-{N}.json files by counting existing files.
+func nextGate1CorrectionRound(specDir string) int {
+	round := 1
+	for {
+		path := filepath.Join(specDir, fmt.Sprintf("gate1-corrections-%d.json", round))
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			return round
+		}
+		round++
+	}
 }
 
 // persistGateData writes gate data to a JSON file in the spec directory.
