@@ -217,7 +217,7 @@ func TestStateMachine_ErrorToErrorBlocked(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestStateMachine_Gate1CorrectionGuard_Blocks(t *testing.T) {
-	cfg := StateMachineConfig{MaxGateCorrections: 2, MaxRounds: 5}
+	cfg := StateMachineConfig{MaxGateCorrections: 2, MaxGate2Redrafts: 1, MaxRounds: 5}
 	ws := newTestState(StateHumanGate1)
 	ws.Gate1CorrectionCount = 3 // past limit (HandleCorrect increments before transition)
 	sm := NewStateMachine(ws, cfg, nil)
@@ -232,7 +232,7 @@ func TestStateMachine_Gate1CorrectionGuard_Blocks(t *testing.T) {
 }
 
 func TestStateMachine_Gate1CorrectionGuard_Allows(t *testing.T) {
-	cfg := StateMachineConfig{MaxGateCorrections: 3, MaxRounds: 5}
+	cfg := StateMachineConfig{MaxGateCorrections: 3, MaxGate2Redrafts: 1, MaxRounds: 5}
 	ws := newTestState(StateHumanGate1)
 	ws.Gate1CorrectionCount = 2 // below limit of 3
 	sm := NewStateMachine(ws, cfg, nil)
@@ -275,7 +275,7 @@ func TestStateMachine_Gate2RedraftGuard_Allows(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestStateMachine_MaxRoundsGuard_Blocks(t *testing.T) {
-	cfg := StateMachineConfig{MaxGateCorrections: 3, MaxRounds: 3}
+	cfg := StateMachineConfig{MaxGateCorrections: 3, MaxGate2Redrafts: 1, MaxRounds: 3}
 	ws := newTestState(StateHumanGate2)
 	ws.Round = 4 // exceeds max of 3
 	sm := NewStateMachine(ws, cfg, nil)
@@ -290,7 +290,7 @@ func TestStateMachine_MaxRoundsGuard_Blocks(t *testing.T) {
 }
 
 func TestStateMachine_MaxRoundsGuard_Allows(t *testing.T) {
-	cfg := StateMachineConfig{MaxGateCorrections: 3, MaxRounds: 3}
+	cfg := StateMachineConfig{MaxGateCorrections: 3, MaxGate2Redrafts: 1, MaxRounds: 3}
 	ws := newTestState(StateHumanGate2)
 	ws.Round = 3 // at limit (not exceeding)
 	sm := NewStateMachine(ws, cfg, nil)

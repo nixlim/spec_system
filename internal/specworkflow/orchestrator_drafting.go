@@ -129,7 +129,7 @@ func collectDrafterContext(specDir, workspaceDir string) []string {
 // handleHumanGate2 waits for a human gate response and either confirms,
 // resolves ambiguities, or cancels the draft.
 func (o *Orchestrator) handleHumanGate2(state *WorkflowStateJSON, specDir string) error {
-	gate2 := NewGate2Handler(state, o.emitter, 1)
+	gate2 := NewGate2Handler(state, o.emitter, o.config.MaxGate2Redrafts)
 
 	drafterPath := filepath.Join(specDir, "drafter-output.json")
 	dData, err := os.ReadFile(drafterPath)

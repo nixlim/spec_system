@@ -44,9 +44,13 @@ type SpecWorkflowConfig struct {
 	MaxWallClockMinutes int `yaml:"max_wall_clock_minutes"`
 	// MaxCostUSD is the maximum estimated cost in USD for the entire workflow.
 	MaxCostUSD float64 `yaml:"max_cost_usd"`
-	// MaxGateCorrections is the maximum number of human-gate corrections
-	// before the workflow escalates.
+	// MaxGateCorrections is the maximum number of Gate 1 (post-discovery)
+	// correction rounds before the workflow proceeds to drafting.
 	MaxGateCorrections int `yaml:"max_gate_corrections"`
+	// MaxGate2Redrafts is the maximum number of Gate 2 (post-draft)
+	// redraft rounds allowed when the human provides answers that
+	// require a redraft. Default: 1.
+	MaxGate2Redrafts int `yaml:"max_gate2_redrafts"`
 	// MaxRetries is the maximum number of retry attempts for transient
 	// failures in agent invocations.
 	MaxRetries int `yaml:"max_retries"`
@@ -65,6 +69,7 @@ func DefaultConfig() SpecWorkflowConfig {
 		MaxWallClockMinutes: 60,
 		MaxCostUSD:          50.0,
 		MaxGateCorrections:  3,
+		MaxGate2Redrafts:    1,
 		MaxRetries:          2,
 	}
 }
@@ -98,6 +103,12 @@ func (c *SpecWorkflowConfig) Validate() error {
 	}
 	if c.MaxTotalFindings <= 0 {
 		return fmt.Errorf("max_total_findings must be > 0, got %d", c.MaxTotalFindings)
+	}
+	if c.MaxGateCorrections <= 0 {
+		return fmt.Errorf("max_gate_corrections must be > 0, got %d", c.MaxGateCorrections)
+	}
+	if c.MaxGate2Redrafts <= 0 {
+		return fmt.Errorf("max_gate2_redrafts must be > 0, got %d", c.MaxGate2Redrafts)
 	}
 	if c.SkillPaths.PlanSpec != "" {
 		if _, err := os.Stat(c.SkillPaths.PlanSpec); err != nil {

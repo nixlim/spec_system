@@ -126,6 +126,7 @@ staleness_threshold: 2     # Consecutive stale rounds before halt
 max_wall_clock_minutes: 60 # Time budget
 max_cost_usd: 50.0         # Cost budget
 max_gate_corrections: 3    # Max human corrections at Gate 1
+max_gate2_redrafts: 1      # Max redrafts at Gate 2
 max_retries: 2             # Agent retry attempts for transient failures
 ```
 

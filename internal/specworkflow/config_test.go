@@ -33,6 +33,9 @@ func TestConfigDefaultValues(t *testing.T) {
 	if cfg.MaxGateCorrections != 3 {
 		t.Errorf("MaxGateCorrections: got %d, want 3", cfg.MaxGateCorrections)
 	}
+	if cfg.MaxGate2Redrafts != 1 {
+		t.Errorf("MaxGate2Redrafts: got %d, want 1", cfg.MaxGate2Redrafts)
+	}
 	if cfg.MaxRetries != 2 {
 		t.Errorf("MaxRetries: got %d, want 2", cfg.MaxRetries)
 	}
@@ -82,6 +85,9 @@ max_cost_usd: 25.0
 	if cfg.MaxGateCorrections != 3 {
 		t.Errorf("MaxGateCorrections (default): got %d, want 3", cfg.MaxGateCorrections)
 	}
+	if cfg.MaxGate2Redrafts != 1 {
+		t.Errorf("MaxGate2Redrafts (default): got %d, want 1", cfg.MaxGate2Redrafts)
+	}
 	if cfg.MaxRetries != 2 {
 		t.Errorf("MaxRetries (default): got %d, want 2", cfg.MaxRetries)
 	}
@@ -96,6 +102,7 @@ staleness_threshold: 4
 max_wall_clock_minutes: 120
 max_cost_usd: 75.5
 max_gate_corrections: 5
+max_gate2_redrafts: 3
 max_retries: 4
 skill_paths:
   plan_spec: /tmp
@@ -126,6 +133,9 @@ skill_paths:
 	}
 	if cfg.MaxGateCorrections != 5 {
 		t.Errorf("MaxGateCorrections: got %d, want 5", cfg.MaxGateCorrections)
+	}
+	if cfg.MaxGate2Redrafts != 3 {
+		t.Errorf("MaxGate2Redrafts: got %d, want 3", cfg.MaxGate2Redrafts)
 	}
 	if cfg.MaxRetries != 4 {
 		t.Errorf("MaxRetries: got %d, want 4", cfg.MaxRetries)

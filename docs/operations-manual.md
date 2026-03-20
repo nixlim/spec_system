@@ -212,12 +212,13 @@ max_wall_clock_minutes: 20
 max_cost_usd: 15.0
 ```
 
-### Gate Corrections
+### Gate Attempts
 
-If discovery frequently needs correction:
+If discovery frequently needs correction, or if drafts need more revision:
 
 ```yaml
-max_gate_corrections: 5  # Allow more back-and-forth at Gate 1
+max_gate_corrections: 5  # Allow more back-and-forth at Gate 1 (default: 3)
+max_gate2_redrafts: 2    # Allow more redrafts at Gate 2 (default: 1)
 ```
 
 ## Monitoring

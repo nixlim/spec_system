@@ -346,6 +346,7 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 	// Create state machine with persistence callback.
 	smConfig := StateMachineConfig{
 		MaxGateCorrections: cfg.Config.MaxGateCorrections,
+		MaxGate2Redrafts:   cfg.Config.MaxGate2Redrafts,
 		MaxRounds:          cfg.Config.MaxRounds,
 	}
 

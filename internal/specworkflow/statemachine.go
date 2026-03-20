@@ -14,6 +14,9 @@ type StateMachineConfig struct {
 	// MaxGateCorrections is the maximum number of HUMAN_GATE_1 -> DISCOVERY
 	// correction loops allowed before the guard blocks the transition.
 	MaxGateCorrections int
+	// MaxGate2Redrafts is the maximum number of HUMAN_GATE_2 -> DRAFTING
+	// redraft loops allowed before the guard blocks the transition.
+	MaxGate2Redrafts int
 	// MaxRounds is the maximum number of review/revise rounds allowed before
 	// the guard blocks transitions into REVIEWING.
 	MaxRounds int
@@ -23,6 +26,7 @@ type StateMachineConfig struct {
 func DefaultStateMachineConfig() StateMachineConfig {
 	return StateMachineConfig{
 		MaxGateCorrections: 3,
+		MaxGate2Redrafts:   1,
 		MaxRounds:          5,
 	}
 }
@@ -116,15 +120,16 @@ func Gate1CorrectionGuard(cfg StateMachineConfig) Guard {
 }
 
 // Gate2RedraftGuard blocks HUMAN_GATE_2 -> DRAFTING when the redraft count
-// has exceeded 1 (only a single redraft is allowed). Uses > (not >=) because
-// the gate handler increments the count before the transition runs.
-func Gate2RedraftGuard() Guard {
+// has exceeded the configured maximum. Uses > (not >=) because the gate
+// handler increments the count before the transition runs, so
+// count == maxRedrafts means "this is the last allowed redraft."
+func Gate2RedraftGuard(cfg StateMachineConfig) Guard {
 	return func(from, to WorkflowState, ws *WorkflowStateJSON) error {
 		if from == StateHumanGate2 && to == StateDrafting {
-			if ws.Gate2RedraftCount > 1 {
+			if ws.Gate2RedraftCount > cfg.MaxGate2Redrafts {
 				return fmt.Errorf(
-					"gate 2 redraft limit reached (%d/1)",
-					ws.Gate2RedraftCount,
+					"gate 2 redraft limit reached (%d/%d)",
+					ws.Gate2RedraftCount, cfg.MaxGate2Redrafts,
 				)
 			}
 		}
@@ -211,7 +216,7 @@ func NewStateMachine(ws *WorkflowStateJSON, cfg StateMachineConfig, onTransition
 		onTransition: onTransition,
 		guards: []Guard{
 			Gate1CorrectionGuard(cfg),
-			Gate2RedraftGuard(),
+			Gate2RedraftGuard(cfg),
 			MaxRoundsGuard(cfg),
 			JudgingToFinalizedGuard(),
 			JudgingToHumanGateFinalGuard(),
