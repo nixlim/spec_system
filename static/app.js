@@ -717,10 +717,15 @@
                     String(now.getMinutes()).padStart(2, "0") + ":" +
                     String(now.getSeconds()).padStart(2, "0");
 
-    var entry = el("div", { className: "activity-entry " + typeClass }, [
-      el("span", { className: "activity-time", textContent: timestamp }),
-      el("span", { className: "activity-msg", textContent: message })
-    ]);
+    var children = [
+      el("span", { className: "activity-time", textContent: timestamp })
+    ];
+    if (selectedFeature) {
+      children.push(el("span", { className: "msg-workflow", textContent: selectedFeature, title: selectedFeature }));
+    }
+    children.push(el("span", { className: "activity-msg", textContent: message }));
+
+    var entry = el("div", { className: "activity-entry " + typeClass }, children);
 
     // Prepend (newest at top)
     if (container.firstChild) {
