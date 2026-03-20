@@ -283,8 +283,11 @@
           <div class="messages-controls">
             <label><input type="checkbox" id="msg-auto-scroll" checked> Auto-scroll</label>
             <button id="msg-clear" class="btn btn-sm">Clear</button>
+            <select id="msg-workflow-filter" title="Filter by workflow">
+              <option value="">All Workflows</option>
+            </select>
             <select id="msg-filter">
-              <option value="">All</option>
+              <option value="">All Types</option>
               <option value="otel">OTEL</option>
               <option value="orchestrator">Orchestrator</option>
               <option value="claude-runner">Claude Runner</option>

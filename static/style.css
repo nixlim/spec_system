@@ -1287,6 +1287,20 @@ html, body {
 .msg-source-state { color: #60a5fa; }
 .msg-source-server { color: #94a3b8; }
 
+.msg-workflow {
+  font-size: 0.8em;
+  font-weight: 600;
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(99, 102, 241, 0.15);
+  color: #818cf8;
+  white-space: nowrap;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .msg-content {
   flex: 1;
   word-break: break-word;
@@ -1474,6 +1488,46 @@ html, body {
 @keyframes badge-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
+}
+
+/* Agent running indicator — pulsing green dot */
+.wsi-running-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #4ade80;
+  white-space: nowrap;
+}
+
+.wsi-running-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: #4ade80;
+  border-radius: 50%;
+  animation: running-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes running-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.8); }
+}
+
+/* Workflow card running indicator */
+.workflow-running-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.8em;
+  color: #4ade80;
+  font-weight: 600;
+  margin-left: 8px;
+}
+
+.workflow-running-badge .wsi-running-dot {
+  width: 6px;
+  height: 6px;
 }
 
 /* --- Document Picker --- */

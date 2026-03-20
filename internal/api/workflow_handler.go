@@ -933,6 +933,8 @@ func buildStatusObject(manager *WorkflowManager, state *specworkflow.WorkflowSta
 		msg += " (server restarted — workflow paused)"
 	}
 
+	isRunning := manager.IsFeatureRunning(state.FeatureName)
+
 	obj := map[string]interface{}{
 		"state":              state.State.String(),
 		"round":              state.Round,
@@ -941,6 +943,7 @@ func buildStatusObject(manager *WorkflowManager, state *specworkflow.WorkflowSta
 		"wall_clock_seconds": wallClockSec,
 		"agent_invocations":  state.AgentInvocations,
 		"message":            msg,
+		"is_running":         isRunning,
 	}
 	if paused {
 		obj["paused"] = true
@@ -1539,6 +1542,7 @@ type featureInfo struct {
 	HasReviews   bool     `json:"has_reviews"`
 	IsTerminal   bool     `json:"is_terminal"`
 	IsPaused     bool     `json:"is_paused"`
+	IsRunning    bool     `json:"is_running"`
 	Files        []string `json:"files"`
 }
 
@@ -1589,13 +1593,16 @@ func HandleListFeatures(workspaceDir string, manager ...*WorkflowManager) http.H
 				fi.CostUSD = state.CumulativeCostUSD
 				fi.IsTerminal = isTerminalWorkflowState(state.State) || state.State == specworkflow.StateError
 
+				// Check if the orchestrator is actively running for this feature.
+				orchestratorRunning := false
+				if len(manager) > 0 && manager[0] != nil {
+					orchestratorRunning = manager[0].IsFeatureRunning(featureName)
+				}
+				fi.IsRunning = orchestratorRunning
+
 				// Detect paused: state is an active agent state but no
 				// orchestrator is running (e.g. after server restart).
 				if !fi.IsTerminal && !specworkflow.IsGateState(state.State) {
-					orchestratorRunning := false
-					if len(manager) > 0 && manager[0] != nil {
-						orchestratorRunning = manager[0].IsFeatureRunning(featureName)
-					}
 					if !orchestratorRunning {
 						fi.IsPaused = true
 					}

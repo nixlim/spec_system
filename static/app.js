@@ -476,6 +476,14 @@
         textContent: state
       }));
 
+      // Agent running indicator
+      if (wf.is_running) {
+        item.appendChild(el("span", { className: "wsi-running-indicator" }, [
+          el("span", { className: "wsi-running-dot" }),
+          document.createTextNode("running")
+        ]));
+      }
+
       // Metrics: cost, elapsed time
       var metrics = el("div", { className: "wsi-metrics" });
       metrics.appendChild(el("span", { className: "wsi-metric" }, [
@@ -1082,17 +1090,20 @@
         if (val) sel.value = val;
       });
     }
-    // Restore answer inputs and enable/disable based on action
-    if (saved.answers) {
-      $$(".amb-answer", panel).forEach(function (input) {
-        var val = saved.answers[input.dataset.idx];
-        if (val) {
-          input.value = val;
-          // Enable the input if action is "answer"
-          var sel = $(".amb-action[data-idx='" + input.dataset.idx + "']", panel);
-          if (sel && sel.value === "answer") {
-            input.disabled = false;
-          }
+    // Restore answer inputs and show/hide answer rows based on action
+    if (saved.answers || saved.actions) {
+      $$(".amb-answer", panel).forEach(function (textarea) {
+        var idx = textarea.dataset.idx;
+        var answerRow = panel.querySelector(".amb-answer-row[data-idx='" + idx + "']");
+        var sel = $(".amb-action[data-idx='" + idx + "']", panel);
+        var isAnswer = sel && sel.value === "answer";
+        if (isAnswer && !gate2AnswerDisabled) {
+          if (answerRow) answerRow.style.display = "";
+          textarea.disabled = false;
+        }
+        if (saved.answers) {
+          var val = saved.answers[idx];
+          if (val) textarea.value = val;
         }
       });
     }
@@ -1375,6 +1386,15 @@
           textContent: f.state
         });
         nameRow.appendChild(badge);
+
+        // Running indicator
+        if (f.is_running) {
+          nameRow.appendChild(el("span", { className: "workflow-running-badge" }, [
+            el("span", { className: "wsi-running-dot" }),
+            document.createTextNode("agent running")
+          ]));
+        }
+
         info.appendChild(nameRow);
 
         var meta = el("div", { className: "workflow-meta" });
@@ -2451,15 +2471,15 @@
       content += buildGateSectionHtml("Priorities", prHtml);
     }
 
-    // Assumptions
+    // Assumptions — every assumption gets an answer field regardless of confidence
     if (discovery.assumptions && discovery.assumptions.length > 0) {
       var aHtml = "<ul>";
       discovery.assumptions.forEach(function (a, idx) {
         aHtml += "<li><strong>Assumption:</strong> " + escapeHtml(a.assumption) + " (confidence: " + escapeHtml(a.confidence) + ")";
         if (a.question_for_user) {
           aHtml += '<br><em>Question: ' + escapeHtml(a.question_for_user) + "</em>";
-          aHtml += '<br><textarea class="gate-assumption-answer" data-assumption-idx="' + idx + '" placeholder="Your answer (optional)..."></textarea>';
         }
+        aHtml += '<br><textarea class="gate-assumption-answer" data-assumption-idx="' + idx + '" placeholder="Correct this assumption or leave blank to accept..."></textarea>';
         aHtml += "</li>";
       });
       aHtml += "</ul>";
@@ -2741,15 +2761,16 @@
     }
 
     var panel = el("div", { className: "gate-panel" });
-    var header = '<h3><span class="gate-badge">Human Gate 2</span> Ambiguity Resolution</h3>';
+    var header = '<h3><span class="gate-badge">Human Gate 2</span> Ambiguity Resolution ' +
+      '<button id="gate2-copy" class="btn btn-sm" style="background:#eee;color:#333;">Copy</button></h3>';
     var content = "";
 
     content += '<table class="ambiguity-table">';
-    content += "<thead><tr><th>ID</th><th>Section</th><th>Ambiguity</th><th>Agent Assumption</th><th>Question</th><th>Action</th><th>Answer</th></tr></thead>";
+    content += "<thead><tr><th>ID</th><th>Section</th><th>Ambiguity</th><th>Agent Assumption</th><th>Question</th><th>Action</th></tr></thead>";
     content += "<tbody>";
 
     warnings.forEach(function (w, idx) {
-      content += "<tr>" +
+      content += '<tr class="amb-row" data-idx="' + idx + '">' +
         "<td>" + escapeHtml(w.id) + "</td>" +
         "<td>" + escapeHtml(w.section) + "</td>" +
         "<td>" + escapeHtml(w.ambiguity) + "</td>" +
@@ -2760,8 +2781,14 @@
         '<option value="answer"' + (gate2AnswerDisabled ? " disabled" : "") + '>Provide answer</option>' +
         '<option value="defer">Defer</option>' +
         "</select></td>" +
-        '<td><input class="answer-input amb-answer" data-idx="' + idx + '" type="text" placeholder="Your answer..."' + (gate2AnswerDisabled ? " disabled" : " disabled") + "></td>" +
         "</tr>";
+      // Answer row — spans all columns, hidden by default
+      content += '<tr class="amb-answer-row" data-idx="' + idx + '" style="display:none;">' +
+        '<td colspan="6">' +
+        '<textarea class="amb-answer" data-idx="' + idx + '" rows="3" ' +
+        'style="width:100%;font-size:13px;padding:8px;border:1px solid var(--color-border);border-radius:4px;resize:vertical;" ' +
+        'placeholder="Your answer..."' + (gate2AnswerDisabled ? " disabled" : "") + '></textarea>' +
+        '</td></tr>';
     });
 
     content += "</tbody></table>";
@@ -2784,6 +2811,28 @@
     panel.innerHTML = header + content;
     container.appendChild(panel);
 
+    // Wire the copy button — formats table as tab-separated text
+    var gate2CopyBtn = panel.querySelector("#gate2-copy");
+    if (gate2CopyBtn) {
+      gate2CopyBtn.addEventListener("click", function () {
+        var lines = [];
+        lines.push(["ID", "Section", "Ambiguity", "Agent Assumption", "Question"].join("\t"));
+        warnings.forEach(function (w) {
+          lines.push([w.id, w.section, w.ambiguity, w.agent_assumption, w.question_for_user].join("\t"));
+        });
+        var text = lines.join("\n");
+        navigator.clipboard.writeText(text).then(function () {
+          gate2CopyBtn.textContent = "Copied!";
+          setTimeout(function () { gate2CopyBtn.textContent = "Copy"; }, 2000);
+        }).catch(function () {
+          var range = document.createRange();
+          range.selectNodeContents(panel.querySelector(".ambiguity-table"));
+          window.getSelection().removeAllRanges();
+          window.getSelection().addRange(range);
+        });
+      });
+    }
+
     // Restore saved form state from localStorage.
     var savedGate2 = gateFormLoad(taskId, "gate2");
     restoreGate2FormState(panel, savedGate2);
@@ -2791,17 +2840,20 @@
     // Install auto-save on every input/change.
     installGateAutoSave(panel, taskId, "gate2", collectGate2FormState);
 
-    // Enable/disable answer input based on action selection
+    // Show/hide answer row based on action selection
     $$(".amb-action", panel).forEach(function (sel) {
       sel.addEventListener("change", function () {
         var idx = sel.dataset.idx;
-        var input = $(".amb-answer[data-idx='" + idx + "']", panel);
+        var answerRow = panel.querySelector(".amb-answer-row[data-idx='" + idx + "']");
+        var textarea = panel.querySelector(".amb-answer[data-idx='" + idx + "']");
         if (sel.value === "answer" && !gate2AnswerDisabled) {
-          input.disabled = false;
-          input.focus();
+          answerRow.style.display = "";
+          textarea.disabled = false;
+          textarea.focus();
         } else {
-          input.disabled = true;
-          input.value = "";
+          answerRow.style.display = "none";
+          textarea.disabled = true;
+          textarea.value = "";
         }
       });
     });
@@ -2879,7 +2931,7 @@
   // Messages Tab
   // -----------------------------------------------------------------------
 
-  function addMessage(source, content, severity) {
+  function addMessage(source, content, severity, featureName) {
     var container = $("#messages-container");
     if (!container) return;
 
@@ -2891,15 +2943,28 @@
     var sevClass = severity ? " msg-" + severity : "";
     var sourceClass = "msg-source-" + source.replace(/[\[\]]/g, "");
 
-    var entry = el("div", { className: "msg-entry" + sevClass, "data-source": source }, [
-      el("span", { className: "msg-timestamp", textContent: timestamp }),
-      el("span", { className: "msg-source " + sourceClass, textContent: "[" + source + "]" }),
-      el("span", { className: "msg-content", textContent: content })
-    ]);
+    var children = [
+      el("span", { className: "msg-timestamp", textContent: timestamp })
+    ];
+
+    // Add workflow tag if available
+    if (featureName) {
+      children.push(el("span", { className: "msg-workflow", textContent: featureName, title: featureName }));
+      // Track known workflows for the filter dropdown
+      registerMessageWorkflow(featureName);
+    }
+
+    children.push(el("span", { className: "msg-source " + sourceClass, textContent: "[" + source + "]" }));
+    children.push(el("span", { className: "msg-content", textContent: content }));
+
+    var entry = el("div", { className: "msg-entry" + sevClass, "data-source": source }, children);
+    if (featureName) {
+      entry.setAttribute("data-workflow", featureName);
+    }
 
     container.appendChild(entry);
 
-    // Apply current filter
+    // Apply current filters
     applyMessagesFilter(entry);
 
     // Auto-scroll
@@ -2909,15 +2974,37 @@
     }
   }
 
+  // Track known workflows seen in messages for the workflow filter dropdown.
+  var knownMessageWorkflows = {};
+
+  function registerMessageWorkflow(featureName) {
+    if (!featureName || knownMessageWorkflows[featureName]) return;
+    knownMessageWorkflows[featureName] = true;
+    var filterSelect = $("#msg-workflow-filter");
+    if (!filterSelect) return;
+    filterSelect.appendChild(el("option", { value: featureName, textContent: featureName }));
+  }
+
   function applyMessagesFilter(entry) {
     var filterSelect = $("#msg-filter");
     var filterVal = filterSelect ? filterSelect.value : "";
-    if (!filterVal) {
-      entry.classList.remove("msg-hidden");
-      return;
+    var wfFilterSelect = $("#msg-workflow-filter");
+    var wfFilterVal = wfFilterSelect ? wfFilterSelect.value : "";
+
+    var sourceMatch = true;
+    var wfMatch = true;
+
+    if (filterVal) {
+      var entrySource = entry.getAttribute("data-source") || "";
+      sourceMatch = entrySource === filterVal || entrySource.indexOf(filterVal) !== -1;
     }
-    var entrySource = entry.getAttribute("data-source") || "";
-    if (entrySource === filterVal || entrySource.indexOf(filterVal) !== -1) {
+
+    if (wfFilterVal) {
+      var entryWorkflow = entry.getAttribute("data-workflow") || "";
+      wfMatch = entryWorkflow === wfFilterVal;
+    }
+
+    if (sourceMatch && wfMatch) {
       entry.classList.remove("msg-hidden");
     } else {
       entry.classList.add("msg-hidden");
@@ -2932,55 +3019,87 @@
 
   function addWsEventToMessages(envelope) {
     var data = envelope.data || {};
+    var wf = envelope.feature_name || data.feature_name || "";
     switch (envelope.event) {
       case "state_transition":
-        addMessage("state", (data.from || "?") + " -> " + (data.to || "?") + " (round " + (data.round || "?") + ")");
+        addMessage("state", (data.from || "?") + " -> " + (data.to || "?") + " (round " + (data.round || "?") + ")", "", wf);
         break;
       case "agent_dispatch":
-        addMessage("agent", "Dispatching " + (data.agent || "?") + " agent");
+        addMessage("agent", "Dispatching " + (data.agent || "?") + " agent", "", wf);
         break;
       case "agent_complete":
         if (data.success) {
           var details = [];
           if (data.duration_ms != null) details.push((data.duration_ms / 1000).toFixed(1) + "s");
           if (data.cost_usd != null) details.push(formatCost(data.cost_usd));
-          addMessage("agent", (data.agent || "?") + " completed" + (details.length ? " (" + details.join(", ") + ")" : ""), "success");
+          addMessage("agent", (data.agent || "?") + " completed" + (details.length ? " (" + details.join(", ") + ")" : ""), "success", wf);
         } else {
-          addMessage("agent", (data.agent || "?") + " FAILED", "error");
+          addMessage("agent", (data.agent || "?") + " FAILED", "error", wf);
         }
         break;
       case "agent_metrics":
-        addMessage("otel", "Tokens: in=" + (data.input_tokens || 0) + " out=" + (data.output_tokens || 0) + " cache=" + (data.cache_read_tokens || 0) + " | Cost: " + formatCost(data.total_cost_usd) + " | API calls: " + (data.total_api_calls || 0));
+        addMessage("otel", "Tokens: in=" + (data.input_tokens || 0) + " out=" + (data.output_tokens || 0) + " cache=" + (data.cache_read_tokens || 0) + " | Cost: " + formatCost(data.total_cost_usd) + " | API calls: " + (data.total_api_calls || 0), "", wf);
         break;
       case "agent_tool_event":
         var toolStatus = data.success ? "success" : "error";
         var toolMsg = "Tool: " + (data.tool_name || "?") + " (" + Math.round(data.duration_ms || 0) + "ms) " + (data.success ? "OK" : "FAILED");
-        addMessage("otel", toolMsg, toolStatus);
+        addMessage("otel", toolMsg, toolStatus, wf);
         break;
       case "agent_api_event":
         var apiDetails = [];
         if (data.duration_ms) apiDetails.push((data.duration_ms / 1000).toFixed(1) + "s");
         if (data.cost_usd) apiDetails.push(formatCost(data.cost_usd));
         if (data.input_tokens || data.output_tokens) apiDetails.push((data.input_tokens || 0) + " in / " + (data.output_tokens || 0) + " out");
-        addMessage("otel", "API: " + (data.model || "?") + (apiDetails.length ? " (" + apiDetails.join(", ") + ")" : ""));
+        addMessage("otel", "API: " + (data.model || "?") + (apiDetails.length ? " (" + apiDetails.join(", ") + ")" : ""), "", wf);
         break;
       case "workflow_status":
-        addMessage("orchestrator", "State: " + (data.state || "?") + " | Round " + (data.round || "?") + " | Cost " + formatCost(data.cost_usd) + " | " + (data.agent_invocations || 0) + " agents");
+        addMessage("orchestrator", "State: " + (data.state || "?") + " | Round " + (data.round || "?") + " | Cost " + formatCost(data.cost_usd) + " | " + (data.agent_invocations || 0) + " agents", "", wf);
         break;
       case "circuit_breaker":
-        addMessage("orchestrator", "Circuit breaker: " + (data.breaker || "?") + " (value=" + data.value + ", limit=" + data.limit + ")", "warning");
+        addMessage("orchestrator", "Circuit breaker: " + (data.breaker || "?") + " (value=" + data.value + ", limit=" + data.limit + ")", "warning", wf);
         break;
       case "agent_error":
-        addMessage("agent", "Error: " + (data.agent || "?") + " - " + (data.error_type || "?") + " (retry " + (data.retry_count || 0) + "/" + (data.max_retries || 0) + ")", "error");
+        addMessage("agent", "Error: " + (data.agent || "?") + " - " + (data.error_type || "?") + " (retry " + (data.retry_count || 0) + "/" + (data.max_retries || 0) + ")", "error", wf);
         break;
       case "gate_request":
-        addMessage("state", "Human gate: " + (data.gate_type || "?"));
+        addMessage("state", "Human gate: " + (data.gate_type || "?"), "", wf);
         break;
       case "gate_response":
         var severity = data.action === "cancel" ? "error" : (data.action === "correct" ? "warning" : "info");
-        addMessage("state", "Gate response: " + (data.action || "?") + " — " + (data.detail || ""), severity);
+        addMessage("state", "Gate response: " + (data.action || "?") + " — " + (data.detail || ""), severity, wf);
         break;
     }
+  }
+
+  /**
+   * Extracts a workflow feature name from a server log line.
+   * Matches patterns like:
+   *   [otel] metrics [b6-spec]: ...
+   *   [workflow] b6-spec completed ...
+   *   /specs/b6-spec/discovery-output.json
+   *   feature=b6-spec
+   *   feature "b6-spec"
+   *   feature %q → "b6-spec"
+   */
+  function extractFeatureFromLog(line) {
+    // Pattern 1: [tag] ... [feature-name]: (e.g. otel metrics)
+    var m = line.match(/^\[[^\]]+\]\s+\S+\s+\[([^\]]+)\]/);
+    if (m) return m[1];
+
+    // Pattern 2: /specs/feature-name/ in file paths
+    m = line.match(/\/specs\/([^\/\s]+)\//);
+    if (m) return m[1];
+
+    // Pattern 3: feature=name or feature="name" in log key=value pairs
+    m = line.match(/feature[=:]\s*"?([a-zA-Z0-9_-]+)"?/);
+    if (m) return m[1];
+
+    // Pattern 4: quoted feature name after workflow verbs
+    // e.g. [workflow] restarted feature "b6-spec"
+    m = line.match(/feature\s+"([^"]+)"/);
+    if (m) return m[1];
+
+    return "";
   }
 
   function loadServerLogs() {
@@ -3011,7 +3130,10 @@
         if (/error|fail|fatal/i.test(line)) severity = "error";
         else if (/warn/i.test(line)) severity = "warning";
 
-        addMessage(source, line, severity);
+        // Extract feature name from server log text
+        var featureName = extractFeatureFromLog(line);
+
+        addMessage(source, line, severity, featureName);
       });
     }).catch(function () {});
   }
@@ -3042,10 +3164,14 @@
       });
     }
 
-    // Filter dropdown
+    // Filter dropdowns
     var filterSelect = $("#msg-filter");
     if (filterSelect) {
       filterSelect.addEventListener("change", applyAllMessagesFilter);
+    }
+    var wfFilterSelect = $("#msg-workflow-filter");
+    if (wfFilterSelect) {
+      wfFilterSelect.addEventListener("change", applyAllMessagesFilter);
     }
   }
 
