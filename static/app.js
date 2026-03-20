@@ -708,9 +708,10 @@
     }
   }
 
-  function addActivityEntry(message, type) {
+  function addActivityEntry(message, type, featureName) {
     var container = $("#status-activity");
     var typeClass = type ? "activity-" + type : "";
+    var wf = featureName || selectedFeature || "";
 
     var now = new Date();
     var timestamp = String(now.getHours()).padStart(2, "0") + ":" +
@@ -720,8 +721,8 @@
     var children = [
       el("span", { className: "activity-time", textContent: timestamp })
     ];
-    if (selectedFeature) {
-      children.push(el("span", { className: "msg-workflow", textContent: selectedFeature, title: selectedFeature }));
+    if (wf) {
+      children.push(el("span", { className: "msg-workflow", textContent: wf, title: wf }));
     }
     children.push(el("span", { className: "activity-msg", textContent: message }));
 
@@ -758,14 +759,14 @@
 
     var msg = "State: " + (data.from || "?") + " -> " + state;
     if (data.round != null) msg += " (round " + data.round + ")";
-    addActivityEntry(msg, "info");
+    addActivityEntry(msg, "info", data.feature_name);
 
     // Note: workflow status list refresh is handled by handleEvent() which
     // calls refreshWorkflowStatusList() before dispatching to this handler.
   }
 
   function onAgentDispatch(data) {
-    addActivityEntry("Dispatching " + (data.agent || "?") + "...", "info");
+    addActivityEntry("Dispatching " + (data.agent || "?") + "...", "info", data.feature_name);
   }
 
   function onAgentComplete(data) {
@@ -775,9 +776,9 @@
       if (data.duration_ms != null) details.push(data.duration_ms + "ms");
       if (data.cost_usd != null) details.push(formatCost(data.cost_usd));
       if (details.length > 0) msg += " (" + details.join(", ") + ")";
-      addActivityEntry(msg, "success");
+      addActivityEntry(msg, "success", data.feature_name);
     } else {
-      addActivityEntry((data.agent || "?") + " FAILED", "error");
+      addActivityEntry((data.agent || "?") + " FAILED", "error", data.feature_name);
     }
   }
 
@@ -818,7 +819,7 @@
     var msg = "Tool: " + (data.tool_name || "?");
     if (data.duration_ms) msg += " (" + Math.round(data.duration_ms) + "ms)";
     if (!data.success) msg += " FAILED";
-    addActivityEntry(msg, status);
+    addActivityEntry(msg, status, data.feature_name);
   }
 
   function onAgentAPIEvent(data) {
@@ -827,7 +828,7 @@
     if (data.duration_ms) details.push(Math.round(data.duration_ms) + "ms");
     if (data.cost_usd) details.push(formatCost(data.cost_usd));
     if (details.length > 0) msg += " (" + details.join(", ") + ")";
-    addActivityEntry(msg, "info");
+    addActivityEntry(msg, "info", data.feature_name);
   }
 
   // -----------------------------------------------------------------------
@@ -865,14 +866,14 @@
             var toolMsg = "Tool: " + (evt.tool_name || "?");
             if (evt.duration_ms) toolMsg += " (" + Math.round(evt.duration_ms) + "ms)";
             if (!evt.success) toolMsg += " FAILED";
-            addActivityEntry(toolMsg, evt.success ? "success" : "error");
+            addActivityEntry(toolMsg, evt.success ? "success" : "error", featureName);
           } else if (evt.event_type === "api") {
             var apiMsg = "API: " + (evt.model || "?");
             var apiDetails = [];
             if (evt.duration_ms) apiDetails.push(Math.round(evt.duration_ms) + "ms");
             if (evt.cost_usd) apiDetails.push(formatCost(evt.cost_usd));
             if (apiDetails.length > 0) apiMsg += " (" + apiDetails.join(", ") + ")";
-            addActivityEntry(apiMsg, "info");
+            addActivityEntry(apiMsg, "info", featureName);
           }
         }
       }
@@ -1240,6 +1241,12 @@
     addWsEventToMessages(envelope);
 
     var data = envelope.data || {};
+
+    // Ensure feature_name from the envelope is available on the data object
+    // so downstream handlers can access it consistently.
+    if (envelope.feature_name && !data.feature_name) {
+      data.feature_name = envelope.feature_name;
+    }
 
     // Workflow status list updates always apply (all workflows).
     // state_transition also refreshes the list, so it runs unconditionally
