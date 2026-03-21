@@ -542,12 +542,12 @@
     if (match) {
       updateWorkflowStatus(match);
 
-      // Clear activity feed and agent metrics before restoring for the new workflow
+      // Clear activity feed and agent metrics, then restore for the selected workflow.
       clearChildren($("#status-activity"));
       var metricsPanel = $("#agent-metrics");
       if (metricsPanel) metricsPanel.hidden = true;
 
-      restorePersistedMetrics(featureName);
+      restorePersistedMetrics(featureName, true);
     }
 
     // Refresh all data tabs for the newly selected workflow
@@ -711,7 +711,7 @@
   function addActivityEntry(message, type, featureName) {
     var container = $("#status-activity");
     var typeClass = type ? "activity-" + type : "";
-    var wf = featureName || selectedFeature || "";
+    var wf = featureName || "";
 
     var now = new Date();
     var timestamp = String(now.getHours()).padStart(2, "0") + ":" +
@@ -750,6 +750,11 @@
     badge.className = "state-badge " + getStateBadgeClass(state);
     updateWorkflowPipeline(state);
 
+    // Clear active agents on state transition — any agents from the
+    // previous state are done.
+    activeAgents = {};
+    renderActiveAgents();
+
     // Show the panel when a transition happens
     $("#workflow-status").hidden = false;
 
@@ -765,20 +770,138 @@
     // calls refreshWorkflowStatusList() before dispatching to this handler.
   }
 
+  // -----------------------------------------------------------------------
+  // Active Agents Tracker
+  // -----------------------------------------------------------------------
+
+  // activeAgents tracks currently running agents: { agentName: { dispatched: timestamp, provider: "claude"|"codex" } }
+  var activeAgents = {};
+
+  function getAgentProvider(agentName) {
+    if (agentName.endsWith("-codex")) return "codex";
+    if (agentName.endsWith("-claude")) return "claude";
+    return "claude";
+  }
+
+  function getAgentRole(agentName) {
+    if (agentName.startsWith("reviewer-")) return "reviewer";
+    if (agentName.startsWith("holdout-")) return "holdout";
+    return agentName;
+  }
+
+  function renderActiveAgents() {
+    var container = $("#active-agents-panel");
+    if (!container) return;
+
+    var agents = Object.keys(activeAgents);
+    if (agents.length === 0) {
+      container.style.display = "none";
+      return;
+    }
+
+    container.style.display = "block";
+    container.innerHTML = "";
+
+    var header = el("div", { className: "active-agents-header" }, [
+      document.createTextNode("Active Agents "),
+      el("span", { className: "active-agents-count" }, [document.createTextNode("(" + agents.length + ")")])
+    ]);
+    container.appendChild(header);
+
+    var grid = el("div", { className: "active-agents-grid" });
+
+    // Sort agents: reviewers first, then holdouts, then others
+    agents.sort(function(a, b) {
+      var ra = getAgentRole(a), rb = getAgentRole(b);
+      if (ra !== rb) {
+        if (ra === "reviewer") return -1;
+        if (rb === "reviewer") return 1;
+        if (ra === "holdout") return -1;
+        if (rb === "holdout") return 1;
+      }
+      return a.localeCompare(b);
+    });
+
+    for (var i = 0; i < agents.length; i++) {
+      var name = agents[i];
+      var info = activeAgents[name];
+      var provider = info.provider;
+      var role = getAgentRole(name);
+
+      // Friendly label: "clarity" from "reviewer-clarity-claude"
+      var label = name;
+      if (role === "reviewer") {
+        var parts = name.replace("reviewer-", "").split("-");
+        label = parts[0]; // lens name
+      } else if (role === "holdout") {
+        label = "holdout";
+      }
+
+      var chip = el("div", { className: "agent-chip agent-chip-" + provider + " agent-role-" + role });
+      var dot = el("span", { className: "agent-chip-dot agent-dot-" + (info.status || "running") });
+      var labelEl = el("span", { className: "agent-chip-label" }, [document.createTextNode(label)]);
+      var providerEl = el("span", { className: "agent-chip-provider" }, [document.createTextNode(provider)]);
+
+      chip.appendChild(dot);
+      chip.appendChild(labelEl);
+      chip.appendChild(providerEl);
+      chip.title = name;
+      grid.appendChild(chip);
+    }
+
+    container.appendChild(grid);
+  }
+
+  function restoreActiveAgents(featureName) {
+    if (!featureName) return;
+    fetchJSON("/api/workflow/agents?feature=" + encodeURIComponent(featureName)).then(function (data) {
+      if (!data || !data.agents) return;
+      activeAgents = {};
+      for (var i = 0; i < data.agents.length; i++) {
+        var a = data.agents[i];
+        activeAgents[a.name] = {
+          provider: getAgentProvider(a.name),
+          status: a.status || "running"
+        };
+      }
+      renderActiveAgents();
+    }).catch(function () {});
+  }
+
   function onAgentDispatch(data) {
     addActivityEntry("Dispatching " + (data.agent || "?") + "...", "info", data.feature_name);
+    var agentName = data.agent || "";
+    if (agentName) {
+      activeAgents[agentName] = {
+        dispatched: data.timestamp || new Date().toISOString(),
+        provider: getAgentProvider(agentName),
+        status: "running"
+      };
+      renderActiveAgents();
+    }
   }
 
   function onAgentComplete(data) {
+    var agentName = data.agent || "?";
     if (data.success) {
-      var msg = (data.agent || "?") + " completed";
+      var msg = agentName + " completed";
       var details = [];
       if (data.duration_ms != null) details.push(data.duration_ms + "ms");
       if (data.cost_usd != null) details.push(formatCost(data.cost_usd));
       if (details.length > 0) msg += " (" + details.join(", ") + ")";
       addActivityEntry(msg, "success", data.feature_name);
     } else {
-      addActivityEntry((data.agent || "?") + " FAILED", "error", data.feature_name);
+      addActivityEntry(agentName + " FAILED", "error", data.feature_name);
+    }
+    // Update status in active agents panel (keep visible briefly to show result).
+    if (activeAgents[agentName]) {
+      activeAgents[agentName].status = data.success ? "done" : "failed";
+      renderActiveAgents();
+      // Remove after 3 seconds so completed agents fade out.
+      setTimeout(function () {
+        delete activeAgents[agentName];
+        renderActiveAgents();
+      }, 3000);
     }
   }
 
@@ -816,14 +939,16 @@
 
   function onAgentToolEvent(data) {
     var status = data.success ? "success" : "error";
-    var msg = "Tool: " + (data.tool_name || "?");
+    var prefix = data.agent_name ? "[" + data.agent_name + "] " : "";
+    var msg = prefix + "Tool: " + (data.tool_name || "?");
     if (data.duration_ms) msg += " (" + Math.round(data.duration_ms) + "ms)";
     if (!data.success) msg += " FAILED";
     addActivityEntry(msg, status, data.feature_name);
   }
 
   function onAgentAPIEvent(data) {
-    var msg = "API: " + (data.model || "?");
+    var prefix = data.agent_name ? "[" + data.agent_name + "] " : "";
+    var msg = prefix + "API: " + (data.model || "?");
     var details = [];
     if (data.duration_ms) details.push(Math.round(data.duration_ms) + "ms");
     if (data.cost_usd) details.push(formatCost(data.cost_usd));
@@ -839,8 +964,12 @@
    * Loads persisted OTEL metrics and events from SQLite via the HTTP API.
    * Called on page load and WebSocket reconnect to restore dashboard state
    * that would otherwise be lost on browser refresh.
+   *
+   * @param {string} featureName - workflow to restore metrics for
+   * @param {boolean} restoreActivity - if true, also restore activity feed
+   *   entries from persisted events (only on initial load / reconnect)
    */
-  function restorePersistedMetrics(featureName) {
+  function restorePersistedMetrics(featureName, restoreActivity) {
     if (!featureName) return;
     fetchJSON("/api/metrics?feature=" + encodeURIComponent(featureName)).then(function (data) {
       if (!data) return;
@@ -857,8 +986,9 @@
       }
 
       // Restore activity feed from persisted events (newest first from API,
-      // but we add oldest first so newest ends up on top).
-      if (data.events && data.events.length > 0) {
+      // but we add oldest first so newest ends up on top). Only on initial
+      // load or WS reconnect — not on workflow switch.
+      if (restoreActivity && data.events && data.events.length > 0) {
         var events = data.events.slice().reverse(); // oldest first
         for (var i = 0; i < events.length; i++) {
           var evt = events[i];
@@ -901,10 +1031,19 @@
         }
       }
       if (!displayStatus) {
+        // Prefer running workflows over terminal ones.
         for (var j = 0; j < statuses.length; j++) {
-          if (statuses[j].state && statuses[j].state.toUpperCase() !== "IDLE") {
+          if (statuses[j].is_running) {
             displayStatus = statuses[j];
             break;
+          }
+        }
+        if (!displayStatus) {
+          for (var k = 0; k < statuses.length; k++) {
+            if (statuses[k].state && statuses[k].state.toUpperCase() !== "IDLE") {
+              displayStatus = statuses[k];
+              break;
+            }
           }
         }
       }
@@ -919,6 +1058,11 @@
 
       if (state !== "IDLE") {
         updateWorkflowStatus(displayStatus);
+      }
+
+      // Restore active agents from server on page load / reconnect.
+      if (displayStatus.is_running && Object.keys(activeAgents).length === 0) {
+        restoreActiveAgents(displayStatus.feature_name);
       }
 
       // If all workflows are idle or terminal, stop the workflow poller.
@@ -1177,7 +1321,7 @@
           statuses.forEach(function (status) {
             if (status && status.feature_name && status.state && status.state.toUpperCase() !== "IDLE") {
               if (!selectedFeature || status.feature_name === selectedFeature) {
-                restorePersistedMetrics(status.feature_name);
+                restorePersistedMetrics(status.feature_name, true);
               }
             }
           });
@@ -1768,7 +1912,7 @@
             return function () {
               var targetState = selectEl.value;
               var round = parseInt(roundEl.value, 10) || 1;
-              if (!confirm("Rewind '" + featureName + "' to " + targetState + " round " + round + "? Artefacts after this stage will be deleted.")) return;
+              if (!confirm("Rewind '" + featureName + "' to " + targetState + " round " + round + "? Artefacts will be preserved but the workflow will re-run from this stage.")) return;
               rewindBtn.disabled = true;
               rewindBtn.textContent = "Rewinding...";
               fetchJSON("/api/workflow/rewind", {
@@ -1776,7 +1920,7 @@
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ feature_name: featureName, target_state: targetState, round: round })
               }).then(function (data) {
-                addActivityEntry("Workflow rewound: " + featureName + " to " + targetState + " round " + round + " (" + (data.files_removed || 0) + " files removed)", "info");
+                addActivityEntry("Workflow rewound: " + featureName + " to " + targetState + " round " + round + " (artefacts preserved)", "info");
                 // Clear status if this workflow is displayed.
                 var displayed = ($("#status-feature").textContent || "").trim();
                 if (displayed === featureName) {
@@ -2406,7 +2550,8 @@
   function onGateResponse(data) {
     addActivityEntry(
       "Gate response: " + (data.action || "unknown") + " — " + (data.detail || ""),
-      data.action === "cancel" ? "error" : "success"
+      data.action === "cancel" ? "error" : "success",
+      data.feature_name
     );
     // Clear the gate panel since the response was accepted.
     var container = $("#gate-panels");
@@ -2921,9 +3066,27 @@
   }
 
   function onAgentError(data) {
-    addAlertBanner("error", "Agent error: <strong>" + escapeHtml(data.agent) +
+    var detail = data.detail || "";
+    // Extract the most useful part of the error detail for display.
+    // Look for ERROR: or known provider messages.
+    var displayDetail = "";
+    if (detail) {
+      var errorMatch = detail.match(/ERROR:\s*(.+?)(?:\n|$)/);
+      if (errorMatch) {
+        displayDetail = errorMatch[1].trim();
+      } else if (detail.length > 200) {
+        displayDetail = detail.substring(0, 200) + "...";
+      } else {
+        displayDetail = detail;
+      }
+    }
+    var msg = "Agent error: <strong>" + escapeHtml(data.agent) +
       "</strong> — " + escapeHtml(data.error_type) +
-      " (retry " + data.retry_count + "/" + data.max_retries + ")");
+      " (retry " + data.retry_count + "/" + data.max_retries + ")";
+    if (displayDetail) {
+      msg += "<br><small>" + escapeHtml(displayDetail) + "</small>";
+    }
+    addAlertBanner("error", msg);
   }
 
   function addAlertBanner(type, html) {
@@ -3054,15 +3217,17 @@
         break;
       case "agent_tool_event":
         var toolStatus = data.success ? "success" : "error";
-        var toolMsg = "Tool: " + (data.tool_name || "?") + " (" + Math.round(data.duration_ms || 0) + "ms) " + (data.success ? "OK" : "FAILED");
+        var toolAgent = data.agent_name ? "[" + data.agent_name + "] " : "";
+        var toolMsg = toolAgent + "Tool: " + (data.tool_name || "?") + " (" + Math.round(data.duration_ms || 0) + "ms) " + (data.success ? "OK" : "FAILED");
         addMessage("otel", toolMsg, toolStatus, wf);
         break;
       case "agent_api_event":
+        var apiAgent = data.agent_name ? "[" + data.agent_name + "] " : "";
         var apiDetails = [];
         if (data.duration_ms) apiDetails.push((data.duration_ms / 1000).toFixed(1) + "s");
         if (data.cost_usd) apiDetails.push(formatCost(data.cost_usd));
         if (data.input_tokens || data.output_tokens) apiDetails.push((data.input_tokens || 0) + " in / " + (data.output_tokens || 0) + " out");
-        addMessage("otel", "API: " + (data.model || "?") + (apiDetails.length ? " (" + apiDetails.join(", ") + ")" : ""), "", wf);
+        addMessage("otel", apiAgent + "API: " + (data.model || "?") + (apiDetails.length ? " (" + apiDetails.join(", ") + ")" : ""), "", wf);
         break;
       case "workflow_status":
         addMessage("orchestrator", "State: " + (data.state || "?") + " | Round " + (data.round || "?") + " | Cost " + formatCost(data.cost_usd) + " | " + (data.agent_invocations || 0) + " agents", "", wf);
@@ -3071,7 +3236,12 @@
         addMessage("orchestrator", "Circuit breaker: " + (data.breaker || "?") + " (value=" + data.value + ", limit=" + data.limit + ")", "warning", wf);
         break;
       case "agent_error":
-        addMessage("agent", "Error: " + (data.agent || "?") + " - " + (data.error_type || "?") + " (retry " + (data.retry_count || 0) + "/" + (data.max_retries || 0) + ")", "error", wf);
+        var errMsg = "Error: " + (data.agent || "?") + " - " + (data.error_type || "?") + " (retry " + (data.retry_count || 0) + "/" + (data.max_retries || 0) + ")";
+        if (data.detail) {
+          var m = (data.detail || "").match(/ERROR:\s*(.+?)(?:\n|$)/);
+          if (m) errMsg += " — " + m[1].trim();
+        }
+        addMessage("agent", errMsg, "error", wf);
         break;
       case "gate_request":
         addMessage("state", "Human gate: " + (data.gate_type || "?"), "", wf);
@@ -3274,6 +3444,26 @@
       var statuses = Array.isArray(data) ? data : [data];
       renderWorkflowStatusList(statuses);
 
+      // Auto-select on page load: prefer running workflows over terminal ones.
+      if (!selectedFeature) {
+        var runningWf = null;
+        var anyNonIdle = null;
+        for (var si = 0; si < statuses.length; si++) {
+          var s = statuses[si];
+          if (!s || !s.state || !s.feature_name) continue;
+          var st = s.state.toUpperCase();
+          if (st === "IDLE") continue;
+          if (!anyNonIdle) anyNonIdle = s;
+          if (s.is_running) { runningWf = s; break; }
+        }
+        var autoSelect = runningWf || anyNonIdle;
+        if (autoSelect) {
+          selectedFeature = autoSelect.feature_name;
+          renderWorkflowStatusList(statuses);
+          updateWorkflowStatus(autoSelect);
+        }
+      }
+
       // Process each workflow: restore metrics and show gate panels.
       statuses.forEach(function (status) {
         if (!status || !status.state) return;
@@ -3283,14 +3473,8 @@
 
         // Restore persisted metrics for active workflows.
         if (state !== "IDLE") {
-          // Auto-select the first non-idle workflow if none selected.
-          if (!selectedFeature) {
-            selectedFeature = feature;
-            renderWorkflowStatusList(statuses); // re-render with selection
-            updateWorkflowStatus(status);
-          }
           if (feature === selectedFeature) {
-            restorePersistedMetrics(feature);
+            restorePersistedMetrics(feature, true);
           }
         }
 

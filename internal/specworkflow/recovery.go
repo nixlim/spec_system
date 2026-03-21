@@ -71,6 +71,9 @@ var contextOverflowPatterns = []string{
 // rateLimitPatterns are stderr substrings that indicate rate limiting.
 var rateLimitPatterns = []string{
 	"rate limit",
+	"rate_limit",
+	"usage limit",
+	"usage_limit",
 	"429",
 }
 

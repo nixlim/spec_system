@@ -129,6 +129,7 @@ func main() {
 	mux.HandleFunc("/api/workflow/start", api.HandleStartWorkflow(workflowManager))
 	mux.HandleFunc("/api/workflow/cancel", api.HandleCancelWorkflowAPI(workflowManager))
 	mux.HandleFunc("/api/workflow/status", api.HandleGetWorkflowStatus(workflowManager))
+	mux.HandleFunc("/api/workflow/agents", api.HandleGetWorkflowAgents(workflowManager))
 	mux.HandleFunc("/api/tasks/", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[routing] %s %s", r.Method, r.URL.Path)
 		handleTaskRouting(workflowManager).ServeHTTP(w, r)

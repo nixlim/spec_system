@@ -6,12 +6,21 @@ skill_paths:
   plan_spec: "/Users/nixlim/.claude/skills/plan-spec"
   grill_spec: "/Users/nixlim/.claude/skills/grill-spec"
 
+# Dual-provider review: set to false to use claude-only reviewers and holdout agents
+enable_codex_reviewers: true
+# Model for codex agents (reviewers + holdout, passed as -m flag)
+codex_model: "gpt-5.4"
+# Timeout for all reviewer agents in seconds (both claude and codex)
+reviewer_timeout_seconds: 900
+# Timeout for holdout generation agents in seconds
+holdout_timeout_seconds: 900
+
 # Workflow limits (defaults shown — uncomment to override)
-# max_rounds: 5
-# min_rounds: 2
-# max_total_findings: 60
-# staleness_threshold: 2
-# max_wall_clock_minutes: 60
-# max_cost_usd: 50.0
-# max_gate_corrections: 3
-# max_retries: 2
+max_rounds: 5
+min_rounds: 2
+max_total_findings: 500
+staleness_threshold: 3
+max_wall_clock_minutes: 6000
+max_cost_usd: 5000.0
+max_gate_corrections: 5
+max_retries: 3

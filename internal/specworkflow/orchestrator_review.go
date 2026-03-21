@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -25,21 +26,64 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 	outputPaths := make(map[string]string)
 
 	for _, lens := range []string{"clarity", "consistency", "security", "correctness"} {
-		p, err := o.promptBuilder.BuildReviewerPrompt(lens, state.Round, specPath)
+		letter := reviewerGroupLetter[lens]
+		outPath := filepath.Join(specDir, fmt.Sprintf("review-%s-claude-round-%d.json", letter, state.Round))
+		p, err := o.promptBuilder.BuildReviewerPrompt(lens, state.Round, specPath, outPath)
 		if err != nil {
 			return fmt.Errorf("build reviewer prompt for %s: %w", lens, err)
 		}
 		prompts[lens] = p
-		letter := reviewerGroupLetter[lens]
-		outputPaths[lens] = filepath.Join(specDir, fmt.Sprintf("review-%s-round-%d.json", letter, state.Round))
+		outputPaths[lens] = outPath
 	}
 
-	// Dispatch all 4 reviewers in parallel.
+	// Build codex output paths when codex runner is available.
+	var codexOutputPaths map[string]string
+	if o.codexRunner != nil {
+		codexOutputPaths = make(map[string]string)
+		for _, lens := range []string{"clarity", "consistency", "security", "correctness"} {
+			letter := reviewerGroupLetter[lens]
+			codexOutputPaths[lens] = filepath.Join(specDir, fmt.Sprintf("review-%s-codex-round-%d.json", letter, state.Round))
+		}
+	}
+
+	// Emit dispatch events and track active agents so the dashboard shows
+	// which agents are currently running.
+	for _, lens := range []string{"clarity", "consistency", "security", "correctness"} {
+		name := "reviewer-" + lens + "-claude"
+		o.SetAgentStatus(name, "running")
+		o.emitter.Emit(NewAgentDispatchEvent(name, state.Round))
+	}
+	if o.codexRunner != nil {
+		for _, lens := range []string{"clarity", "consistency", "security", "correctness"} {
+			name := "reviewer-" + lens + "-codex"
+			o.SetAgentStatus(name, "running")
+			o.emitter.Emit(NewAgentDispatchEvent(name, state.Round))
+		}
+	}
+
+	// Dispatch reviewers in parallel (4 claude + optionally 4 codex).
+	// The onComplete callback fires in real-time as each agent finishes,
+	// updating the dashboard immediately rather than waiting for all to complete.
 	dispatchCfg := ReviewDispatchConfig{
 		MaxRetries:     o.config.MaxRetries,
-		TimeoutSeconds: 120,
+		TimeoutSeconds: o.config.ReviewerTimeoutSeconds,
 	}
-	result, err := DispatchReviewers(o.runner, prompts, outputPaths, dispatchCfg, func(d time.Duration) {})
+	round := state.Round
+	result, err := DispatchReviewers(o.runner, o.codexRunner, prompts, outputPaths, codexOutputPaths, dispatchCfg, func(d time.Duration) {},
+		func(r ReviewerResult) {
+			success := r.Error == nil
+			if success {
+				o.SetAgentStatus(r.AgentName, "done")
+			} else {
+				o.SetAgentStatus(r.AgentName, "failed")
+			}
+			o.emitter.Emit(NewAgentCompleteEvent(r.AgentName, round, success, r.DurationMS, r.CostUSD))
+			if r.Error != nil {
+				o.emitter.Emit(NewAgentErrorEvent(r.AgentName, r.Error.Type, r.Error.Detail, r.Error.RetryCount, r.Error.MaxRetries))
+			}
+		},
+	)
+
 	if err != nil {
 		return fmt.Errorf("dispatch reviewers: %w", err)
 	}
@@ -87,6 +131,13 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 		state.HadCriticalFindings = true
 	}
 
+	// Dispatch holdout generation agents (dual-provider when codex available).
+	if holdoutErr := o.dispatchHoldoutGeneration(state, specDir, merged); holdoutErr != nil {
+		log.Printf("[orchestrator] holdout generation escalation: %v", holdoutErr)
+		o.escalateFrom(StateReviewing)
+		return nil
+	}
+
 	// If zero CRITICAL/MAJOR: skip to JUDGING directly.
 	if state.FindingsSummary.OpenCritical == 0 && state.FindingsSummary.OpenMajor == 0 {
 		o.logTransition(StateReviewing, StateJudging)
@@ -100,6 +151,138 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 		}
 	}
 	return nil
+}
+
+// dispatchHoldoutGeneration dispatches holdout agents (1 claude + optionally
+// 1 codex) in parallel, merges their markdown outputs with provider
+// attribution, and writes the merged holdout file. If only one provider
+// fails, the workflow proceeds with single-provider holdouts. If both
+// fail, returns an error for escalation.
+func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specDir string, merged *MergedFindings) error {
+	specPath := o.currentSpecPath(state)
+	specContent, err := os.ReadFile(specPath)
+	if err != nil {
+		log.Printf("[orchestrator] warning: cannot read spec for holdout generation: %v", err)
+		return nil // non-fatal: spec read failure shouldn't block the review flow
+	}
+
+	// Build holdout prompt from spec content and findings summary.
+	holdoutPrompt := fmt.Sprintf("Generate holdout evaluation scenarios for this specification.\n\n"+
+		"## Spec Content\n\n%s\n\n## Findings Summary\n\nRound %d: %d findings after dedup (%d critical, %d major).\n",
+		string(specContent), state.Round, merged.TotalAfterDedup,
+		state.FindingsSummary.OpenCritical, state.FindingsSummary.OpenMajor)
+
+	timeout := o.config.HoldoutTimeoutSeconds
+
+	type holdoutResult struct {
+		provider string
+		mdPath   string
+		jsonPath string
+		cost     float64
+		err      error
+	}
+
+	var wg sync.WaitGroup
+	resultsCh := make(chan holdoutResult, 2)
+
+	// Track and emit dispatch events for holdout agents.
+	o.SetAgentStatus("holdout-claude", "running")
+	o.emitter.Emit(NewAgentDispatchEvent("holdout-claude", state.Round))
+	if o.codexHoldoutRunner != nil {
+		o.SetAgentStatus("holdout-codex", "running")
+		o.emitter.Emit(NewAgentDispatchEvent("holdout-codex", state.Round))
+	}
+
+	// Claude holdout agent — uses o.runner.Run() directly with configured
+	// holdout timeout (not dispatchAgent which hardcodes 120s).
+	claudeJSONPath := filepath.Join(specDir, fmt.Sprintf("holdout-claude-round-%d.json", state.Round))
+	claudeMDPath := filepath.Join(specDir, fmt.Sprintf("holdouts-claude-round-%d.md", state.Round))
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		exitCode, stderr, cost, _, runErr := o.runner.Run(holdoutPrompt, claudeJSONPath, timeout)
+		var dispatchErr error
+		if runErr != nil {
+			dispatchErr = runErr
+		} else if exitCode != 0 {
+			dispatchErr = fmt.Errorf("claude holdout exited with code %d: %s", exitCode, stderr)
+		}
+		resultsCh <- holdoutResult{provider: "claude", mdPath: claudeMDPath, jsonPath: claudeJSONPath, cost: cost, err: dispatchErr}
+	}()
+
+	// Codex holdout agent (when available).
+	if o.codexHoldoutRunner != nil {
+		codexJSONPath := filepath.Join(specDir, fmt.Sprintf("holdout-codex-round-%d.json", state.Round))
+		codexMDPath := filepath.Join(specDir, fmt.Sprintf("holdouts-codex-round-%d.md", state.Round))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			exitCode, stderr, _, _, runErr := o.codexHoldoutRunner.Run(
+				holdoutPrompt, codexJSONPath, timeout)
+			var dispatchErr error
+			if runErr != nil {
+				dispatchErr = runErr
+			} else if exitCode != 0 {
+				dispatchErr = fmt.Errorf("codex holdout exited with code %d: %s", exitCode, stderr)
+			}
+			resultsCh <- holdoutResult{
+				provider: "codex", mdPath: codexMDPath, jsonPath: codexJSONPath,
+				cost: 0, err: dispatchErr,
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(resultsCh)
+
+	// Collect results and emit completion events.
+	var claudeOK, codexOK bool
+	var claudeMD, codexMD string
+	for r := range resultsCh {
+		state.CumulativeCostUSD += r.cost
+		if r.err != nil {
+			log.Printf("[orchestrator] holdout-%s failed: %v", r.provider, r.err)
+			o.SetAgentStatus("holdout-"+r.provider, "failed")
+			o.emitter.Emit(NewAgentCompleteEvent("holdout-"+r.provider, state.Round, false, 0, r.cost))
+			continue
+		}
+		// Try to read the markdown file written by the agent.
+		// The agent may have written only the JSON output (via --output-last-message)
+		// without a separate markdown file. If the runner succeeded but no MD
+		// exists, treat as success with empty markdown (the JSON is what matters).
+		var md string
+		if mdContent, readErr := os.ReadFile(r.mdPath); readErr == nil {
+			md = string(mdContent)
+		} else {
+			log.Printf("[orchestrator] holdout-%s: no markdown file at %s (JSON output exists)", r.provider, r.mdPath)
+		}
+		o.SetAgentStatus("holdout-"+r.provider, "done")
+		o.emitter.Emit(NewAgentCompleteEvent("holdout-"+r.provider, state.Round, true, 0, r.cost))
+		switch r.provider {
+		case "claude":
+			claudeOK = true
+			claudeMD = md
+		case "codex":
+			codexOK = true
+			codexMD = md
+		}
+	}
+
+	// Merge holdout outputs with provider attribution.
+	if claudeOK || codexOK {
+		mergedMD := MergeHoldoutMarkdown(state.Round, claudeMD, codexMD, claudeOK, codexOK)
+		mergedPath := filepath.Join(specDir, fmt.Sprintf("holdouts-round-%d.md", state.Round))
+		if writeErr := os.WriteFile(mergedPath, []byte(mergedMD), 0o644); writeErr != nil {
+			log.Printf("[orchestrator] warning: failed to write merged holdouts: %v", writeErr)
+		} else {
+			log.Printf("[orchestrator] holdout generation complete: claude=%v codex=%v merged=%s",
+				claudeOK, codexOK, mergedPath)
+		}
+		return nil
+	}
+
+	// Both providers failed — escalate per spec US-8 Acceptance Scenario 5.
+	return fmt.Errorf("holdout generation failed: all providers failed — escalation required")
 }
 
 // handleRevising dispatches the revision agent to address findings and

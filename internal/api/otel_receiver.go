@@ -97,6 +97,7 @@ type AgentToolPayload struct {
 	Success    bool    `json:"success"`
 	DurationMS float64 `json:"duration_ms"`
 	Timestamp  string  `json:"timestamp"`
+	AgentName  string  `json:"agent_name,omitempty"`
 }
 
 // AgentAPIPayload is the WebSocket event payload for agent_api_event events.
@@ -105,6 +106,7 @@ type AgentAPIPayload struct {
 	CostUSD    float64 `json:"cost_usd"`
 	DurationMS float64 `json:"duration_ms"`
 	Timestamp  string  `json:"timestamp"`
+	AgentName  string  `json:"agent_name,omitempty"`
 }
 
 // NewOTELReceiver creates an OTELReceiver that broadcasts events to the
@@ -260,6 +262,19 @@ func extractWorkflowFeature(attrs []*commonpb.KeyValue) string {
 	return ""
 }
 
+// extractWorkflowAgent reads the workflow.agent resource attribute
+// from the given OTLP KeyValue slice. Returns empty string if not found.
+func extractWorkflowAgent(attrs []*commonpb.KeyValue) string {
+	for _, kv := range attrs {
+		if kv.GetKey() == "workflow.agent" {
+			if sv, ok := kv.GetValue().GetValue().(*commonpb.AnyValue_StringValue); ok {
+				return sv.StringValue
+			}
+		}
+	}
+	return ""
+}
+
 // Export handles incoming ExportMetricsServiceRequest RPCs.
 func (recv *OTELReceiver) Export(_ context.Context, req *colmetricspb.ExportMetricsServiceRequest) (*colmetricspb.ExportMetricsServiceResponse, error) {
 	if req == nil {
@@ -390,9 +405,10 @@ func (h *otelLogsHandler) Export(_ context.Context, req *collogspb.ExportLogsSer
 		if featureName == "" {
 			continue
 		}
+		agentName := extractWorkflowAgent(resAttrs)
 		for _, sl := range rl.GetScopeLogs() {
 			for _, lr := range sl.GetLogRecords() {
-				h.recv.processLogRecord(featureName, lr)
+				h.recv.processLogRecord(featureName, agentName, lr)
 			}
 		}
 	}
@@ -404,7 +420,7 @@ func (h *otelLogsHandler) Export(_ context.Context, req *collogspb.ExportLogsSer
 // Log processing
 // ---------------------------------------------------------------------------
 
-func (recv *OTELReceiver) processLogRecord(featureName string, lr *logspb.LogRecord) {
+func (recv *OTELReceiver) processLogRecord(featureName string, agentName string, lr *logspb.LogRecord) {
 	// Determine event name: prefer EventName field, fall back to body string.
 	eventName := lr.GetEventName()
 	if eventName == "" && lr.GetBody() != nil {
@@ -446,6 +462,7 @@ func (recv *OTELReceiver) processLogRecord(featureName string, lr *logspb.LogRec
 				Success:    success,
 				DurationMS: durationMS,
 				Timestamp:  now,
+				AgentName:  agentName,
 			},
 		})
 
@@ -491,6 +508,7 @@ func (recv *OTELReceiver) processLogRecord(featureName string, lr *logspb.LogRec
 				CostUSD:    costUSD,
 				DurationMS: durationMS,
 				Timestamp:  now,
+				AgentName:  agentName,
 			},
 		})
 

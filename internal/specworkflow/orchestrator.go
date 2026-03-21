@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -71,6 +72,8 @@ type OrchestratorConfig struct {
 	// workflow state so the dashboard reflects real cost even when the CLI
 	// reports zero. Optional — if nil, only CLI-reported cost is used.
 	CostProvider CostProvider
+	// LookPathFunc is an optional override for exec.LookPath, used for testing.
+	LookPathFunc func(file string) (string, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -91,6 +94,8 @@ type Orchestrator struct {
 	skills          *SkillCache
 	progressTracker *ProgressTracker
 	runner          AgentRunner
+	codexRunner        AgentRunner
+	codexHoldoutRunner AgentRunner
 	cancelled       atomic.Bool
 	mu              sync.Mutex
 	running         bool
@@ -110,6 +115,10 @@ type Orchestrator struct {
 	// issueHistory tracks per-finding status over rounds for staleness detection.
 	// Keys are finding IDs; values are the status recorded at the end of each round.
 	issueHistory map[string][]string
+
+	// activeAgents tracks currently dispatched agents by name with their status.
+	activeAgentsMu sync.RWMutex
+	activeAgents   map[string]string // agent name -> status ("running", "done", "failed")
 }
 
 // NewOrchestrator creates a fully initialised Orchestrator from the given
@@ -146,6 +155,34 @@ func (o *Orchestrator) IsRunning() bool {
 // cancellation is checked before every agent dispatch.
 func (o *Orchestrator) Cancel() {
 	o.cancelled.Store(true)
+}
+
+// AgentStatus represents a currently tracked agent and its status.
+type AgentStatus struct {
+	Name   string `json:"name"`
+	Status string `json:"status"` // "running", "done", "failed"
+}
+
+// SetAgentStatus updates the status of an active agent.
+func (o *Orchestrator) SetAgentStatus(name, status string) {
+	o.activeAgentsMu.Lock()
+	defer o.activeAgentsMu.Unlock()
+	if status == "" {
+		delete(o.activeAgents, name)
+	} else {
+		o.activeAgents[name] = status
+	}
+}
+
+// GetActiveAgents returns a snapshot of all currently tracked agents.
+func (o *Orchestrator) GetActiveAgents() []AgentStatus {
+	o.activeAgentsMu.RLock()
+	defer o.activeAgentsMu.RUnlock()
+	agents := make([]AgentStatus, 0, len(o.activeAgents))
+	for name, status := range o.activeAgents {
+		agents = append(agents, AgentStatus{Name: name, Status: status})
+	}
+	return agents
 }
 
 // HandleGateResponse delivers a human gate response to the running workflow.
@@ -293,10 +330,27 @@ func (o *Orchestrator) RunWorkflow(goal GoalInput) error {
 
 // newOrchestrator contains the full construction logic for NewOrchestrator.
 func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
+	// Detect codex CLI availability when codex reviewers are enabled.
+	var codexRunner AgentRunner
+	var codexHoldoutRunner AgentRunner
+	if cfg.Config.EnableCodexReviewers {
+		lookPath := cfg.LookPathFunc
+		if lookPath == nil {
+			lookPath = exec.LookPath
+		}
+		if _, err := lookPath("codex"); err == nil {
+			codexRunner = DefaultCodexRunner(cfg.Config.CodexModel, cfg.WorkspaceDir, ReviewerOutputSchema())
+			codexHoldoutRunner = DefaultCodexRunner(cfg.Config.CodexModel, cfg.WorkspaceDir, HoldoutOutputSchema())
+			log.Printf("[orchestrator] codex CLI detected — dual-provider review enabled")
+		} else {
+			log.Printf("[orchestrator] WARNING: codex CLI not found — codex reviewers disabled, running claude-only")
+		}
+	}
+
 	// Validate the agent team configuration to ensure all required agents
 	// are defined. This catches misconfiguration at construction time rather
 	// than at dispatch time.
-	teamCfg := DefaultTeamConfig()
+	teamCfg := DefaultTeamConfig(codexRunner != nil)
 	if err := ValidateTeamConfig(teamCfg); err != nil {
 		return nil, fmt.Errorf("invalid team configuration: %w", err)
 	}
@@ -390,11 +444,14 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 		skills:          skills,
 		progressTracker: NewProgressTracker(),
 		runner:          cfg.Runner,
+		codexRunner:        codexRunner,
+		codexHoldoutRunner: codexHoldoutRunner,
 		costProvider:    cfg.CostProvider,
 		workspaceDir:    cfg.WorkspaceDir,
 		featureName:     cfg.FeatureName,
 		gateCh:          make(chan GateResponse, 1),
 		issueHistory:    make(map[string][]string),
+		activeAgents:    make(map[string]string),
 	}
 
 	return orch, nil
@@ -440,11 +497,15 @@ func ReloadFindings(tracker *IssueTracker, specDir string, maxRound int) {
 		}
 
 		// Step 3: Replay judge output (addressed → verified, etc.).
+		// During replay, transition errors on already-terminal findings are
+		// expected (e.g. a round-2 judge referencing a finding that was
+		// closed after round 1). These are logged as warnings, not errors.
 		judgePath := filepath.Join(specDir, fmt.Sprintf("judge-round-%d.json", round))
 		if judgeData, err := os.ReadFile(judgePath); err == nil {
 			var judge JudgeOutput
 			if err := json.Unmarshal(judgeData, &judge); err == nil {
 				if warnings, err := tracker.ApplyJudgeUpdates(&judge, round); err != nil {
+					// Downgrade transition errors to warnings during replay.
 					log.Printf("[orchestrator] warning: replay judge round %d: %v", round, err)
 				} else {
 					for _, w := range warnings {

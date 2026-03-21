@@ -177,8 +177,8 @@ func (t *IssueTracker) TransitionIssue(findingID string, newStatus IssueStatus, 
 
 // ApplyRevisionChanges processes a RevisionOutput and transitions each finding
 // with action "revised" to StatusAddressed. Findings referenced in the revision
-// but not present in the tracker are collected as warnings. Returns any
-// warnings and the first transition error encountered, if any.
+// but not present in the tracker are collected as warnings. Transition errors
+// on individual findings are collected as warnings rather than halting.
 func (t *IssueTracker) ApplyRevisionChanges(revision *RevisionOutput, round int) (warnings []string, err error) {
 	for _, change := range revision.Changes {
 		if change.Action != "revised" {
@@ -189,7 +189,7 @@ func (t *IssueTracker) ApplyRevisionChanges(revision *RevisionOutput, round int)
 			continue
 		}
 		if err := t.TransitionIssue(change.FindingID, StatusAddressed, round, change.Description); err != nil {
-			return warnings, fmt.Errorf("applying revision change for %q: %w", change.FindingID, err)
+			warnings = append(warnings, fmt.Sprintf("applying revision change for %q: %v", change.FindingID, err))
 		}
 	}
 	return warnings, nil
@@ -198,7 +198,10 @@ func (t *IssueTracker) ApplyRevisionChanges(revision *RevisionOutput, round int)
 // ApplyJudgeUpdates processes a JudgeOutput and transitions each finding to
 // its new status (verified, reopened, or dismissed). Findings referenced in
 // the judge output but not present in the tracker are collected as warnings.
-// Returns any warnings and the first transition error encountered, if any.
+// Transition errors on individual findings are collected as warnings rather
+// than halting — one invalid transition should not prevent other valid
+// transitions from being applied (especially important during replay after
+// rewind where findings may already be in terminal states).
 func (t *IssueTracker) ApplyJudgeUpdates(judge *JudgeOutput, round int) (warnings []string, err error) {
 	for _, update := range judge.IssueUpdates {
 		if _, ok := t.Issues[update.FindingID]; !ok {
@@ -207,7 +210,7 @@ func (t *IssueTracker) ApplyJudgeUpdates(judge *JudgeOutput, round int) (warning
 		}
 		newStatus := IssueStatus(update.NewStatus)
 		if err := t.TransitionIssue(update.FindingID, newStatus, round, update.Explanation); err != nil {
-			return warnings, fmt.Errorf("applying judge update for %q: %w", update.FindingID, err)
+			warnings = append(warnings, fmt.Sprintf("applying judge update for %q: %v", update.FindingID, err))
 		}
 	}
 	return warnings, nil

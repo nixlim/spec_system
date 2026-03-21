@@ -133,6 +133,8 @@ type AgentErrorEvent struct {
 	Agent string `json:"agent"`
 	// ErrorType classifies the error (e.g. "timeout", "rate_limit", "invalid_output").
 	ErrorType string `json:"error_type"`
+	// Detail is the human-readable error message (e.g. provider error text).
+	Detail string `json:"detail,omitempty"`
 	// RetryCount is how many retries have been attempted so far.
 	RetryCount int `json:"retry_count"`
 	// MaxRetries is the maximum number of retries allowed.
@@ -391,12 +393,13 @@ func NewCircuitBreakerEvent(breaker string, value, limit interface{}) EventEnvel
 }
 
 // NewAgentErrorEvent creates an EventEnvelope for an agent error notification.
-func NewAgentErrorEvent(agent, errorType string, retryCount, maxRetries int) EventEnvelope {
+func NewAgentErrorEvent(agent, errorType, detail string, retryCount, maxRetries int) EventEnvelope {
 	return EventEnvelope{
 		Event: EventAgentError,
 		Data: AgentErrorEvent{
 			Agent:      agent,
 			ErrorType:  errorType,
+			Detail:     detail,
 			RetryCount: retryCount,
 			MaxRetries: maxRetries,
 		},

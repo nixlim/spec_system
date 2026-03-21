@@ -306,10 +306,9 @@ func (pb *PromptBuilder) BuildDrafterPrompt(confirmedReqsPath string, userAnswer
 }
 
 // BuildReviewerPrompt constructs the prompt for a reviewer agent assigned to
-// a specific lens group. The lensGroup must be one of "clarity", "consistency",
-// "security", or "correctness". The prompt embeds the review constitution and
-// only the principles relevant to the assigned lenses.
-func (pb *PromptBuilder) BuildReviewerPrompt(lensGroup string, round int, specPath string) (string, error) {
+// a specific lens group. If outputPath is non-empty, it overrides the default
+// output file path in the prompt (used for provider-suffixed file names).
+func (pb *PromptBuilder) BuildReviewerPrompt(lensGroup string, round int, specPath string, outputPath ...string) (string, error) {
 	lenses, ok := lensGroupMap[lensGroup]
 	if !ok {
 		return "", fmt.Errorf("unknown lens group: %q (valid: clarity, consistency, security, correctness)", lensGroup)
@@ -361,8 +360,11 @@ func (pb *PromptBuilder) BuildReviewerPrompt(lensGroup string, round int, specPa
 	b.WriteString("- structural_integrity (object): performed (bool), checks (array of IntegrityCheck)\n")
 	b.WriteString("- markdown_report_file (string, required)\n\n")
 
-	// Output path.
+	// Output path — use override if provided, otherwise default.
 	outPath := filepath.Join(pb.specDir(), fmt.Sprintf("review-%s-round-%d.json", letter, round))
+	if len(outputPath) > 0 && outputPath[0] != "" {
+		outPath = outputPath[0]
+	}
 	b.WriteString("## Output File\n\n")
 	fmt.Fprintf(&b, "Write your JSON output to: %s\n", outPath)
 

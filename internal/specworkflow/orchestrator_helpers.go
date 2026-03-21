@@ -108,7 +108,7 @@ func (o *Orchestrator) dispatchAgent(agentName, prompt, outputPath string) (cost
 		o.logger.LogAgentComplete(agentName, agentName, duration, cost, false)
 		o.logger.LogAgentError(agentName, errType, runErr.Error())
 		o.emitter.Emit(NewAgentCompleteEvent(agentName, state.Round, false, duration, cost))
-		o.emitter.Emit(NewAgentErrorEvent(agentName, errType, 0, o.config.MaxRetries))
+		o.emitter.Emit(NewAgentErrorEvent(agentName, errType, runErr.Error(), 0, o.config.MaxRetries))
 		return cost, duration, fmt.Errorf("agent %s failed: %s — %s", agentName, errType, runErr.Error())
 	}
 
@@ -118,7 +118,7 @@ func (o *Orchestrator) dispatchAgent(agentName, prompt, outputPath string) (cost
 		o.logger.LogAgentComplete(agentName, agentName, duration, cost, false)
 		o.logger.LogAgentError(agentName, failureType, stderr)
 		o.emitter.Emit(NewAgentCompleteEvent(agentName, state.Round, false, duration, cost))
-		o.emitter.Emit(NewAgentErrorEvent(agentName, failureType, 0, o.config.MaxRetries))
+		o.emitter.Emit(NewAgentErrorEvent(agentName, failureType, stderr, 0, o.config.MaxRetries))
 		return cost, duration, fmt.Errorf("agent %s failed: %s", agentName, failureType)
 	}
 

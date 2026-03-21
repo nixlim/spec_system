@@ -95,200 +95,57 @@ func fileExists(names []string, name string) bool {
 	return false
 }
 
-func TestRewindToDiscovery(t *testing.T) {
-	dir := t.TempDir()
-	specDir := filepath.Join(dir, "specs", "test")
-	os.MkdirAll(specDir, 0o755)
-	createTestArtefacts(t, specDir)
-
-	state := &WorkflowStateJSON{
-		State:       StateJudging,
-		Round:       1,
-		FeatureName: "test",
+// TestRewindPreservesAllFiles verifies that rewind never deletes artefact
+// files, regardless of the target state.
+func TestRewindPreservesAllFiles(t *testing.T) {
+	targets := []WorkflowState{
+		StateDiscovery,
+		StateDrafting,
+		StateReviewing,
+		StateRevising,
+		StateJudging,
 	}
 
-	result, err := RewindWorkflow(specDir, state, StateDiscovery, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	for _, target := range targets {
+		t.Run(target.String(), func(t *testing.T) {
+			dir := t.TempDir()
+			specDir := filepath.Join(dir, "specs", "test")
+			os.MkdirAll(specDir, 0o755)
+			createTestArtefacts(t, specDir)
 
-	remaining := remainingFiles(t, specDir)
+			before := remainingFiles(t, specDir)
 
-	// Should only keep workflow-state.json, workflow-log.jsonl, human-comments.json
-	if len(remaining) != 3 {
-		t.Errorf("expected 3 remaining files, got %d: %v", len(remaining), remaining)
-	}
-	if !fileExists(remaining, "workflow-state.json") {
-		t.Error("workflow-state.json should be kept")
-	}
-	if result.TargetState != StateDiscovery {
-		t.Errorf("expected target DISCOVERY, got %s", result.TargetState)
-	}
-}
+			state := &WorkflowStateJSON{
+				State:       StateFinalized,
+				Round:       1,
+				FeatureName: "test",
+			}
 
-func TestRewindToDrafting(t *testing.T) {
-	dir := t.TempDir()
-	specDir := filepath.Join(dir, "specs", "test")
-	os.MkdirAll(specDir, 0o755)
-	createTestArtefacts(t, specDir)
+			result, err := RewindWorkflow(specDir, state, target, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	state := &WorkflowStateJSON{
-		State:       StateJudging,
-		Round:       1,
-		FeatureName: "test",
-	}
+			after := remainingFiles(t, specDir)
 
-	_, err := RewindWorkflow(specDir, state, StateDrafting, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
+			// No files should be removed.
+			if len(result.FilesRemoved) != 0 {
+				t.Errorf("expected 0 files removed, got %d: %v", len(result.FilesRemoved), result.FilesRemoved)
+			}
 
-	remaining := remainingFiles(t, specDir)
-	if !fileExists(remaining, "discovery-output.json") {
-		t.Error("discovery-output.json should be kept")
-	}
-	if !fileExists(remaining, "gate1-corrections.json") {
-		t.Error("gate1-corrections.json should be kept")
-	}
-	if fileExists(remaining, "drafter-output.json") {
-		t.Error("drafter-output.json should be removed")
-	}
-	if fileExists(remaining, "spec-v0.md") {
-		t.Error("spec-v0.md should be removed")
-	}
-}
+			// All original files should still exist.
+			if len(after) != len(before) {
+				t.Errorf("file count changed: before=%d after=%d", len(before), len(after))
+				t.Errorf("before: %v", before)
+				t.Errorf("after:  %v", after)
+			}
 
-func TestRewindToReviewingRound1(t *testing.T) {
-	dir := t.TempDir()
-	specDir := filepath.Join(dir, "specs", "test")
-	os.MkdirAll(specDir, 0o755)
-	createTestArtefacts(t, specDir)
-
-	state := &WorkflowStateJSON{
-		State:       StateJudging,
-		Round:       1,
-		FeatureName: "test",
-	}
-
-	_, err := RewindWorkflow(specDir, state, StateReviewing, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	remaining := remainingFiles(t, specDir)
-	// Should keep discovery, gates, drafter, spec-v0, holdouts
-	if !fileExists(remaining, "discovery-output.json") {
-		t.Error("discovery-output.json should be kept")
-	}
-	if !fileExists(remaining, "drafter-output.json") {
-		t.Error("drafter-output.json should be kept")
-	}
-	if !fileExists(remaining, "spec-v0.md") {
-		t.Error("spec-v0.md should be kept")
-	}
-	if !fileExists(remaining, "b5-holdouts.md") {
-		t.Error("holdouts should be kept")
-	}
-	// Should remove round-1 reviews, merged, revision, judge
-	if fileExists(remaining, "review-a-round-1.json") {
-		t.Error("review-a-round-1.json should be removed")
-	}
-	if fileExists(remaining, "merged-findings-round-1.json") {
-		t.Error("merged-findings-round-1.json should be removed")
-	}
-	if fileExists(remaining, "revision-round-1.json") {
-		t.Error("revision-round-1.json should be removed")
-	}
-	if fileExists(remaining, "judge-round-1.json") {
-		t.Error("judge-round-1.json should be removed")
-	}
-	if fileExists(remaining, "spec-v1.md") {
-		t.Error("spec-v1.md should be removed")
-	}
-}
-
-func TestRewindToRevisingRound1(t *testing.T) {
-	dir := t.TempDir()
-	specDir := filepath.Join(dir, "specs", "test")
-	os.MkdirAll(specDir, 0o755)
-	createTestArtefacts(t, specDir)
-
-	state := &WorkflowStateJSON{
-		State:       StateJudging,
-		Round:       1,
-		FeatureName: "test",
-	}
-
-	_, err := RewindWorkflow(specDir, state, StateRevising, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	remaining := remainingFiles(t, specDir)
-	// Should keep reviews and merged for round 1
-	if !fileExists(remaining, "review-a-round-1.json") {
-		t.Error("review-a-round-1.json should be kept")
-	}
-	if !fileExists(remaining, "merged-findings-round-1.json") {
-		t.Error("merged-findings-round-1.json should be kept")
-	}
-	// Should remove revision and judge for round 1
-	if fileExists(remaining, "revision-round-1.json") {
-		t.Error("revision-round-1.json should be removed")
-	}
-	if fileExists(remaining, "judge-round-1.json") {
-		t.Error("judge-round-1.json should be removed")
-	}
-	if fileExists(remaining, "spec-v1.md") {
-		t.Error("spec-v1.md should be removed (revised spec)")
-	}
-}
-
-func TestRewindToJudgingRound1(t *testing.T) {
-	dir := t.TempDir()
-	specDir := filepath.Join(dir, "specs", "test")
-	os.MkdirAll(specDir, 0o755)
-	createTestArtefacts(t, specDir)
-
-	state := &WorkflowStateJSON{
-		State:       StateFinalized,
-		Round:       1,
-		FeatureName: "test",
-	}
-
-	_, err := RewindWorkflow(specDir, state, StateJudging, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	remaining := remainingFiles(t, specDir)
-	// Should keep revision and spec-v1
-	if !fileExists(remaining, "revision-round-1.json") {
-		t.Error("revision-round-1.json should be kept")
-	}
-	if !fileExists(remaining, "spec-v1.md") {
-		t.Error("spec-v1.md should be kept")
-	}
-	// Should remove judge
-	if fileExists(remaining, "judge-round-1.json") {
-		t.Error("judge-round-1.json should be removed")
-	}
-}
-
-func TestRewindToInvalidState(t *testing.T) {
-	dir := t.TempDir()
-	specDir := filepath.Join(dir, "specs", "test")
-	os.MkdirAll(specDir, 0o755)
-
-	state := &WorkflowStateJSON{
-		State:       StateFinalized,
-		Round:       1,
-		FeatureName: "test",
-	}
-
-	_, err := RewindWorkflow(specDir, state, StateHumanGate1, 1)
-	if err == nil {
-		t.Error("expected error for non-rewindable state")
+			for _, f := range before {
+				if !fileExists(after, f) {
+					t.Errorf("file %s was deleted", f)
+				}
+			}
+		})
 	}
 }
 
@@ -323,5 +180,92 @@ func TestRewindUpdatesState(t *testing.T) {
 	}
 	if loaded.State != StateReviewing {
 		t.Errorf("persisted state should be REVIEWING, got %s", loaded.State)
+	}
+}
+
+func TestRewindSetsSpecVersion(t *testing.T) {
+	tests := []struct {
+		target      WorkflowState
+		round       int
+		wantVersion int
+	}{
+		{StateDiscovery, 1, 0},
+		{StateDrafting, 1, 0},
+		{StateReviewing, 1, 0},
+		{StateReviewing, 2, 1},
+		{StateRevising, 1, 0},
+		{StateRevising, 2, 1},
+		{StateJudging, 1, 1},
+		{StateJudging, 2, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.target.String(), func(t *testing.T) {
+			dir := t.TempDir()
+			specDir := filepath.Join(dir, "specs", "test")
+			os.MkdirAll(specDir, 0o755)
+			createTestArtefacts(t, specDir)
+
+			state := &WorkflowStateJSON{
+				State:              StateFinalized,
+				Round:              1,
+				FeatureName:        "test",
+				CurrentSpecVersion: 99,
+			}
+
+			_, err := RewindWorkflow(specDir, state, tt.target, tt.round)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if state.CurrentSpecVersion != tt.wantVersion {
+				t.Errorf("CurrentSpecVersion = %d, want %d", state.CurrentSpecVersion, tt.wantVersion)
+			}
+		})
+	}
+}
+
+func TestRewindToInvalidState(t *testing.T) {
+	dir := t.TempDir()
+	specDir := filepath.Join(dir, "specs", "test")
+	os.MkdirAll(specDir, 0o755)
+
+	state := &WorkflowStateJSON{
+		State:       StateFinalized,
+		Round:       1,
+		FeatureName: "test",
+	}
+
+	_, err := RewindWorkflow(specDir, state, StateHumanGate1, 1)
+	if err == nil {
+		t.Error("expected error for non-rewindable state")
+	}
+}
+
+func TestRewindResetsFindings(t *testing.T) {
+	dir := t.TempDir()
+	specDir := filepath.Join(dir, "specs", "test")
+	os.MkdirAll(specDir, 0o755)
+	createTestArtefacts(t, specDir)
+
+	state := &WorkflowStateJSON{
+		State:       StateFinalized,
+		Round:       1,
+		FeatureName: "test",
+		FindingsSummary: FindingsSummary{
+			Raised:       78,
+			Closed:       74,
+			OpenCritical: 0,
+			OpenMajor:    0,
+		},
+		HadCriticalFindings: true,
+	}
+
+	_, err := RewindWorkflow(specDir, state, StateReviewing, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if state.FindingsSummary.Raised != 0 {
+		t.Errorf("FindingsSummary.Raised should be reset to 0, got %d", state.FindingsSummary.Raised)
 	}
 }

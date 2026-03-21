@@ -136,7 +136,7 @@ func TestReviewDispatch_AllSucceed(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 2, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, makePrompts(), outputPaths, config, noopDelay)
+	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("DispatchReviewers returned unexpected error: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestReviewDispatch_OneFailsThenSucceedsOnRetry(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 2, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, makePrompts(), outputPaths, config, noopDelay)
+	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("DispatchReviewers returned unexpected error: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestReviewDispatch_OneFailsAfterAllRetries(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 2, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, makePrompts(), outputPaths, config, noopDelay)
+	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("DispatchReviewers should not return error for 1 failure, got: %v", err)
 	}
@@ -260,8 +260,8 @@ func TestReviewDispatch_OneFailsAfterAllRetries(t *testing.T) {
 	if !result.ReducedCoverage {
 		t.Error("expected ReducedCoverage=true when 1 reviewer failed")
 	}
-	if len(result.CoverageLoss) != 1 || result.CoverageLoss[0] != "consistency" {
-		t.Errorf("expected CoverageLoss=[consistency], got %v", result.CoverageLoss)
+	if len(result.CoverageLoss) != 1 || result.CoverageLoss[0] != "reviewer-consistency-claude" {
+		t.Errorf("expected CoverageLoss=[reviewer-consistency-claude], got %v", result.CoverageLoss)
 	}
 
 	// Verify failure has the right lens group and error.
@@ -301,7 +301,7 @@ func TestReviewDispatch_TwoFailAfterAllRetries_ReturnsError(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 1, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, makePrompts(), outputPaths, config, noopDelay)
+	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err == nil {
 		t.Fatal("expected error when 2+ reviewers fail, got nil")
 	}
@@ -351,7 +351,7 @@ func TestReviewDispatch_InvalidJSONTriggersRetry(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 2, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, makePrompts(), outputPaths, config, noopDelay)
+	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -387,7 +387,7 @@ func TestReviewDispatch_CostAndDurationAccumulation(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 0, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, makePrompts(), outputPaths, config, noopDelay)
+	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -440,7 +440,7 @@ func TestReviewDispatch_ConcurrentExecution(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 0, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, makePrompts(), outputPaths, config, noopDelay)
+	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -471,7 +471,7 @@ func TestReviewDispatch_MissingPrompt(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 0, TimeoutSeconds: 30}
-	_, err := DispatchReviewers(runner, prompts, outputPaths, config, noopDelay)
+	_, err := DispatchReviewers(runner, nil, prompts, outputPaths, nil, config, noopDelay, nil)
 	if err == nil {
 		t.Fatal("expected error when prompt is missing for a lens group")
 	}
@@ -491,7 +491,7 @@ func TestReviewDispatch_MissingOutputPath(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 0, TimeoutSeconds: 30}
-	_, err := DispatchReviewers(runner, makePrompts(), outputPaths, config, noopDelay)
+	_, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err == nil {
 		t.Fatal("expected error when output path is missing for a lens group")
 	}
@@ -529,7 +529,7 @@ func TestReviewDispatch_RetryDelayIsCalled(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 2, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, makePrompts(), outputPaths, config, trackingDelay)
+	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, trackingDelay, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -589,7 +589,7 @@ func TestReviewDispatch_SchemaViolationTriggersRetry(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 2, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, makePrompts(), outputPaths, config, noopDelay)
+	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -667,7 +667,7 @@ func TestReviewDispatch_PartialFindingsAccepted(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 2, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, makePrompts(), outputPaths, config, noopDelay)
+	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -726,7 +726,7 @@ func TestReviewDispatch_RunnerInfrastructureError(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 0, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, makePrompts(), outputPaths, config, noopDelay)
+	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("expected no dispatch error for 1 failure, got: %v", err)
 	}
@@ -739,5 +739,200 @@ func TestReviewDispatch_RunnerInfrastructureError(t *testing.T) {
 	}
 	if result.Failures[0].LensGroup != "clarity" {
 		t.Errorf("expected clarity failure, got %q", result.Failures[0].LensGroup)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Backward compatibility tests (vse.10)
+// ---------------------------------------------------------------------------
+
+func TestDispatch_BackwardCompat_ClaudeOnly(t *testing.T) {
+	dir := t.TempDir()
+	outputPaths := makeOutputPaths(dir)
+
+	runner := &mockAgentRunner{
+		handler: func(call mockRunCall) (int, string, float64, int64, error) {
+			lens := lensFromPath(dir, call.OutputPath)
+			if err := os.WriteFile(call.OutputPath, validReviewerOutputJSON(lens), 0644); err != nil {
+				t.Fatalf("failed to write mock output: %v", err)
+			}
+			return 0, "", 0.05, 1000, nil
+		},
+	}
+
+	// nil codexRunner, nil codexOutputPaths — backward compat path.
+	config := ReviewDispatchConfig{MaxRetries: 1, TimeoutSeconds: 30}
+	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result.Results) != 4 {
+		t.Errorf("expected 4 claude-only results, got %d", len(result.Results))
+	}
+	if len(result.Failures) != 0 {
+		t.Errorf("expected 0 failures, got %d", len(result.Failures))
+	}
+
+	// Verify all agent names have -claude suffix.
+	for _, r := range result.Results {
+		if r.AgentName == "" {
+			t.Errorf("result for %q has empty AgentName", r.LensGroup)
+		}
+		expected := "reviewer-" + r.LensGroup + "-claude"
+		if r.AgentName != expected {
+			t.Errorf("AgentName = %q, want %q", r.AgentName, expected)
+		}
+	}
+}
+
+func TestMerge_BackwardCompat_FourInputs(t *testing.T) {
+	// 4 claude-only inputs should merge the same as before.
+	outputs := make([]*ReviewerOutput, 4)
+	for i, lens := range []string{"clarity", "consistency", "security", "correctness"} {
+		var out ReviewerOutput
+		if err := json.Unmarshal(validReviewerOutputJSON(lens), &out); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		outputs[i] = &out
+	}
+
+	merged, err := MergeReviewerOutputs(outputs, 1)
+	if err != nil {
+		t.Fatalf("merge error: %v", err)
+	}
+	if len(merged.Findings) != 4 {
+		t.Errorf("expected 4 merged findings, got %d", len(merged.Findings))
+	}
+}
+
+func TestTeamConfig_BackwardCompat_NoCodex(t *testing.T) {
+	// When codex is disabled, 8 agents should be present.
+	config := DefaultTeamConfig(false)
+	if got := len(config.Agents); got != 8 {
+		t.Errorf("expected 8 agents without codex, got %d", got)
+	}
+
+	// All agents should use claude provider.
+	for _, agent := range config.Agents {
+		if agent.Provider != "claude" {
+			t.Errorf("agent %q: expected provider claude, got %q", agent.Name, agent.Provider)
+		}
+	}
+
+	// Validation should pass.
+	if err := ValidateTeamConfig(config); err != nil {
+		t.Fatalf("validation failed: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Dual-provider dispatch tests (vse.8)
+// ---------------------------------------------------------------------------
+
+func TestDispatch_DualProvider_8Reviewers(t *testing.T) {
+	claudeDir := t.TempDir()
+	codexDir := t.TempDir()
+	claudeOutputPaths := makeOutputPaths(claudeDir)
+	codexOutputPaths := makeOutputPaths(codexDir)
+
+	claudeRunner := &mockAgentRunner{
+		handler: func(call mockRunCall) (int, string, float64, int64, error) {
+			lens := lensFromPath(claudeDir, call.OutputPath)
+			if err := os.WriteFile(call.OutputPath, validReviewerOutputJSON(lens), 0644); err != nil {
+				t.Fatalf("failed to write mock output: %v", err)
+			}
+			return 0, "", 0.05, 1000, nil
+		},
+	}
+
+	codexRunner := &mockAgentRunner{
+		handler: func(call mockRunCall) (int, string, float64, int64, error) {
+			lens := lensFromPath(codexDir, call.OutputPath)
+			if err := os.WriteFile(call.OutputPath, validReviewerOutputJSON(lens), 0644); err != nil {
+				t.Fatalf("failed to write mock output: %v", err)
+			}
+			return 0, "", 0.00, 2000, nil // codex reports zero cost
+		},
+	}
+
+	config := ReviewDispatchConfig{MaxRetries: 1, TimeoutSeconds: 30}
+	result, err := DispatchReviewers(claudeRunner, codexRunner, makePrompts(), claudeOutputPaths, codexOutputPaths, config, noopDelay, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// 8 reviewers: 4 claude + 4 codex.
+	if len(result.Results) != 8 {
+		t.Errorf("expected 8 results, got %d", len(result.Results))
+	}
+	if len(result.Failures) != 0 {
+		t.Errorf("expected 0 failures, got %d", len(result.Failures))
+	}
+
+	// Verify agent names.
+	agentNames := make(map[string]bool)
+	for _, r := range result.Results {
+		agentNames[r.AgentName] = true
+	}
+	for _, lens := range []string{"clarity", "consistency", "security", "correctness"} {
+		claudeName := "reviewer-" + lens + "-claude"
+		codexName := "reviewer-" + lens + "-codex"
+		if !agentNames[claudeName] {
+			t.Errorf("missing agent %q", claudeName)
+		}
+		if !agentNames[codexName] {
+			t.Errorf("missing agent %q", codexName)
+		}
+	}
+
+	// Verify both runners were called.
+	if claudeRunner.callCount.Load() != 4 {
+		t.Errorf("expected 4 claude calls, got %d", claudeRunner.callCount.Load())
+	}
+	if codexRunner.callCount.Load() != 4 {
+		t.Errorf("expected 4 codex calls, got %d", codexRunner.callCount.Load())
+	}
+}
+
+func TestDispatch_DualProvider_FailureTolerance(t *testing.T) {
+	claudeDir := t.TempDir()
+	codexDir := t.TempDir()
+	claudeOutputPaths := makeOutputPaths(claudeDir)
+	codexOutputPaths := makeOutputPaths(codexDir)
+
+	// Claude: all succeed. Codex: all fail.
+	claudeRunner := &mockAgentRunner{
+		handler: func(call mockRunCall) (int, string, float64, int64, error) {
+			lens := lensFromPath(claudeDir, call.OutputPath)
+			if err := os.WriteFile(call.OutputPath, validReviewerOutputJSON(lens), 0644); err != nil {
+				t.Fatalf("failed to write mock output: %v", err)
+			}
+			return 0, "", 0.05, 1000, nil
+		},
+	}
+	codexRunner := &mockAgentRunner{
+		handler: func(call mockRunCall) (int, string, float64, int64, error) {
+			return 1, "codex crash", 0.00, 100, nil
+		},
+	}
+
+	// With 8 reviewers, maxFailuresAllowed = 8/2-1 = 3.
+	// 4 codex failures > 3 → should return error.
+	config := ReviewDispatchConfig{MaxRetries: 0, TimeoutSeconds: 30}
+	result, err := DispatchReviewers(claudeRunner, codexRunner, makePrompts(), claudeOutputPaths, codexOutputPaths, config, noopDelay, nil)
+	if err == nil {
+		t.Fatal("expected error when 4 of 8 reviewers fail, got nil")
+	}
+
+	// Result should still have partial data.
+	if result == nil {
+		t.Fatal("expected non-nil result even on error")
+	}
+	if len(result.Results) != 4 {
+		t.Errorf("expected 4 claude successes, got %d", len(result.Results))
+	}
+	if len(result.Failures) != 4 {
+		t.Errorf("expected 4 codex failures, got %d", len(result.Failures))
 	}
 }

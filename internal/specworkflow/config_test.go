@@ -18,8 +18,8 @@ func TestConfigDefaultValues(t *testing.T) {
 	if cfg.MinRounds != 2 {
 		t.Errorf("MinRounds: got %d, want 2", cfg.MinRounds)
 	}
-	if cfg.MaxTotalFindings != 60 {
-		t.Errorf("MaxTotalFindings: got %d, want 60", cfg.MaxTotalFindings)
+	if cfg.MaxTotalFindings != 200 {
+		t.Errorf("MaxTotalFindings: got %d, want 200", cfg.MaxTotalFindings)
 	}
 	if cfg.StalenessThreshold != 2 {
 		t.Errorf("StalenessThreshold: got %d, want 2", cfg.StalenessThreshold)
@@ -38,6 +38,18 @@ func TestConfigDefaultValues(t *testing.T) {
 	}
 	if cfg.MaxRetries != 2 {
 		t.Errorf("MaxRetries: got %d, want 2", cfg.MaxRetries)
+	}
+	if cfg.EnableCodexReviewers != true {
+		t.Errorf("EnableCodexReviewers: got %v, want true", cfg.EnableCodexReviewers)
+	}
+	if cfg.CodexModel != "gpt-5.4" {
+		t.Errorf("CodexModel: got %q, want gpt-5.4", cfg.CodexModel)
+	}
+	if cfg.ReviewerTimeoutSeconds != 300 {
+		t.Errorf("ReviewerTimeoutSeconds: got %d, want 300", cfg.ReviewerTimeoutSeconds)
+	}
+	if cfg.HoldoutTimeoutSeconds != 300 {
+		t.Errorf("HoldoutTimeoutSeconds: got %d, want 300", cfg.HoldoutTimeoutSeconds)
 	}
 	if cfg.SkillPaths.PlanSpec != "" {
 		t.Errorf("SkillPaths.PlanSpec: got %q, want empty", cfg.SkillPaths.PlanSpec)
@@ -73,8 +85,8 @@ max_cost_usd: 25.0
 	if cfg.MinRounds != 2 {
 		t.Errorf("MinRounds (default): got %d, want 2", cfg.MinRounds)
 	}
-	if cfg.MaxTotalFindings != 60 {
-		t.Errorf("MaxTotalFindings (default): got %d, want 60", cfg.MaxTotalFindings)
+	if cfg.MaxTotalFindings != 200 {
+		t.Errorf("MaxTotalFindings (default): got %d, want 200", cfg.MaxTotalFindings)
 	}
 	if cfg.StalenessThreshold != 2 {
 		t.Errorf("StalenessThreshold (default): got %d, want 2", cfg.StalenessThreshold)
@@ -91,6 +103,18 @@ max_cost_usd: 25.0
 	if cfg.MaxRetries != 2 {
 		t.Errorf("MaxRetries (default): got %d, want 2", cfg.MaxRetries)
 	}
+	if cfg.EnableCodexReviewers != true {
+		t.Errorf("EnableCodexReviewers (default): got %v, want true", cfg.EnableCodexReviewers)
+	}
+	if cfg.CodexModel != "gpt-5.4" {
+		t.Errorf("CodexModel (default): got %q, want gpt-5.4", cfg.CodexModel)
+	}
+	if cfg.ReviewerTimeoutSeconds != 300 {
+		t.Errorf("ReviewerTimeoutSeconds (default): got %d, want 300", cfg.ReviewerTimeoutSeconds)
+	}
+	if cfg.HoldoutTimeoutSeconds != 300 {
+		t.Errorf("HoldoutTimeoutSeconds (default): got %d, want 300", cfg.HoldoutTimeoutSeconds)
+	}
 }
 
 func TestConfigFullYAMLParsing(t *testing.T) {
@@ -104,6 +128,10 @@ max_cost_usd: 75.5
 max_gate_corrections: 5
 max_gate2_redrafts: 3
 max_retries: 4
+enable_codex_reviewers: false
+codex_model: o3
+reviewer_timeout_seconds: 600
+holdout_timeout_seconds: 120
 skill_paths:
   plan_spec: /tmp
   grill_spec: /tmp
@@ -139,6 +167,18 @@ skill_paths:
 	}
 	if cfg.MaxRetries != 4 {
 		t.Errorf("MaxRetries: got %d, want 4", cfg.MaxRetries)
+	}
+	if cfg.EnableCodexReviewers != false {
+		t.Errorf("EnableCodexReviewers: got %v, want false", cfg.EnableCodexReviewers)
+	}
+	if cfg.CodexModel != "o3" {
+		t.Errorf("CodexModel: got %q, want o3", cfg.CodexModel)
+	}
+	if cfg.ReviewerTimeoutSeconds != 600 {
+		t.Errorf("ReviewerTimeoutSeconds: got %d, want 600", cfg.ReviewerTimeoutSeconds)
+	}
+	if cfg.HoldoutTimeoutSeconds != 120 {
+		t.Errorf("HoldoutTimeoutSeconds: got %d, want 120", cfg.HoldoutTimeoutSeconds)
 	}
 	if cfg.SkillPaths.PlanSpec != "/tmp" {
 		t.Errorf("SkillPaths.PlanSpec: got %q, want /tmp", cfg.SkillPaths.PlanSpec)
@@ -235,6 +275,28 @@ skill_paths:
 	}
 	if !strings.Contains(err.Error(), "skill_paths.grill_spec") {
 		t.Errorf("error should mention skill_paths.grill_spec: %v", err)
+	}
+}
+
+func TestConfigCodexDisabled(t *testing.T) {
+	yaml := []byte(`enable_codex_reviewers: false`)
+	cfg, err := ParseConfig(yaml)
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if cfg.EnableCodexReviewers != false {
+		t.Errorf("EnableCodexReviewers: got %v, want false", cfg.EnableCodexReviewers)
+	}
+}
+
+func TestConfigValidateReviewerTimeoutZero(t *testing.T) {
+	yaml := []byte(`reviewer_timeout_seconds: 0`)
+	_, err := ParseConfig(yaml)
+	if err == nil {
+		t.Fatal("expected error when reviewer_timeout_seconds is 0, got nil")
+	}
+	if !strings.Contains(err.Error(), "reviewer_timeout_seconds") {
+		t.Errorf("error should mention reviewer_timeout_seconds: %v", err)
 	}
 }
 

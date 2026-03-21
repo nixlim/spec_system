@@ -1,0 +1,331 @@
+{
+  "version": "0.1.0",
+  "tasks": [
+    {
+      "task_id": "add-codex-config-fields",
+      "task_name": "Add codex configuration fields to workflow config",
+      "goal": "The WorkflowConfig struct includes EnableCodexReviewers (bool, default true), CodexModel (string, default gpt-5.4), ReviewerTimeoutSeconds (int, default 300), and HoldoutTimeoutSeconds (int, default 300), all parsed from YAML config.",
+      "inputs": [
+        {"name": "config_yaml", "type": "string", "constraints": "valid YAML with optional codex fields", "source": "Workflow config file"}
+      ],
+      "outputs": [
+        {"name": "config_struct", "type": "WorkflowConfig", "constraints": "new fields populated with defaults when absent", "destination": "internal/specworkflow/config.go"}
+      ],
+      "acceptance": [
+        "WorkflowConfig has field EnableCodexReviewers of type bool with yaml tag enable_codex_reviewers",
+        "WorkflowConfig has field CodexModel of type string with yaml tag codex_model",
+        "WorkflowConfig has field ReviewerTimeoutSeconds of type int with yaml tag reviewer_timeout_seconds",
+        "WorkflowConfig has field HoldoutTimeoutSeconds of type int with yaml tag holdout_timeout_seconds",
+        "DefaultConfig() returns EnableCodexReviewers=true, CodexModel=gpt-5.4, ReviewerTimeoutSeconds=300, HoldoutTimeoutSeconds=300",
+        "Parsing YAML with enable_codex_reviewers: false produces EnableCodexReviewers=false",
+        "Existing config tests continue to pass (go test ./internal/specworkflow/ -run TestConfig)"
+      ],
+      "depends_on": {"status": "N/A", "reason": "First task, modifies config only with no external dependencies"},
+      "constraints": ["Must not break existing config loading", "Use yaml struct tags consistent with existing fields"],
+      "files_scope": ["internal/specworkflow/config.go", "internal/specworkflow/config_test.go"],
+      "priority": "critical",
+      "estimate": "small"
+    },
+    {
+      "task_id": "add-team-config-codex-agents",
+      "task_name": "Extend team configuration with codex reviewer and holdout agents",
+      "goal": "DefaultTeamConfig returns 12 agents (8 claude reviewers + 4 codex reviewers) when codex is enabled, 8 agents when disabled, with provider field on each agent and validation rejecting codex on non-reviewer non-holdout roles.",
+      "inputs": [
+        {"name": "enable_codex", "type": "bool", "constraints": "from WorkflowConfig.EnableCodexReviewers", "source": "Config"},
+        {"name": "existing_team_config", "type": "TeamConfig", "constraints": "current 8-agent config", "source": "internal/specworkflow/team.go"}
+      ],
+      "outputs": [
+        {"name": "updated_team_config", "type": "TeamConfig", "constraints": "8 or 12 agents depending on codex flag", "destination": "internal/specworkflow/team.go"},
+        {"name": "validation_result", "type": "error", "constraints": "non-nil if codex on non-reviewer role", "destination": "Return value"}
+      ],
+      "acceptance": [
+        "DefaultTeamConfig(enableCodex=true) returns 12 agents with reviewer-clarity-claude, reviewer-clarity-codex, etc.",
+        "DefaultTeamConfig(enableCodex=false) returns 8 agents with reviewer-*-claude names only",
+        "Each codex reviewer agent has Provider field set to codex",
+        "Each claude reviewer agent has Provider field set to claude",
+        "Non-reviewer agents (discovery, drafter, reviser, judge) have no provider suffix",
+        "ValidateTeamConfig rejects codex provider on judge role with error containing codex provider only supported for reviewer role",
+        "ValidateTeamConfig accepts codex provider on reviewer roles",
+        "Legacy reviewer names without suffix (e.g. reviewer-clarity) are accepted when loading workflow state",
+        "go test ./internal/specworkflow/ -run TestTeam passes"
+      ],
+      "depends_on": ["add-codex-config-fields"],
+      "constraints": ["Must preserve backward compatibility with existing workflow state files", "Agent naming must follow reviewer-{lens}-{provider} pattern"],
+      "files_scope": ["internal/specworkflow/team.go", "internal/specworkflow/team_test.go"],
+      "priority": "high",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "implement-codex-runner",
+      "task_name": "Implement CodexRunner satisfying the AgentRunner interface",
+      "goal": "CodexRunner.Run() invokes codex exec --full-auto with prompt via stdin, --output-schema for structured output, --output-last-message for output capture, and returns AgentResult with exitCode, durationMS, and costUSD=0.",
+      "inputs": [
+        {"name": "prompt", "type": "string", "constraints": "len > 0", "source": "Orchestrator dispatch"},
+        {"name": "output_path", "type": "string", "constraints": "valid filesystem path", "source": "Orchestrator dispatch"},
+        {"name": "model", "type": "string", "constraints": "non-empty when specified", "source": "WorkflowConfig.CodexModel"},
+        {"name": "timeout", "type": "int", "constraints": "> 0, in seconds", "source": "WorkflowConfig.ReviewerTimeoutSeconds"}
+      ],
+      "outputs": [
+        {"name": "agent_result", "type": "AgentResult", "constraints": "costUSD always 0, exitCode from process, durationMS measured", "destination": "Return value"},
+        {"name": "output_file", "type": "JSON file", "constraints": "valid ReviewerOutput or HoldoutOutput JSON when exitCode=0", "destination": "File at output_path"}
+      ],
+      "acceptance": [
+        "CodexRunner implements the AgentRunner interface",
+        "Run() invokes codex exec --full-auto -m <model> --output-schema <schema> --output-last-message <output> --cd <workspace> --ephemeral - with prompt on stdin",
+        "The prompt is delivered via stdin (not CLI argument) to avoid ARG_MAX limits",
+        "A temporary JSON schema file is created before invocation and cleaned up after",
+        "--output-schema flag points to the temp schema file",
+        "costUSD is always 0 regardless of outcome",
+        "durationMS reflects actual process execution time",
+        "Process exceeding timeout receives SIGTERM followed by SIGKILL after 2 seconds",
+        "Empty prompt returns an error without invoking codex",
+        "Empty output_path returns an error without invoking codex",
+        "go test ./internal/specworkflow/ -run TestCodexRunner passes"
+      ],
+      "depends_on": ["add-codex-config-fields"],
+      "constraints": ["Must satisfy same AgentRunner interface as ClaudeRunner", "Must handle process lifecycle: start, stdin write, timeout, signal, wait"],
+      "files_scope": [
+        "internal/specworkflow/codex_runner.go",
+        "internal/specworkflow/codex_runner_test.go"
+      ],
+      "priority": "critical",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "add-reviewer-output-schema",
+      "task_name": "Create ReviewerOutput JSON schema file for codex --output-schema",
+      "goal": "A Go function returns the ReviewerOutput JSON schema as bytes, matching the existing ReviewerOutput struct definition, suitable for passing to codex via --output-schema.",
+      "inputs": [
+        {"name": "reviewer_output_struct", "type": "Go struct", "constraints": "existing ReviewerOutput type definition", "source": "internal/specworkflow/types.go or agent_output.go"}
+      ],
+      "outputs": [
+        {"name": "schema_bytes", "type": "bytes", "constraints": "valid JSON Schema draft-07 or later", "destination": "Return value from ReviewerOutputSchema()"}
+      ],
+      "acceptance": [
+        "ReviewerOutputSchema() returns valid JSON that parses as a JSON Schema",
+        "The schema defines findings as an array with required fields: id, description, severity, lens, recommendation",
+        "The schema defines lenses_applied as a required field",
+        "A valid ReviewerOutput JSON document validates against the schema",
+        "An invalid document (missing recommendation) fails validation against the schema"
+      ],
+      "depends_on": {"status": "N/A", "reason": "Reads existing type definitions but does not depend on other new tasks"},
+      "constraints": ["Schema must match the existing ReviewerOutput struct exactly"],
+      "files_scope": [
+        "internal/specworkflow/reviewer_output_schema.go"
+      ],
+      "priority": "critical",
+      "estimate": "small"
+    },
+    {
+      "task_id": "add-holdout-output-schema",
+      "task_name": "Create HoldoutOutput JSON schema file for codex --output-schema",
+      "goal": "A Go function returns the HoldoutOutput JSON schema as bytes, matching the existing HoldoutOutput struct definition, suitable for passing to codex via --output-schema for holdout generation.",
+      "inputs": [
+        {"name": "holdout_output_struct", "type": "Go struct", "constraints": "existing HoldoutOutput type definition", "source": "internal/specworkflow/types.go or agent_output.go"}
+      ],
+      "outputs": [
+        {"name": "schema_bytes", "type": "bytes", "constraints": "valid JSON Schema", "destination": "Return value from HoldoutOutputSchema()"}
+      ],
+      "acceptance": [
+        "HoldoutOutputSchema() returns valid JSON that parses as a JSON Schema",
+        "The schema defines scenario_count, categories, and holdout_file as required fields",
+        "A valid HoldoutOutput JSON document validates against the schema",
+        "An invalid document (missing categories) fails validation against the schema"
+      ],
+      "depends_on": {"status": "N/A", "reason": "Reads existing type definitions but does not depend on other new tasks"},
+      "constraints": ["Schema must match the existing HoldoutOutput struct exactly"],
+      "files_scope": [
+        "internal/specworkflow/holdout_output_schema.go"
+      ],
+      "priority": "critical",
+      "estimate": "small"
+    },
+    {
+      "task_id": "add-codex-availability-check",
+      "task_name": "Add codex CLI availability detection to orchestrator creation",
+      "goal": "When the orchestrator is created with EnableCodexReviewers=true, it checks for codex in PATH via exec.LookPath; if missing, it logs a warning and disables codex runners; if present, it creates a CodexRunner instance.",
+      "inputs": [
+        {"name": "config", "type": "WorkflowConfig", "constraints": "EnableCodexReviewers may be true or false", "source": "Workflow config"},
+        {"name": "path_lookup", "type": "function", "constraints": "exec.LookPath or mockable equivalent", "source": "os/exec stdlib"}
+      ],
+      "outputs": [
+        {"name": "codex_runner", "type": "optional<CodexRunner>", "constraints": "nil when codex unavailable or disabled", "destination": "Orchestrator field"},
+        {"name": "warning_log", "type": "string", "constraints": "logged when codex enabled but missing", "destination": "Logger"}
+      ],
+      "acceptance": [
+        "When codex is not in PATH and EnableCodexReviewers=true, a warning is logged containing codex CLI not found",
+        "When codex is not in PATH, orchestrator.codexRunner is nil",
+        "When codex is in PATH and EnableCodexReviewers=true, orchestrator.codexRunner is non-nil",
+        "When EnableCodexReviewers=false, no PATH lookup is performed and no warning is logged",
+        "Orchestrator creation succeeds regardless of codex availability"
+      ],
+      "depends_on": ["implement-codex-runner", "add-codex-config-fields"],
+      "constraints": ["Must not crash or fail orchestrator creation when codex is missing"],
+      "files_scope": [
+        "internal/specworkflow/orchestrator.go",
+        "internal/specworkflow/orchestrator_test.go"
+      ],
+      "priority": "critical",
+      "estimate": "small"
+    },
+    {
+      "task_id": "extend-review-dispatch-dual-provider",
+      "task_name": "Extend review dispatch to support dual-provider 8-reviewer parallel execution",
+      "goal": "The review dispatch function launches 8 parallel reviewer goroutines (4 claude + 4 codex) when a codex runner is provided, writes output files with provider-disambiguated names, and applies the existing failure threshold logic to 8 reviewers.",
+      "inputs": [
+        {"name": "claude_runner", "type": "AgentRunner", "constraints": "non-nil", "source": "Orchestrator"},
+        {"name": "codex_runner", "type": "optional<AgentRunner>", "constraints": "nil when codex unavailable", "source": "Orchestrator"},
+        {"name": "round", "type": "int", "constraints": "> 0", "source": "Workflow state"},
+        {"name": "lens_groups", "type": "list<LensGroup>", "constraints": "4 groups: clarity, consistency, security, correctness", "source": "Team config"}
+      ],
+      "outputs": [
+        {"name": "review_files", "type": "list<string>", "constraints": "4 or 8 files named review-{letter}-{provider}-round-{N}.json", "destination": "Workflow spec directory"},
+        {"name": "dispatch_result", "type": "DispatchResult", "constraints": "includes reduced_coverage flag and coverage_loss details", "destination": "Return value"}
+      ],
+      "acceptance": [
+        "When codex_runner is non-nil, 8 reviewer goroutines are launched concurrently",
+        "When codex_runner is nil, 4 claude-only reviewer goroutines are launched",
+        "Output files are named review-{letter}-claude-round-{N}.json and review-{letter}-codex-round-{N}.json",
+        "Failures <= 3 out of 8 result in reduced_coverage=true and the workflow proceeds",
+        "Failures >= 4 out of 8 result in an escalation error",
+        "Failures <= 1 out of 4 (claude-only) result in reduced_coverage=true and the workflow proceeds",
+        "All existing dispatch tests continue to pass (go test ./internal/specworkflow/ -run TestDispatch)",
+        "Reviewer agent names follow reviewer-{lens}-{provider} pattern"
+      ],
+      "depends_on": ["implement-codex-runner", "add-team-config-codex-agents"],
+      "constraints": ["Must not change the AgentRunner interface", "Must preserve backward compatibility for claude-only dispatch"],
+      "files_scope": [
+        "internal/specworkflow/review_dispatch.go",
+        "internal/specworkflow/review_dispatch_test.go",
+        "internal/specworkflow/orchestrator_review.go"
+      ],
+      "priority": "critical",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "extend-merge-provider-attribution",
+      "task_name": "Extend finding merge to preserve provider attribution in raised_by",
+      "goal": "MergeReviewerOutputs handles 8 reviewer inputs, preserves provider-prefixed names in raised_by arrays, and the dedup_log records which providers contributed to each merged finding.",
+      "inputs": [
+        {"name": "reviewer_outputs", "type": "list<ReviewerOutput>", "constraints": "4 or 8 outputs with provider-prefixed reviewer names", "source": "Review dispatch results"}
+      ],
+      "outputs": [
+        {"name": "merged_findings", "type": "MergedFindings", "constraints": "raised_by contains provider-prefixed names, severity is max of duplicates", "destination": "Merged findings JSON file"},
+        {"name": "dedup_log", "type": "list<DedupEntry>", "constraints": "records source providers for each merge", "destination": "Dedup log in merged output"}
+      ],
+      "acceptance": [
+        "Merging findings from reviewer-clarity-claude (Sec3/AMB/MAJOR) and reviewer-clarity-codex (Sec3/AMB/CRITICAL) produces one finding with raised_by containing both names and severity CRITICAL",
+        "A finding only from reviewer-security-codex has raised_by containing only reviewer-security-codex",
+        "Findings on same section but different lenses are NOT deduplicated",
+        "Dedup log entries include provider info for both sides of each merge",
+        "Merge handles 8 inputs without error",
+        "Merge handles 4 inputs (claude-only) without error — backward compatible",
+        "Zero findings from a reviewer is accepted (empty array is valid)",
+        "All existing merge tests continue to pass (go test ./internal/specworkflow/ -run TestMerge)"
+      ],
+      "depends_on": ["add-team-config-codex-agents"],
+      "constraints": ["Must not change the deduplication algorithm logic, only extend attribution"],
+      "files_scope": [
+        "internal/specworkflow/merge.go",
+        "internal/specworkflow/merge_test.go"
+      ],
+      "priority": "high",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "implement-holdout-dual-dispatch",
+      "task_name": "Implement dual-provider holdout generation dispatch and merge",
+      "goal": "The holdout generation handler dispatches 2 parallel holdout agents (1 claude + 1 codex) when codex is available, merges their markdown outputs into a single holdouts-round-N.md with provider attribution, and degrades gracefully when codex fails.",
+      "inputs": [
+        {"name": "claude_runner", "type": "AgentRunner", "constraints": "non-nil", "source": "Orchestrator"},
+        {"name": "codex_runner", "type": "optional<AgentRunner>", "constraints": "nil when codex unavailable", "source": "Orchestrator"},
+        {"name": "round", "type": "int", "constraints": "> 0", "source": "Workflow state"},
+        {"name": "spec_content", "type": "string", "constraints": "spec document content", "source": "Spec file"},
+        {"name": "merged_findings", "type": "MergedFindings", "constraints": "from review phase", "source": "Review output"}
+      ],
+      "outputs": [
+        {"name": "holdout_json_files", "type": "list<string>", "constraints": "holdout-{provider}-round-{N}.json", "destination": "Workflow spec directory"},
+        {"name": "holdout_md_files", "type": "list<string>", "constraints": "holdouts-{provider}-round-{N}.md", "destination": "Workflow spec directory"},
+        {"name": "merged_holdout_md", "type": "string", "constraints": "holdouts-round-{N}.md with provider attribution", "destination": "Workflow spec directory"}
+      ],
+      "acceptance": [
+        "When codex_runner is non-nil, 2 holdout goroutines are launched concurrently (holdout-claude and holdout-codex)",
+        "When codex_runner is nil, only holdout-claude is launched",
+        "Output files follow naming: holdout-{provider}-round-{N}.json and holdouts-{provider}-round-{N}.md",
+        "Merged holdouts-round-{N}.md contains sections attributed to each provider",
+        "When codex holdout fails and claude succeeds, workflow proceeds with claude-only holdouts (no escalation)",
+        "When both holdout agents fail, the workflow escalates",
+        "No deduplication is applied to holdout scenarios across providers",
+        "When only one provider succeeds, merged file contains only that provider's scenarios with attribution note"
+      ],
+      "depends_on": ["implement-codex-runner", "add-holdout-output-schema", "add-codex-availability-check"],
+      "constraints": ["Holdout failure is less critical than review failure — single provider is acceptable", "Both agents use HoldoutTimeoutSeconds from config"],
+      "files_scope": [
+        "internal/specworkflow/holdout_merge.go",
+        "internal/specworkflow/holdout_merge_test.go",
+        "internal/specworkflow/orchestrator_review.go"
+      ],
+      "non_goals": ["Changing the holdout prompt generation logic", "Deduplicating holdout scenarios"],
+      "priority": "critical",
+      "estimate": "large"
+    },
+    {
+      "task_id": "wire-codex-into-orchestrator",
+      "task_name": "Wire codex runner and config into orchestrator and API handler",
+      "goal": "The orchestrator passes the codex runner to the review dispatch and holdout generation handlers, and the API handler passes codex config fields to the orchestrator constructor.",
+      "inputs": [
+        {"name": "codex_runner", "type": "optional<CodexRunner>", "constraints": "from availability check", "source": "Orchestrator field"},
+        {"name": "config", "type": "WorkflowConfig", "constraints": "includes codex fields", "source": "API handler"}
+      ],
+      "outputs": [
+        {"name": "updated_orchestrator", "type": "Orchestrator", "constraints": "codex runner plumbed to dispatch and holdout", "destination": "internal/specworkflow/orchestrator.go"},
+        {"name": "updated_handler", "type": "WorkflowHandler", "constraints": "codex config passed through", "destination": "internal/api/workflow_handler.go"}
+      ],
+      "acceptance": [
+        "Orchestrator.handleReviewing passes codexRunner to the review dispatch function",
+        "Orchestrator.handleHoldoutGeneration passes codexRunner to the holdout dispatch function",
+        "WorkflowHandler passes EnableCodexReviewers, CodexModel, ReviewerTimeoutSeconds, and HoldoutTimeoutSeconds from request/config to the orchestrator",
+        "When codexRunner is nil, dispatch functions receive nil and operate in claude-only mode",
+        "Integration test: full orchestrator review phase with mock runners dispatches 8 reviewers when codex runner is non-nil",
+        "Integration test: full orchestrator review phase with nil codex runner dispatches 4 reviewers"
+      ],
+      "depends_on": ["extend-review-dispatch-dual-provider", "implement-holdout-dual-dispatch", "add-codex-availability-check"],
+      "constraints": ["Must not change existing API handler signatures in a breaking way"],
+      "files_scope": [
+        "internal/specworkflow/orchestrator.go",
+        "internal/specworkflow/orchestrator_review.go",
+        "internal/specworkflow/orchestrator_test.go",
+        "internal/api/workflow_handler.go"
+      ],
+      "priority": "critical",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "add-regression-and-backward-compat-tests",
+      "task_name": "Add regression and backward compatibility tests for dual-provider feature",
+      "goal": "Regression tests verify that claude-only dispatch (4 reviewers), 4-input merge, and 8-agent team configuration all work identically to pre-codex behavior.",
+      "inputs": [
+        {"name": "existing_tests", "type": "Go test files", "constraints": "must continue to pass", "source": "internal/specworkflow/*_test.go"}
+      ],
+      "outputs": [
+        {"name": "new_test_cases", "type": "Go test functions", "constraints": "3+ new regression tests", "destination": "Test files in internal/specworkflow/"}
+      ],
+      "acceptance": [
+        "TestDispatch_BackwardCompat_ClaudeOnly passes: 4-reviewer dispatch with nil codex runner produces 4 output files",
+        "TestMerge_BackwardCompat_FourInputs passes: merge with exactly 4 claude-only inputs produces correct output",
+        "TestTeamConfig_BackwardCompat_NoCodex passes: team config with codex disabled returns 8 agents",
+        "All pre-existing tests in review_dispatch_test.go, merge_test.go, claude_runner_test.go, team_test.go continue to pass",
+        "go test ./internal/specworkflow/... passes with 0 failures"
+      ],
+      "depends_on": ["extend-review-dispatch-dual-provider", "extend-merge-provider-attribution", "add-team-config-codex-agents"],
+      "constraints": ["Must not modify existing test assertions, only add new test functions"],
+      "files_scope": [
+        "internal/specworkflow/review_dispatch_test.go",
+        "internal/specworkflow/merge_test.go",
+        "internal/specworkflow/team_test.go"
+      ],
+      "priority": "high",
+      "estimate": "medium"
+    }
+  ]
+}

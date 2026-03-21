@@ -117,6 +117,7 @@ func orchTestConfig() SpecWorkflowConfig {
 	cfg.MaxTotalFindings = 100
 	cfg.MaxRetries = 1
 	cfg.MaxGateCorrections = 3
+	cfg.EnableCodexReviewers = false // Disable codex in tests to avoid real CLI dependency
 	return cfg
 }
 

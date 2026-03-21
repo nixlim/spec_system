@@ -123,7 +123,7 @@ func TestNewCircuitBreakerEvent(t *testing.T) {
 }
 
 func TestNewAgentErrorEvent(t *testing.T) {
-	env := NewAgentErrorEvent("reviewer", "timeout", 2, 3)
+	env := NewAgentErrorEvent("reviewer", "timeout", "", 2, 3)
 	if env.Event != EventAgentError {
 		t.Errorf("Event = %q, want %q", env.Event, EventAgentError)
 	}
@@ -156,7 +156,7 @@ func TestEventEnvelope_AllEventsSerializeToValidJSON(t *testing.T) {
 		NewConvergenceUpdateEvent(1, "PASS", 0, 0, 2, true, "all clear"),
 		NewGateRequestEvent("ambiguity_resolution", "t-1", map[string]string{"q": "which?"}),
 		NewCircuitBreakerEvent("cost_usd", 9.5, 10.0),
-		NewAgentErrorEvent("drafter", "rate_limit", 1, 3),
+		NewAgentErrorEvent("drafter", "rate_limit", "", 1, 3),
 	}
 
 	for _, env := range envelopes {
@@ -218,9 +218,9 @@ func TestEventEnvelope_CircuitBreakerJSONFieldNames(t *testing.T) {
 }
 
 func TestEventEnvelope_AgentErrorJSONFieldNames(t *testing.T) {
-	env := NewAgentErrorEvent("reviewer", "timeout", 1, 3)
+	env := NewAgentErrorEvent("reviewer", "timeout", "some detail", 1, 3)
 	assertJSONDataKeys(t, env, []string{
-		"agent", "error_type", "retry_count", "max_retries",
+		"agent", "error_type", "detail", "retry_count", "max_retries",
 	})
 }
 
@@ -283,13 +283,13 @@ func TestChannelEmitter_NonBlockingDrop(t *testing.T) {
 
 	// Fill the buffer.
 	for i := 0; i < bufSize; i++ {
-		if err := emitter.Emit(NewAgentErrorEvent("a", "e", i, 3)); err != nil {
+		if err := emitter.Emit(NewAgentErrorEvent("a", "e", "", i, 3)); err != nil {
 			t.Fatalf("Emit %d: %v", i, err)
 		}
 	}
 
 	// This emit should not block — returns ErrChannelFull.
-	err := emitter.Emit(NewAgentErrorEvent("a", "e", 99, 3))
+	err := emitter.Emit(NewAgentErrorEvent("a", "e", "", 99, 3))
 	if err != ErrChannelFull {
 		t.Fatalf("Emit overflow: got %v, want ErrChannelFull", err)
 	}
@@ -611,7 +611,7 @@ func TestChannelEmitter_SetFeatureName(t *testing.T) {
 	defer emitter.Close()
 
 	// Initially no feature name — event should pass through without one.
-	ev1 := NewAgentErrorEvent("a", "timeout", 1, 3)
+	ev1 := NewAgentErrorEvent("a", "timeout", "", 1, 3)
 	if err := emitter.Emit(ev1); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
@@ -622,7 +622,7 @@ func TestChannelEmitter_SetFeatureName(t *testing.T) {
 
 	// After setting feature name, events should carry it.
 	emitter.SetFeatureName("gamma")
-	ev2 := NewAgentErrorEvent("b", "rate_limit", 0, 3)
+	ev2 := NewAgentErrorEvent("b", "rate_limit", "", 0, 3)
 	if err := emitter.Emit(ev2); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
@@ -702,12 +702,12 @@ func TestFeatureEmitterDelegatesErrors(t *testing.T) {
 	fe := NewFeatureEmitter(inner, "gamma")
 
 	// Fill the buffer.
-	if err := fe.Emit(NewAgentErrorEvent("a", "timeout", 0, 3)); err != nil {
+	if err := fe.Emit(NewAgentErrorEvent("a", "timeout", "", 0, 3)); err != nil {
 		t.Fatalf("first Emit: %v", err)
 	}
 
 	// Second emit should propagate the error from the inner emitter.
-	err := fe.Emit(NewAgentErrorEvent("b", "timeout", 1, 3))
+	err := fe.Emit(NewAgentErrorEvent("b", "timeout", "", 1, 3))
 	if err != ErrChannelFull {
 		t.Errorf("got %v, want ErrChannelFull", err)
 	}

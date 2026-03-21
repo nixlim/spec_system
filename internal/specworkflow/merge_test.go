@@ -557,6 +557,179 @@ func TestMerge_EmptyConstitutionPrincipleMatchesEmpty(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Dual-provider merge tests
+// ---------------------------------------------------------------------------
+
+func TestMerge_CrossProviderDuplicate(t *testing.T) {
+	// Claude reviewer finds (Sec3, AMB, MAJOR), codex reviewer finds (Sec3, AMB, CRITICAL).
+	// Result: one finding, raised_by=[both], severity=CRITICAL (higher wins).
+	principle := strPtr("P1")
+	outputs := []*ReviewerOutput{
+		makeReviewerOutput("reviewer-clarity-claude", []Finding{
+			makeTestFinding("F-001", "Section 3", "AMB", SeverityMajor, principle),
+		}),
+		makeReviewerOutput("reviewer-clarity-codex", []Finding{
+			makeTestFinding("F-002", "Section 3", "AMB", SeverityCritical, principle),
+		}),
+	}
+
+	result, err := MergeReviewerOutputs(outputs, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.TotalAfterDedup != 1 {
+		t.Fatalf("TotalAfterDedup = %d, want 1", result.TotalAfterDedup)
+	}
+
+	f := result.Findings[0]
+	if f.Severity != SeverityCritical {
+		t.Errorf("Severity = %v, want CRITICAL", f.Severity)
+	}
+	if len(f.RaisedBy) != 2 {
+		t.Errorf("len(RaisedBy) = %d, want 2", len(f.RaisedBy))
+	}
+	// Verify both providers represented.
+	hasClaud, hasCodex := false, false
+	for _, r := range f.RaisedBy {
+		if r == "reviewer-clarity-claude" {
+			hasClaud = true
+		}
+		if r == "reviewer-clarity-codex" {
+			hasCodex = true
+		}
+	}
+	if !hasClaud || !hasCodex {
+		t.Errorf("RaisedBy = %v, want both claude and codex reviewers", f.RaisedBy)
+	}
+}
+
+func TestMerge_SingleProviderFinding(t *testing.T) {
+	// Only codex reviewer raises a finding.
+	outputs := []*ReviewerOutput{
+		makeReviewerOutput("reviewer-security-claude", []Finding{}),
+		makeReviewerOutput("reviewer-security-codex", []Finding{
+			makeTestFinding("F-001", "Section A", "SEC", SeverityMajor, nil),
+		}),
+	}
+
+	result, err := MergeReviewerOutputs(outputs, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.TotalAfterDedup != 1 {
+		t.Fatalf("TotalAfterDedup = %d, want 1", result.TotalAfterDedup)
+	}
+	if len(result.Findings[0].RaisedBy) != 1 {
+		t.Errorf("len(RaisedBy) = %d, want 1", len(result.Findings[0].RaisedBy))
+	}
+	if result.Findings[0].RaisedBy[0] != "reviewer-security-codex" {
+		t.Errorf("RaisedBy[0] = %q, want %q", result.Findings[0].RaisedBy[0], "reviewer-security-codex")
+	}
+}
+
+func TestMerge_SameSectionDifferentLens(t *testing.T) {
+	// Same section but different lens = NOT deduplicated.
+	outputs := []*ReviewerOutput{
+		makeReviewerOutput("reviewer-clarity-claude", []Finding{
+			makeTestFinding("F-001", "Section A", "AMB", SeverityMajor, nil),
+		}),
+		makeReviewerOutput("reviewer-security-codex", []Finding{
+			makeTestFinding("F-002", "Section A", "SEC", SeverityMajor, nil),
+		}),
+	}
+
+	result, err := MergeReviewerOutputs(outputs, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.TotalAfterDedup != 2 {
+		t.Errorf("TotalAfterDedup = %d, want 2 (different lenses should not deduplicate)", result.TotalAfterDedup)
+	}
+	if result.DuplicatesMerged != 0 {
+		t.Errorf("DuplicatesMerged = %d, want 0", result.DuplicatesMerged)
+	}
+}
+
+func TestMerge_EightInputs(t *testing.T) {
+	// 8 reviewer outputs (simulating dual-provider team) merged without error.
+	lenses := []string{"clarity", "consistency", "security", "correctness"}
+	var outputs []*ReviewerOutput
+	for _, lens := range lenses {
+		outputs = append(outputs,
+			makeReviewerOutput("reviewer-"+lens+"-claude", []Finding{
+				makeTestFinding("F-"+lens+"-claude", "Section "+lens, lens, SeverityMajor, nil),
+			}),
+			makeReviewerOutput("reviewer-"+lens+"-codex", []Finding{
+				makeTestFinding("F-"+lens+"-codex", "Section "+lens, lens, SeverityCritical, nil),
+			}),
+		)
+	}
+
+	result, err := MergeReviewerOutputs(outputs, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Each lens pair should deduplicate to 1 finding = 4 total.
+	if result.TotalAfterDedup != 4 {
+		t.Errorf("TotalAfterDedup = %d, want 4", result.TotalAfterDedup)
+	}
+	if result.DuplicatesMerged != 4 {
+		t.Errorf("DuplicatesMerged = %d, want 4", result.DuplicatesMerged)
+	}
+
+	// All should be CRITICAL (higher severity wins).
+	for _, f := range result.Findings {
+		if f.Severity != SeverityCritical {
+			t.Errorf("finding %q: Severity = %v, want CRITICAL", f.ID, f.Severity)
+		}
+		if len(f.RaisedBy) != 2 {
+			t.Errorf("finding %q: len(RaisedBy) = %d, want 2", f.ID, len(f.RaisedBy))
+		}
+	}
+}
+
+func TestMerge_DedupLogProviderAttribution(t *testing.T) {
+	// Dedup log records both provider-suffixed reviewer names.
+	principle := strPtr("P1")
+	outputs := []*ReviewerOutput{
+		makeReviewerOutput("reviewer-clarity-claude", []Finding{
+			makeTestFinding("F-001", "Section X", "AMB", SeverityMajor, principle),
+		}),
+		makeReviewerOutput("reviewer-clarity-codex", []Finding{
+			makeTestFinding("F-002", "Section X", "AMB", SeverityCritical, principle),
+		}),
+	}
+
+	result, err := MergeReviewerOutputs(outputs, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result.DedupLog) != 1 {
+		t.Fatalf("len(DedupLog) = %d, want 1", len(result.DedupLog))
+	}
+
+	entry := result.DedupLog[0]
+	if entry.KeptID != "F-001" {
+		t.Errorf("DedupLog KeptID = %q, want %q", entry.KeptID, "F-001")
+	}
+	if entry.MergedID != "F-002" {
+		t.Errorf("DedupLog MergedID = %q, want %q", entry.MergedID, "F-002")
+	}
+	if entry.Reason == "" {
+		t.Error("DedupLog Reason is empty")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Original merge tests
+// ---------------------------------------------------------------------------
+
 func TestMerge_ThreeWayDuplicate(t *testing.T) {
 	// Three reviewers raise the same finding. Should merge into one
 	// with 3 source_ids and 3 raised_by entries.

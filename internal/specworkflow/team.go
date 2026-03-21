@@ -34,108 +34,151 @@ type TeamConfig struct {
 	Agents []AgentConfig `json:"agents" yaml:"agents"`
 }
 
-// requiredAgentNames is the canonical set of agent names that must be present
-// in a valid team configuration.
-var requiredAgentNames = []string{
+// requiredNonReviewerNames lists the non-reviewer agents that must always be
+// present in a valid team configuration.
+var requiredNonReviewerNames = []string{
 	"discovery",
 	"drafter",
 	"reviser",
-	"reviewer-clarity",
-	"reviewer-consistency",
-	"reviewer-security",
-	"reviewer-correctness",
 	"judge",
 }
 
-// DefaultTeamConfig returns a TeamConfig with the standard 8-agent team for
-// the adversarial spec review workflow. All agents use the "claude" provider.
-func DefaultTeamConfig() TeamConfig {
-	return TeamConfig{
-		Agents: []AgentConfig{
-			{
-				Name:           "discovery",
-				Provider:       "claude",
-				Role:           "discovery",
-				Count:          1,
-				Description:    "Analyses source documents to extract actors, scope, constraints, and requirements.",
-				TimeoutSeconds: 120,
-			},
-			{
-				Name:           "drafter",
-				Provider:       "claude",
-				Role:           "drafter",
-				Count:          1,
-				Description:    "Produces a complete specification document and holdout test dataset from confirmed requirements.",
-				TimeoutSeconds: 180,
-			},
-			{
-				Name:           "reviser",
-				Provider:       "claude",
-				Role:           "reviser",
-				Count:          1,
-				Description:    "Revises the specification to address findings from the review round.",
-				TimeoutSeconds: 180,
-			},
-			{
-				Name:           "reviewer-clarity",
-				Provider:       "claude",
-				Role:           "reviewer",
-				Count:          1,
-				Description:    "Reviews the specification for ambiguity and incompleteness using AMB and INC lenses.",
-				TimeoutSeconds: 120,
-			},
-			{
-				Name:           "reviewer-consistency",
-				Provider:       "claude",
-				Role:           "reviewer",
-				Count:          1,
-				Description:    "Reviews the specification for consistency and feasibility using CON and FEA lenses.",
-				TimeoutSeconds: 120,
-			},
-			{
-				Name:           "reviewer-security",
-				Provider:       "claude",
-				Role:           "reviewer",
-				Count:          1,
-				Description:    "Reviews the specification for security and operability using SEC and OPS lenses.",
-				TimeoutSeconds: 120,
-			},
-			{
-				Name:           "reviewer-correctness",
-				Provider:       "claude",
-				Role:           "reviewer",
-				Count:          1,
-				Description:    "Reviews the specification for correctness and complexity using COR and CPX lenses.",
-				TimeoutSeconds: 120,
-			},
-			{
-				Name:           "judge",
-				Provider:       "claude",
-				Role:           "judge",
-				Count:          1,
-				Description:    "Evaluates whether the revised specification adequately addresses findings and renders a verdict.",
-				TimeoutSeconds: 120,
-			},
-		},
-	}
+// requiredClaudeReviewerNames lists the claude reviewer agents that must be
+// present in a valid team configuration.
+var requiredClaudeReviewerNames = []string{
+	"reviewer-clarity-claude",
+	"reviewer-consistency-claude",
+	"reviewer-security-claude",
+	"reviewer-correctness-claude",
 }
 
-// ValidateTeamConfig validates that all 8 required agents are present in the
-// configuration and that all agents use the "claude" provider. Returns an
-// error describing the first violated constraint.
-func ValidateTeamConfig(config TeamConfig) error {
-	nameSet := make(map[string]bool, len(config.Agents))
-	for _, agent := range config.Agents {
-		nameSet[agent.Name] = true
-		if agent.Provider != "claude" {
-			return fmt.Errorf("agent %q: provider must be %q, got %q", agent.Name, "claude", agent.Provider)
+// reviewerBaseLenses lists the base lens names for reviewers (without provider suffix).
+var reviewerBaseLenses = []string{"clarity", "consistency", "security", "correctness"}
+
+// reviewerDescriptions maps base lens names to human-readable descriptions.
+var reviewerDescriptions = map[string]string{
+	"clarity":      "Reviews the specification for ambiguity and incompleteness using AMB and INC lenses.",
+	"consistency":  "Reviews the specification for consistency and feasibility using CON and FEA lenses.",
+	"security":     "Reviews the specification for security and operability using SEC and OPS lenses.",
+	"correctness":  "Reviews the specification for correctness and complexity using COR and CPX lenses.",
+}
+
+// DefaultTeamConfig returns a TeamConfig for the adversarial spec review
+// workflow. When enableCodex is false, returns 8 agents with reviewer names
+// suffixed with "-claude". When enableCodex is true, returns 12 agents: the
+// 8 claude agents plus 4 codex reviewers with "-codex" suffix.
+func DefaultTeamConfig(enableCodex bool) TeamConfig {
+	agents := []AgentConfig{
+		{
+			Name:           "discovery",
+			Provider:       "claude",
+			Role:           "discovery",
+			Count:          1,
+			Description:    "Analyses source documents to extract actors, scope, constraints, and requirements.",
+			TimeoutSeconds: 120,
+		},
+		{
+			Name:           "drafter",
+			Provider:       "claude",
+			Role:           "drafter",
+			Count:          1,
+			Description:    "Produces a complete specification document and holdout test dataset from confirmed requirements.",
+			TimeoutSeconds: 180,
+		},
+		{
+			Name:           "reviser",
+			Provider:       "claude",
+			Role:           "reviser",
+			Count:          1,
+			Description:    "Revises the specification to address findings from the review round.",
+			TimeoutSeconds: 180,
+		},
+	}
+
+	// Add claude reviewers with -claude suffix.
+	for _, lens := range reviewerBaseLenses {
+		agents = append(agents, AgentConfig{
+			Name:           fmt.Sprintf("reviewer-%s-claude", lens),
+			Provider:       "claude",
+			Role:           "reviewer",
+			Count:          1,
+			Description:    reviewerDescriptions[lens],
+			TimeoutSeconds: 120,
+		})
+	}
+
+	// Add codex reviewers if enabled.
+	if enableCodex {
+		for _, lens := range reviewerBaseLenses {
+			agents = append(agents, AgentConfig{
+				Name:           fmt.Sprintf("reviewer-%s-codex", lens),
+				Provider:       "codex",
+				Role:           "reviewer",
+				Count:          1,
+				Description:    reviewerDescriptions[lens],
+				TimeoutSeconds: 300,
+			})
 		}
 	}
 
-	for _, required := range requiredAgentNames {
+	agents = append(agents, AgentConfig{
+		Name:           "judge",
+		Provider:       "claude",
+		Role:           "judge",
+		Count:          1,
+		Description:    "Evaluates whether the revised specification adequately addresses findings and renders a verdict.",
+		TimeoutSeconds: 120,
+	})
+
+	return TeamConfig{Agents: agents}
+}
+
+// ValidateTeamConfig validates team configuration constraints:
+//   - All required non-reviewer agents (discovery, drafter, reviser, judge) must be present.
+//   - At least the 4 claude reviewer agents must be present.
+//   - The "codex" provider is only allowed on agents with the "reviewer" or "holdout" role.
+//   - Legacy reviewer names (without provider suffix) are accepted for backward compatibility.
+func ValidateTeamConfig(config TeamConfig) error {
+	nameSet := make(map[string]bool, len(config.Agents))
+	reviewerCount := 0
+
+	for _, agent := range config.Agents {
+		nameSet[agent.Name] = true
+		if agent.Role == "reviewer" {
+			reviewerCount++
+		}
+
+		// Codex provider is only allowed for reviewer and holdout roles.
+		if agent.Provider == "codex" && agent.Role != "reviewer" && agent.Role != "holdout" {
+			return fmt.Errorf("agent %q: codex provider only supported for reviewer role", agent.Name)
+		}
+
+		// Non-codex agents must use "claude".
+		if agent.Provider != "claude" && agent.Provider != "codex" {
+			return fmt.Errorf("agent %q: provider must be %q or %q, got %q", agent.Name, "claude", "codex", agent.Provider)
+		}
+	}
+
+	// Check required non-reviewer agents.
+	for _, required := range requiredNonReviewerNames {
 		if !nameSet[required] {
 			return fmt.Errorf("missing required agent: %q", required)
 		}
+	}
+
+	// Check required claude reviewers. Accept either suffixed or legacy (unsuffixed) names.
+	for _, required := range requiredClaudeReviewerNames {
+		if !nameSet[required] {
+			// Accept legacy name without -claude suffix.
+			legacy := required[:len(required)-len("-claude")]
+			if !nameSet[legacy] {
+				return fmt.Errorf("missing required agent: %q", required)
+			}
+		}
+	}
+
+	if reviewerCount < 4 {
+		return fmt.Errorf("at least 4 reviewer agents required, got %d", reviewerCount)
 	}
 
 	return nil

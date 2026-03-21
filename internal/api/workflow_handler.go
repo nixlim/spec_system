@@ -843,6 +843,32 @@ func HandleGetWorkflowStatus(manager *WorkflowManager) http.HandlerFunc {
 	}
 }
 
+// HandleGetWorkflowAgents returns the currently active agents for a workflow.
+// GET /api/workflow/agents?feature=<name>
+func HandleGetWorkflowAgents(manager *WorkflowManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		featureName := r.URL.Query().Get("feature")
+		if featureName == "" {
+			http.Error(w, "feature parameter required", http.StatusBadRequest)
+			return
+		}
+		orch := manager.GetOrchestrator(featureName)
+		if orch == nil {
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"agents": []specworkflow.AgentStatus{},
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"agents": orch.GetActiveAgents(),
+		})
+	}
+}
+
 // handleSingleWorkflowStatus returns a single JSON status object for the
 // requested feature, or 404 if it doesn't exist.
 func handleSingleWorkflowStatus(w http.ResponseWriter, manager *WorkflowManager, featureName string) {
@@ -1326,9 +1352,9 @@ func HandleRestartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 }
 
 // HandleRewindWorkflow returns an HTTP handler for POST /api/workflow/rewind.
-// It rewinds a workflow to a previous stage, preserving all accumulated context
-// that feeds into the target stage while removing artefacts that come after it.
-// After rewinding, the workflow can be resumed from the target state.
+// It rewinds a workflow to a previous stage by resetting the workflow state.
+// All artefact files are preserved so the workflow re-runs stages using
+// existing documents as input. After rewinding, use Resume to continue.
 func HandleRewindWorkflow(manager *WorkflowManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -1397,16 +1423,16 @@ func HandleRewindWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("[workflow] rewound %q from %s to %s round %d, removed %d files",
-			req.FeatureName, result.PreviousState, result.TargetState, result.Round, len(result.FilesRemoved))
+		log.Printf("[workflow] rewound %q from %s to %s round %d (artefacts preserved)",
+			req.FeatureName, result.PreviousState, result.TargetState, result.Round)
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"status":         "rewound",
 			"previous_state": result.PreviousState.String(),
 			"target_state":   result.TargetState.String(),
 			"round":          result.Round,
-			"files_removed":  len(result.FilesRemoved),
-			"message":        fmt.Sprintf("Workflow rewound to %s round %d. Use Resume to continue.", result.TargetState, result.Round),
+			"files_removed":  0,
+			"message":        fmt.Sprintf("Workflow rewound to %s round %d. All artefacts preserved. Use Resume to continue.", result.TargetState, result.Round),
 		})
 	}
 }

@@ -54,6 +54,17 @@ type SpecWorkflowConfig struct {
 	// MaxRetries is the maximum number of retry attempts for transient
 	// failures in agent invocations.
 	MaxRetries int `yaml:"max_retries"`
+	// EnableCodexReviewers controls whether codex CLI agents are used
+	// alongside claude for review and holdout generation. Default: true.
+	EnableCodexReviewers bool `yaml:"enable_codex_reviewers"`
+	// CodexModel is the model passed to codex CLI via -m flag.
+	CodexModel string `yaml:"codex_model"`
+	// ReviewerTimeoutSeconds is the timeout for all reviewer agents (both
+	// claude and codex) in seconds.
+	ReviewerTimeoutSeconds int `yaml:"reviewer_timeout_seconds"`
+	// HoldoutTimeoutSeconds is the timeout for holdout generation agents
+	// in seconds.
+	HoldoutTimeoutSeconds int `yaml:"holdout_timeout_seconds"`
 	// SkillPaths holds the filesystem paths to skill directories.
 	SkillPaths SkillPaths `yaml:"skill_paths"`
 }
@@ -64,13 +75,17 @@ func DefaultConfig() SpecWorkflowConfig {
 	return SpecWorkflowConfig{
 		MaxRounds:           5,
 		MinRounds:           2,
-		MaxTotalFindings:    60,
+		MaxTotalFindings:    200,
 		StalenessThreshold:  2,
 		MaxWallClockMinutes: 60,
 		MaxCostUSD:          50.0,
 		MaxGateCorrections:  3,
 		MaxGate2Redrafts:    1,
 		MaxRetries:          2,
+		EnableCodexReviewers:   true,
+		CodexModel:             "gpt-5.4",
+		ReviewerTimeoutSeconds: 300,
+		HoldoutTimeoutSeconds:  300,
 	}
 }
 
@@ -109,6 +124,12 @@ func (c *SpecWorkflowConfig) Validate() error {
 	}
 	if c.MaxGate2Redrafts <= 0 {
 		return fmt.Errorf("max_gate2_redrafts must be > 0, got %d", c.MaxGate2Redrafts)
+	}
+	if c.ReviewerTimeoutSeconds <= 0 {
+		return fmt.Errorf("reviewer_timeout_seconds must be > 0, got %d", c.ReviewerTimeoutSeconds)
+	}
+	if c.HoldoutTimeoutSeconds <= 0 {
+		return fmt.Errorf("holdout_timeout_seconds must be > 0, got %d", c.HoldoutTimeoutSeconds)
 	}
 	if c.SkillPaths.PlanSpec != "" {
 		if _, err := os.Stat(c.SkillPaths.PlanSpec); err != nil {

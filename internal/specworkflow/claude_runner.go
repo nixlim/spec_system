@@ -331,6 +331,31 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
+// CloneForAgent returns a shallow copy of this ClaudeRunner with an
+// additional OTEL resource attribute identifying the agent. This allows
+// the OTEL receiver to attribute telemetry to specific agents when
+// multiple reviewers run in parallel.
+func (r *ClaudeRunner) CloneForAgent(agentName string) AgentRunner {
+	envCopy := make(map[string]string, len(r.Env)+1)
+	for k, v := range r.Env {
+		envCopy[k] = v
+	}
+	// Append workflow.agent to existing resource attributes.
+	existing := envCopy["OTEL_RESOURCE_ATTRIBUTES"]
+	if existing != "" {
+		envCopy["OTEL_RESOURCE_ATTRIBUTES"] = existing + ",workflow.agent=" + agentName
+	} else {
+		envCopy["OTEL_RESOURCE_ATTRIBUTES"] = "workflow.agent=" + agentName
+	}
+	return &ClaudeRunner{
+		Command:      r.Command,
+		Args:         r.Args,
+		Timeout:      r.Timeout,
+		WorkspaceDir: r.WorkspaceDir,
+		Env:          envCopy,
+	}
+}
+
 // DefaultClaudeRunner returns a ClaudeRunner configured with standard
 // defaults for the adversarial spec workflow. If otelPort > 0, OTEL
 // environment variables are set so child Claude processes export
