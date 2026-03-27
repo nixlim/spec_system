@@ -94,8 +94,10 @@ type Orchestrator struct {
 	skills          *SkillCache
 	progressTracker *ProgressTracker
 	runner          AgentRunner
-	codexRunner        AgentRunner
-	codexHoldoutRunner AgentRunner
+	codexRunner          AgentRunner
+	codexHoldoutRunner   AgentRunner
+	codexDiscoveryRunner AgentRunner
+	codexDraftingRunner  AgentRunner
 	cancelled       atomic.Bool
 	mu              sync.Mutex
 	running         bool
@@ -314,7 +316,42 @@ func (o *Orchestrator) RunWorkflow(goal GoalInput) error {
 			}
 
 		case StateFinalized:
-			return o.handleFinalized(state, specDir)
+			if err := o.handleFinalized(state, specDir); err != nil {
+				return err
+			}
+
+		case StateTaskify:
+			if err := o.handleTaskify(state, specDir); err != nil {
+				return err
+			}
+
+		case StateTaskReview:
+			if err := o.handleTaskReview(state, specDir); err != nil {
+				return err
+			}
+
+		case StateTaskRevision:
+			if err := o.handleTaskRevision(state, specDir); err != nil {
+				return err
+			}
+
+		case StateTaskHumanGate:
+			if err := o.handleTaskHumanGate(state, specDir); err != nil {
+				return err
+			}
+
+		case StateTasksApproved:
+			o.logTransition(StateTasksApproved, StateComplete)
+			if err := o.sm.Transition(StateComplete); err != nil {
+				return fmt.Errorf("transition TASKS_APPROVED -> COMPLETE: %w", err)
+			}
+
+		case StateComplete:
+			if err := SaveState(specDir, state); err != nil {
+				log.Printf("warning: failed to save complete state: %v", err)
+			}
+			log.Printf("[orchestrator] workflow completed successfully")
+			return nil
 
 		case StateEscalated:
 			return o.handleEscalated(state, specDir)
@@ -344,6 +381,38 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 			log.Printf("[orchestrator] codex CLI detected — dual-provider review enabled")
 		} else {
 			log.Printf("[orchestrator] WARNING: codex CLI not found — codex reviewers disabled, running claude-only")
+		}
+	}
+
+	// Detect codex CLI availability for drafting when enabled.
+	var codexDraftingRunner AgentRunner
+	if cfg.Config.EnableCodexDrafting {
+		lookPathDraft := cfg.LookPathFunc
+		if lookPathDraft == nil {
+			lookPathDraft = exec.LookPath
+		}
+		if _, err := lookPathDraft("codex"); err == nil {
+			// Drafting uses no structured output schema — the drafter prompt
+			// specifies the expected JSON format inline.
+			codexDraftingRunner = DefaultCodexRunner(cfg.Config.CodexModel, cfg.WorkspaceDir, nil)
+			log.Printf("[orchestrator] codex CLI detected — dual-provider drafting enabled")
+		} else {
+			log.Printf("[orchestrator] Codex unavailable, falling back to Claude-only drafting")
+		}
+	}
+
+	// Detect codex CLI availability for discovery when enabled.
+	var codexDiscoveryRunner AgentRunner
+	if cfg.Config.EnableCodexDiscovery {
+		lookPath2 := cfg.LookPathFunc
+		if lookPath2 == nil {
+			lookPath2 = exec.LookPath
+		}
+		if _, err := lookPath2("codex"); err == nil {
+			codexDiscoveryRunner = DefaultCodexRunner(cfg.Config.CodexModel, cfg.WorkspaceDir, DiscoveryOutputSchema())
+			log.Printf("[orchestrator] codex CLI detected — dual-provider discovery enabled")
+		} else {
+			log.Printf("[orchestrator] Codex CLI not available, falling back to Claude-only discovery")
 		}
 	}
 
@@ -444,8 +513,10 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 		skills:          skills,
 		progressTracker: NewProgressTracker(),
 		runner:          cfg.Runner,
-		codexRunner:        codexRunner,
-		codexHoldoutRunner: codexHoldoutRunner,
+		codexRunner:          codexRunner,
+		codexHoldoutRunner:   codexHoldoutRunner,
+		codexDiscoveryRunner: codexDiscoveryRunner,
+		codexDraftingRunner:  codexDraftingRunner,
 		costProvider:    cfg.CostProvider,
 		workspaceDir:    cfg.WorkspaceDir,
 		featureName:     cfg.FeatureName,

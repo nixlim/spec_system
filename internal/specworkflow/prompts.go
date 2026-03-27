@@ -530,6 +530,31 @@ func CheckContextLimit(prompt string) (warning string, ok bool) {
 	return "", true
 }
 
+// BuildHumanFeedbackBlock formats accumulated human comments into a
+// <human_feedback> XML block suitable for inclusion in agent prompts. It
+// returns an empty string when there are no comments, so callers can
+// unconditionally append the result without adding noise.
+func BuildHumanFeedbackBlock(comments []CommentEntry) string {
+	if len(comments) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("\n## Human Feedback\n\n")
+	b.WriteString("<human_feedback>\n")
+	b.WriteString("PRIORITY: The following comments were provided by the human operator at various gates.\n")
+	b.WriteString("You MUST address every comment below. Do NOT ignore or skip any feedback.\n\n")
+
+	for i, c := range comments {
+		fmt.Fprintf(&b, "### Comment %d (Gate: %s, Action: %s, Time: %s)\n\n", i+1, c.Gate, c.Action, c.Timestamp)
+		b.WriteString(c.Comment)
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString("</human_feedback>\n")
+	return b.String()
+}
+
 // lensDescription returns a short human-readable description of a review lens.
 func lensDescription(lens string) string {
 	switch lens {

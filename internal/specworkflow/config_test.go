@@ -51,6 +51,21 @@ func TestConfigDefaultValues(t *testing.T) {
 	if cfg.HoldoutTimeoutSeconds != 300 {
 		t.Errorf("HoldoutTimeoutSeconds: got %d, want 300", cfg.HoldoutTimeoutSeconds)
 	}
+	if cfg.EnableCodexDiscovery != false {
+		t.Errorf("EnableCodexDiscovery: got %v, want false", cfg.EnableCodexDiscovery)
+	}
+	if cfg.EnableCodexDrafting != false {
+		t.Errorf("EnableCodexDrafting: got %v, want false", cfg.EnableCodexDrafting)
+	}
+	if cfg.AgentTimeoutSeconds != 300 {
+		t.Errorf("AgentTimeoutSeconds: got %d, want 300", cfg.AgentTimeoutSeconds)
+	}
+	if cfg.TaskifyMaxRetries != 3 {
+		t.Errorf("TaskifyMaxRetries: got %d, want 3", cfg.TaskifyMaxRetries)
+	}
+	if cfg.TaskReviewMaxRounds != 3 {
+		t.Errorf("TaskReviewMaxRounds: got %d, want 3", cfg.TaskReviewMaxRounds)
+	}
 	if cfg.SkillPaths.PlanSpec != "" {
 		t.Errorf("SkillPaths.PlanSpec: got %q, want empty", cfg.SkillPaths.PlanSpec)
 	}
@@ -115,6 +130,21 @@ max_cost_usd: 25.0
 	if cfg.HoldoutTimeoutSeconds != 300 {
 		t.Errorf("HoldoutTimeoutSeconds (default): got %d, want 300", cfg.HoldoutTimeoutSeconds)
 	}
+	if cfg.EnableCodexDiscovery != false {
+		t.Errorf("EnableCodexDiscovery (default): got %v, want false", cfg.EnableCodexDiscovery)
+	}
+	if cfg.EnableCodexDrafting != false {
+		t.Errorf("EnableCodexDrafting (default): got %v, want false", cfg.EnableCodexDrafting)
+	}
+	if cfg.AgentTimeoutSeconds != 300 {
+		t.Errorf("AgentTimeoutSeconds (default): got %d, want 300", cfg.AgentTimeoutSeconds)
+	}
+	if cfg.TaskifyMaxRetries != 3 {
+		t.Errorf("TaskifyMaxRetries (default): got %d, want 3", cfg.TaskifyMaxRetries)
+	}
+	if cfg.TaskReviewMaxRounds != 3 {
+		t.Errorf("TaskReviewMaxRounds (default): got %d, want 3", cfg.TaskReviewMaxRounds)
+	}
 }
 
 func TestConfigFullYAMLParsing(t *testing.T) {
@@ -132,6 +162,11 @@ enable_codex_reviewers: false
 codex_model: o3
 reviewer_timeout_seconds: 600
 holdout_timeout_seconds: 120
+enable_codex_discovery: true
+enable_codex_drafting: true
+agent_timeout_seconds: 600
+taskify_max_retries: 5
+task_review_max_rounds: 4
 skill_paths:
   plan_spec: /tmp
   grill_spec: /tmp
@@ -179,6 +214,21 @@ skill_paths:
 	}
 	if cfg.HoldoutTimeoutSeconds != 120 {
 		t.Errorf("HoldoutTimeoutSeconds: got %d, want 120", cfg.HoldoutTimeoutSeconds)
+	}
+	if cfg.EnableCodexDiscovery != true {
+		t.Errorf("EnableCodexDiscovery: got %v, want true", cfg.EnableCodexDiscovery)
+	}
+	if cfg.EnableCodexDrafting != true {
+		t.Errorf("EnableCodexDrafting: got %v, want true", cfg.EnableCodexDrafting)
+	}
+	if cfg.AgentTimeoutSeconds != 600 {
+		t.Errorf("AgentTimeoutSeconds: got %d, want 600", cfg.AgentTimeoutSeconds)
+	}
+	if cfg.TaskifyMaxRetries != 5 {
+		t.Errorf("TaskifyMaxRetries: got %d, want 5", cfg.TaskifyMaxRetries)
+	}
+	if cfg.TaskReviewMaxRounds != 4 {
+		t.Errorf("TaskReviewMaxRounds: got %d, want 4", cfg.TaskReviewMaxRounds)
 	}
 	if cfg.SkillPaths.PlanSpec != "/tmp" {
 		t.Errorf("SkillPaths.PlanSpec: got %q, want /tmp", cfg.SkillPaths.PlanSpec)
@@ -297,6 +347,72 @@ func TestConfigValidateReviewerTimeoutZero(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "reviewer_timeout_seconds") {
 		t.Errorf("error should mention reviewer_timeout_seconds: %v", err)
+	}
+}
+
+func TestConfigValidateAgentTimeoutZero(t *testing.T) {
+	yaml := []byte(`agent_timeout_seconds: 0`)
+	_, err := ParseConfig(yaml)
+	if err == nil {
+		t.Fatal("expected error when agent_timeout_seconds is 0, got nil")
+	}
+	if !strings.Contains(err.Error(), "agent_timeout_seconds") {
+		t.Errorf("error should mention agent_timeout_seconds: %v", err)
+	}
+}
+
+func TestConfigValidateAgentTimeoutNegative(t *testing.T) {
+	yaml := []byte(`agent_timeout_seconds: -10`)
+	_, err := ParseConfig(yaml)
+	if err == nil {
+		t.Fatal("expected error when agent_timeout_seconds is negative, got nil")
+	}
+	if !strings.Contains(err.Error(), "agent_timeout_seconds") {
+		t.Errorf("error should mention agent_timeout_seconds: %v", err)
+	}
+}
+
+func TestConfigValidateTaskifyMaxRetriesZero(t *testing.T) {
+	yaml := []byte(`taskify_max_retries: 0`)
+	_, err := ParseConfig(yaml)
+	if err == nil {
+		t.Fatal("expected error when taskify_max_retries is 0, got nil")
+	}
+	if !strings.Contains(err.Error(), "taskify_max_retries") {
+		t.Errorf("error should mention taskify_max_retries: %v", err)
+	}
+}
+
+func TestConfigValidateTaskifyMaxRetriesNegative(t *testing.T) {
+	yaml := []byte(`taskify_max_retries: -1`)
+	_, err := ParseConfig(yaml)
+	if err == nil {
+		t.Fatal("expected error when taskify_max_retries is negative, got nil")
+	}
+	if !strings.Contains(err.Error(), "taskify_max_retries") {
+		t.Errorf("error should mention taskify_max_retries: %v", err)
+	}
+}
+
+func TestConfigValidateTaskReviewMaxRoundsZero(t *testing.T) {
+	yaml := []byte(`task_review_max_rounds: 0`)
+	_, err := ParseConfig(yaml)
+	if err == nil {
+		t.Fatal("expected error when task_review_max_rounds is 0, got nil")
+	}
+	if !strings.Contains(err.Error(), "task_review_max_rounds") {
+		t.Errorf("error should mention task_review_max_rounds: %v", err)
+	}
+}
+
+func TestConfigValidateTaskReviewMaxRoundsNegative(t *testing.T) {
+	yaml := []byte(`task_review_max_rounds: -2`)
+	_, err := ParseConfig(yaml)
+	if err == nil {
+		t.Fatal("expected error when task_review_max_rounds is negative, got nil")
+	}
+	if !strings.Contains(err.Error(), "task_review_max_rounds") {
+		t.Errorf("error should mention task_review_max_rounds: %v", err)
 	}
 }
 

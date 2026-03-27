@@ -730,6 +730,346 @@ func TestMerge_DedupLogProviderAttribution(t *testing.T) {
 // Original merge tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// MergeDiscoveryOutputs tests
+// ---------------------------------------------------------------------------
+
+func makeDiscoveryOutput(agent string, actors []Actor, problemStatement string) *DiscoveryOutput {
+	return &DiscoveryOutput{
+		SchemaVersion:    "1.0",
+		Agent:            agent,
+		Actors:           actors,
+		ProblemStatement: problemStatement,
+		Scope:            Scope{InScope: []string{"feature A"}, OutOfScope: []string{"feature B"}},
+		Constraints:      []string{"must run on Linux"},
+		IntegrationPoints: []IntegrationPoint{
+			{System: "database", Description: "PostgreSQL", Direction: "bidirectional"},
+		},
+		Priorities:   []Priority{{Item: "performance", Priority: "P0", Rationale: "critical path"}},
+		Assumptions:  []Assumption{{Assumption: "users have accounts", Confidence: "high"}},
+		OpenQuestions: []string{"what about mobile?"},
+	}
+}
+
+func TestMergeDiscoveryOutputs_BothValid(t *testing.T) {
+	claude := makeDiscoveryOutput("claude", []Actor{
+		{Name: "admin", Type: "human", Description: "System administrator"},
+	}, "Build a dashboard")
+	codex := makeDiscoveryOutput("codex", []Actor{
+		{Name: "viewer", Type: "human", Description: "Read-only user"},
+	}, "Build a dashboard")
+
+	// Add a unique constraint and open question to codex.
+	codex.Constraints = append(codex.Constraints, "must support HTTPS")
+	codex.OpenQuestions = append(codex.OpenQuestions, "what about tablets?")
+
+	merged := MergeDiscoveryOutputs(claude, codex)
+
+	if len(merged.Actors) != 2 {
+		t.Errorf("len(Actors) = %d, want 2", len(merged.Actors))
+	}
+	if len(merged.Constraints) != 2 {
+		t.Errorf("len(Constraints) = %d, want 2", len(merged.Constraints))
+	}
+	if len(merged.OpenQuestions) != 2 {
+		t.Errorf("len(OpenQuestions) = %d, want 2", len(merged.OpenQuestions))
+	}
+}
+
+func TestMergeDiscoveryOutputs_DuplicateActors(t *testing.T) {
+	claude := &DiscoveryOutput{
+		SchemaVersion: "1.0",
+		Agent:         "claude",
+		Actors: []Actor{
+			{Name: "admin", Type: "human", Description: "Claude's admin"},
+			{Name: "viewer", Type: "human", Description: "Claude's viewer"},
+		},
+		ProblemStatement: "problem",
+	}
+	codex := &DiscoveryOutput{
+		SchemaVersion: "1.0",
+		Agent:         "codex",
+		Actors: []Actor{
+			{Name: "admin", Type: "human", Description: "Codex's admin"},
+			{Name: "editor", Type: "human", Description: "Codex's editor"},
+		},
+		ProblemStatement: "problem",
+	}
+
+	merged := MergeDiscoveryOutputs(claude, codex)
+
+	if len(merged.Actors) != 3 {
+		t.Errorf("len(Actors) = %d, want 3 (admin, viewer, editor)", len(merged.Actors))
+	}
+	// admin should use Claude's description.
+	for _, a := range merged.Actors {
+		if strings.ToLower(a.Name) == "admin" {
+			if a.Description != "Claude's admin" {
+				t.Errorf("admin description = %q, want Claude's version", a.Description)
+			}
+		}
+	}
+}
+
+func TestMergeDiscoveryOutputs_CaseInsensitiveActorDedup(t *testing.T) {
+	claude := &DiscoveryOutput{
+		SchemaVersion: "1.0",
+		Agent:         "claude",
+		Actors:        []Actor{{Name: "admin", Type: "human", Description: "lowercase admin"}},
+	}
+	codex := &DiscoveryOutput{
+		SchemaVersion: "1.0",
+		Agent:         "codex",
+		Actors:        []Actor{{Name: "Admin", Type: "human", Description: "uppercase admin"}},
+	}
+
+	merged := MergeDiscoveryOutputs(claude, codex)
+
+	if len(merged.Actors) != 1 {
+		t.Errorf("len(Actors) = %d, want 1 (case-insensitive dedup)", len(merged.Actors))
+	}
+	// Claude's version preferred.
+	if merged.Actors[0].Description != "lowercase admin" {
+		t.Errorf("description = %q, want Claude's version", merged.Actors[0].Description)
+	}
+}
+
+func TestMergeDiscoveryOutputs_EmptyClaudeDescriptionUsesCodex(t *testing.T) {
+	claude := &DiscoveryOutput{
+		SchemaVersion: "1.0",
+		Agent:         "claude",
+		Actors:        []Actor{{Name: "admin", Type: "human", Description: ""}},
+	}
+	codex := &DiscoveryOutput{
+		SchemaVersion: "1.0",
+		Agent:         "codex",
+		Actors:        []Actor{{Name: "admin", Type: "human", Description: "Codex's description"}},
+	}
+
+	merged := MergeDiscoveryOutputs(claude, codex)
+
+	if len(merged.Actors) != 1 {
+		t.Fatalf("len(Actors) = %d, want 1", len(merged.Actors))
+	}
+	if merged.Actors[0].Description != "Codex's description" {
+		t.Errorf("description = %q, want Codex's version (Claude's was empty)", merged.Actors[0].Description)
+	}
+}
+
+func TestMergeDiscoveryOutputs_EmptySecondProvider(t *testing.T) {
+	claude := makeDiscoveryOutput("claude", []Actor{
+		{Name: "admin", Type: "human", Description: "Admin user"},
+	}, "Build a dashboard")
+
+	merged := MergeDiscoveryOutputs(claude, &DiscoveryOutput{})
+
+	if len(merged.Actors) != 1 {
+		t.Errorf("len(Actors) = %d, want 1", len(merged.Actors))
+	}
+	if merged.ProblemStatement != "Build a dashboard" {
+		t.Errorf("ProblemStatement = %q, want 'Build a dashboard'", merged.ProblemStatement)
+	}
+}
+
+func TestMergeDiscoveryOutputs_NilSecondProvider(t *testing.T) {
+	claude := makeDiscoveryOutput("claude", []Actor{
+		{Name: "admin", Type: "human", Description: "Admin user"},
+	}, "Build a dashboard")
+
+	merged := MergeDiscoveryOutputs(claude, nil)
+
+	if merged != claude {
+		t.Error("expected claude output returned as-is when codex is nil")
+	}
+}
+
+func TestMergeDiscoveryOutputs_NilFirstProvider(t *testing.T) {
+	codex := makeDiscoveryOutput("codex", []Actor{
+		{Name: "viewer", Type: "human", Description: "Viewer"},
+	}, "Build a viewer")
+
+	merged := MergeDiscoveryOutputs(nil, codex)
+
+	if merged != codex {
+		t.Error("expected codex output returned as-is when claude is nil")
+	}
+}
+
+func TestMergeDiscoveryOutputs_BothEmpty(t *testing.T) {
+	merged := MergeDiscoveryOutputs(&DiscoveryOutput{}, &DiscoveryOutput{})
+
+	if len(merged.Actors) != 0 {
+		t.Errorf("len(Actors) = %d, want 0", len(merged.Actors))
+	}
+	if merged.ProblemStatement != "" {
+		t.Errorf("ProblemStatement = %q, want empty", merged.ProblemStatement)
+	}
+}
+
+func TestMergeDiscoveryOutputs_BothNil(t *testing.T) {
+	merged := MergeDiscoveryOutputs(nil, nil)
+
+	if merged == nil {
+		t.Fatal("expected non-nil empty output, got nil")
+	}
+	if len(merged.Actors) != 0 {
+		t.Errorf("len(Actors) = %d, want 0", len(merged.Actors))
+	}
+}
+
+func TestMergeDiscoveryOutputs_DifferingProblemStatements(t *testing.T) {
+	claude := &DiscoveryOutput{
+		SchemaVersion:    "1.0",
+		Agent:            "claude",
+		ProblemStatement: "Build a real-time dashboard",
+	}
+	codex := &DiscoveryOutput{
+		SchemaVersion:    "1.0",
+		Agent:            "codex",
+		ProblemStatement: "Create an analytics platform",
+	}
+
+	merged := MergeDiscoveryOutputs(claude, codex)
+
+	if !strings.Contains(merged.ProblemStatement, "[Claude]:") {
+		t.Errorf("problem statement missing Claude attribution: %s", merged.ProblemStatement)
+	}
+	if !strings.Contains(merged.ProblemStatement, "[Codex]:") {
+		t.Errorf("problem statement missing Codex attribution: %s", merged.ProblemStatement)
+	}
+	if !strings.Contains(merged.ProblemStatement, "Build a real-time dashboard") {
+		t.Errorf("problem statement missing Claude's text: %s", merged.ProblemStatement)
+	}
+	if !strings.Contains(merged.ProblemStatement, "Create an analytics platform") {
+		t.Errorf("problem statement missing Codex's text: %s", merged.ProblemStatement)
+	}
+}
+
+func TestMergeDiscoveryOutputs_IdenticalProblemStatements(t *testing.T) {
+	claude := &DiscoveryOutput{
+		SchemaVersion:    "1.0",
+		Agent:            "claude",
+		ProblemStatement: "Build a dashboard",
+	}
+	codex := &DiscoveryOutput{
+		SchemaVersion:    "1.0",
+		Agent:            "codex",
+		ProblemStatement: "Build a dashboard",
+	}
+
+	merged := MergeDiscoveryOutputs(claude, codex)
+
+	if merged.ProblemStatement != "Build a dashboard" {
+		t.Errorf("ProblemStatement = %q, want 'Build a dashboard' (identical, no attribution)", merged.ProblemStatement)
+	}
+}
+
+func TestMergeDiscoveryOutputs_ConflictResolution(t *testing.T) {
+	// Claude and Codex share "admin" actor. Claude preferred.
+	// Claude has empty description for "admin" -> Codex's description used.
+	claude := &DiscoveryOutput{
+		SchemaVersion: "1.0",
+		Agent:         "claude",
+		Actors: []Actor{
+			{Name: "admin", Type: "human", Description: ""},
+		},
+		Priorities: []Priority{
+			{Item: "performance", Priority: "P0", Rationale: ""},
+		},
+	}
+	codex := &DiscoveryOutput{
+		SchemaVersion: "1.0",
+		Agent:         "codex",
+		Actors: []Actor{
+			{Name: "admin", Type: "human", Description: "Codex admin desc"},
+		},
+		Priorities: []Priority{
+			{Item: "performance", Priority: "P1", Rationale: "Codex rationale"},
+		},
+	}
+
+	merged := MergeDiscoveryOutputs(claude, codex)
+
+	if len(merged.Actors) != 1 {
+		t.Fatalf("len(Actors) = %d, want 1", len(merged.Actors))
+	}
+	if merged.Actors[0].Description != "Codex admin desc" {
+		t.Errorf("actor description = %q, want Codex's (Claude's was empty)", merged.Actors[0].Description)
+	}
+
+	if len(merged.Priorities) != 1 {
+		t.Fatalf("len(Priorities) = %d, want 1", len(merged.Priorities))
+	}
+	// Claude's priority level preferred.
+	if merged.Priorities[0].Priority != "P0" {
+		t.Errorf("priority = %q, want P0 (Claude's version)", merged.Priorities[0].Priority)
+	}
+	// But rationale backfilled from Codex.
+	if merged.Priorities[0].Rationale != "Codex rationale" {
+		t.Errorf("rationale = %q, want Codex's (Claude's was empty)", merged.Priorities[0].Rationale)
+	}
+}
+
+func TestMergeDiscoveryOutputs_ScopeUnion(t *testing.T) {
+	claude := &DiscoveryOutput{
+		SchemaVersion: "1.0",
+		Agent:         "claude",
+		Scope: Scope{
+			InScope:    []string{"feature A", "feature B"},
+			OutOfScope: []string{"feature X"},
+		},
+	}
+	codex := &DiscoveryOutput{
+		SchemaVersion: "1.0",
+		Agent:         "codex",
+		Scope: Scope{
+			InScope:    []string{"feature B", "feature C"},
+			OutOfScope: []string{"feature X", "feature Y"},
+		},
+	}
+
+	merged := MergeDiscoveryOutputs(claude, codex)
+
+	if len(merged.Scope.InScope) != 3 {
+		t.Errorf("len(InScope) = %d, want 3 (A, B, C)", len(merged.Scope.InScope))
+	}
+	if len(merged.Scope.OutOfScope) != 2 {
+		t.Errorf("len(OutOfScope) = %d, want 2 (X, Y)", len(merged.Scope.OutOfScope))
+	}
+}
+
+func TestMergeDiscoveryOutputs_IntegrationPointsUnion(t *testing.T) {
+	claude := &DiscoveryOutput{
+		SchemaVersion: "1.0",
+		Agent:         "claude",
+		IntegrationPoints: []IntegrationPoint{
+			{System: "Database", Description: "PostgreSQL", Direction: "bidirectional"},
+		},
+	}
+	codex := &DiscoveryOutput{
+		SchemaVersion: "1.0",
+		Agent:         "codex",
+		IntegrationPoints: []IntegrationPoint{
+			{System: "database", Description: "MySQL", Direction: "bidirectional"},
+			{System: "Cache", Description: "Redis", Direction: "outbound"},
+		},
+	}
+
+	merged := MergeDiscoveryOutputs(claude, codex)
+
+	if len(merged.IntegrationPoints) != 2 {
+		t.Errorf("len(IntegrationPoints) = %d, want 2 (database, cache)", len(merged.IntegrationPoints))
+	}
+	// "Database" and "database" should dedup, Claude's description preferred.
+	for _, ip := range merged.IntegrationPoints {
+		if strings.ToLower(ip.System) == "database" {
+			if ip.Description != "PostgreSQL" {
+				t.Errorf("database description = %q, want PostgreSQL (Claude's version)", ip.Description)
+			}
+		}
+	}
+}
+
 func TestMerge_ThreeWayDuplicate(t *testing.T) {
 	// Three reviewers raise the same finding. Should merge into one
 	// with 3 source_ids and 3 raised_by entries.

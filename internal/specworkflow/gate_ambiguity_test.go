@@ -119,7 +119,65 @@ func TestGate2EnterGate_EmitsGateRequestEvent(t *testing.T) {
 		if payload.GateType != "ambiguity_resolution" {
 			t.Errorf("expected gate_type %q, got %q", "ambiguity_resolution", payload.GateType)
 		}
+		// Verify the data wraps the drafter output with metadata.
+		reqData, ok := payload.Data.(*Gate2RequestData)
+		if !ok {
+			t.Fatalf("expected *Gate2RequestData, got %T", payload.Data)
+		}
+		if reqData.DrafterOutput != drafter {
+			t.Error("Gate2RequestData should contain the original drafter output")
+		}
 	default:
 		t.Fatal("no event emitted")
+	}
+}
+
+func TestGate2EnterGate_IncludesDraftSource(t *testing.T) {
+	state := &WorkflowStateJSON{
+		State:              StateHumanGate2,
+		DraftSource:        "combined",
+		DraftFailureNotice: "",
+	}
+	emitter := NewChannelEmitter(16)
+	handler := NewGate2Handler(state, emitter, 1)
+
+	drafter := &DrafterOutput{SchemaVersion: "1.0", Agent: "drafter"}
+	if err := handler.EnterGate(drafter); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	event := <-emitter.Events()
+	payload := event.Data.(GateRequestEvent)
+	reqData := payload.Data.(*Gate2RequestData)
+	if reqData.DraftSource != "combined" {
+		t.Errorf("DraftSource = %q, want %q", reqData.DraftSource, "combined")
+	}
+	if reqData.DraftFailureNotice != "" {
+		t.Errorf("DraftFailureNotice = %q, want empty", reqData.DraftFailureNotice)
+	}
+}
+
+func TestGate2EnterGate_IncludesFailureNotice(t *testing.T) {
+	state := &WorkflowStateJSON{
+		State:              StateHumanGate2,
+		DraftSource:        "single_survivor",
+		DraftFailureNotice: "codex drafter failed — reviewing claude draft only",
+	}
+	emitter := NewChannelEmitter(16)
+	handler := NewGate2Handler(state, emitter, 1)
+
+	drafter := &DrafterOutput{SchemaVersion: "1.0", Agent: "drafter"}
+	if err := handler.EnterGate(drafter); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	event := <-emitter.Events()
+	payload := event.Data.(GateRequestEvent)
+	reqData := payload.Data.(*Gate2RequestData)
+	if reqData.DraftSource != "single_survivor" {
+		t.Errorf("DraftSource = %q, want %q", reqData.DraftSource, "single_survivor")
+	}
+	if reqData.DraftFailureNotice != "codex drafter failed — reviewing claude draft only" {
+		t.Errorf("DraftFailureNotice = %q, want failure notice", reqData.DraftFailureNotice)
 	}
 }

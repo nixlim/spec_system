@@ -232,3 +232,223 @@ func formatPrinciple(p *string) string {
 	}
 	return fmt.Sprintf("%q", *p)
 }
+
+// ---------------------------------------------------------------------------
+// Discovery output merge
+// ---------------------------------------------------------------------------
+
+// MergeDiscoveryOutputs combines two DiscoveryOutput structs using union-unique
+// logic for all collection fields. Deduplication is case-insensitive.
+// Conflict resolution: prefer Claude's version; if Claude's field is empty,
+// use Codex's. When problem_statements differ, both are included with provider
+// attribution. When either input is nil, the other is returned as-is.
+func MergeDiscoveryOutputs(claude, codex *DiscoveryOutput) *DiscoveryOutput {
+	if claude == nil && codex == nil {
+		return &DiscoveryOutput{}
+	}
+	if claude == nil {
+		return codex
+	}
+	if codex == nil {
+		return claude
+	}
+
+	merged := &DiscoveryOutput{
+		SchemaVersion: claude.SchemaVersion,
+		Agent:         "merged",
+	}
+
+	// Merge actors by name (case-insensitive).
+	merged.Actors = unionActorsByName(claude.Actors, codex.Actors)
+
+	// Merge problem statement.
+	merged.ProblemStatement = mergeProblemStatements(claude.ProblemStatement, codex.ProblemStatement)
+
+	// Merge scope (union-unique for both in_scope and out_of_scope).
+	merged.Scope = Scope{
+		InScope:    unionStringsCaseInsensitive(claude.Scope.InScope, codex.Scope.InScope),
+		OutOfScope: unionStringsCaseInsensitive(claude.Scope.OutOfScope, codex.Scope.OutOfScope),
+	}
+
+	// Merge constraints (union by text, case-insensitive).
+	merged.Constraints = unionStringsCaseInsensitive(claude.Constraints, codex.Constraints)
+
+	// Merge integration points by system name (case-insensitive).
+	merged.IntegrationPoints = unionIntegrationPointsBySystem(claude.IntegrationPoints, codex.IntegrationPoints)
+
+	// Merge priorities by item (case-insensitive).
+	merged.Priorities = unionPrioritiesByItem(claude.Priorities, codex.Priorities)
+
+	// Merge assumptions by assumption text (case-insensitive).
+	merged.Assumptions = unionAssumptionsByText(claude.Assumptions, codex.Assumptions)
+
+	// Merge open questions (union by text, case-insensitive).
+	merged.OpenQuestions = unionStringsCaseInsensitive(claude.OpenQuestions, codex.OpenQuestions)
+
+	return merged
+}
+
+// mergeProblemStatements returns a single problem statement when both are
+// identical (case-insensitive, whitespace-normalised), or both with provider
+// attribution when they differ materially (both non-empty and different).
+// When one is empty, the non-empty one is used directly without attribution.
+func mergeProblemStatements(claude, codex string) string {
+	claudeTrimmed := strings.TrimSpace(claude)
+	codexTrimmed := strings.TrimSpace(codex)
+
+	// If either is empty, use the non-empty one (prefer Claude).
+	if claudeTrimmed == "" && codexTrimmed == "" {
+		return ""
+	}
+	if codexTrimmed == "" {
+		return claude
+	}
+	if claudeTrimmed == "" {
+		return codex
+	}
+
+	// Both non-empty: check if identical.
+	if normalizeSection(claude) == normalizeSection(codex) {
+		return claude // prefer Claude's casing
+	}
+
+	// Both non-empty and different — include both with attribution.
+	return fmt.Sprintf("[Claude]: %s\n\n[Codex]: %s", claude, codex)
+}
+
+// unionStringsCaseInsensitive returns the union of two string slices,
+// deduplicating by case-insensitive comparison. Claude's items come first;
+// Codex items are appended only if not already present.
+func unionStringsCaseInsensitive(claude, codex []string) []string {
+	seen := make(map[string]bool, len(claude))
+	var result []string
+	for _, s := range claude {
+		key := strings.ToLower(strings.TrimSpace(s))
+		if key == "" {
+			continue
+		}
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, s)
+		}
+	}
+	for _, s := range codex {
+		key := strings.ToLower(strings.TrimSpace(s))
+		if key == "" {
+			continue
+		}
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, s)
+		}
+	}
+	return result
+}
+
+// unionActorsByName merges actors by name (case-insensitive). When both
+// providers have an actor with the same name, Claude's version is preferred.
+// If Claude's description is empty, Codex's description is used.
+func unionActorsByName(claude, codex []Actor) []Actor {
+	seen := make(map[string]int, len(claude)) // key -> index in result
+	var result []Actor
+	for _, a := range claude {
+		key := strings.ToLower(strings.TrimSpace(a.Name))
+		if _, ok := seen[key]; !ok {
+			seen[key] = len(result)
+			result = append(result, a)
+		}
+	}
+	for _, a := range codex {
+		key := strings.ToLower(strings.TrimSpace(a.Name))
+		if idx, ok := seen[key]; ok {
+			// Actor already present from Claude — backfill empty description.
+			if strings.TrimSpace(result[idx].Description) == "" && strings.TrimSpace(a.Description) != "" {
+				result[idx].Description = a.Description
+			}
+		} else {
+			seen[key] = len(result)
+			result = append(result, a)
+		}
+	}
+	return result
+}
+
+// unionIntegrationPointsBySystem merges integration points by system name
+// (case-insensitive). Conflict resolution: prefer Claude; backfill empty
+// description from Codex.
+func unionIntegrationPointsBySystem(claude, codex []IntegrationPoint) []IntegrationPoint {
+	seen := make(map[string]int, len(claude))
+	var result []IntegrationPoint
+	for _, ip := range claude {
+		key := strings.ToLower(strings.TrimSpace(ip.System))
+		if _, ok := seen[key]; !ok {
+			seen[key] = len(result)
+			result = append(result, ip)
+		}
+	}
+	for _, ip := range codex {
+		key := strings.ToLower(strings.TrimSpace(ip.System))
+		if idx, ok := seen[key]; ok {
+			if strings.TrimSpace(result[idx].Description) == "" && strings.TrimSpace(ip.Description) != "" {
+				result[idx].Description = ip.Description
+			}
+		} else {
+			seen[key] = len(result)
+			result = append(result, ip)
+		}
+	}
+	return result
+}
+
+// unionPrioritiesByItem merges priorities by item text (case-insensitive).
+// Conflict resolution: prefer Claude; backfill empty rationale from Codex.
+func unionPrioritiesByItem(claude, codex []Priority) []Priority {
+	seen := make(map[string]int, len(claude))
+	var result []Priority
+	for _, p := range claude {
+		key := strings.ToLower(strings.TrimSpace(p.Item))
+		if _, ok := seen[key]; !ok {
+			seen[key] = len(result)
+			result = append(result, p)
+		}
+	}
+	for _, p := range codex {
+		key := strings.ToLower(strings.TrimSpace(p.Item))
+		if idx, ok := seen[key]; ok {
+			if strings.TrimSpace(result[idx].Rationale) == "" && strings.TrimSpace(p.Rationale) != "" {
+				result[idx].Rationale = p.Rationale
+			}
+		} else {
+			seen[key] = len(result)
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+// unionAssumptionsByText merges assumptions by assumption text
+// (case-insensitive). Conflict resolution: prefer Claude; backfill empty
+// Confidence from Codex.
+func unionAssumptionsByText(claude, codex []Assumption) []Assumption {
+	seen := make(map[string]int, len(claude))
+	var result []Assumption
+	for _, a := range claude {
+		key := strings.ToLower(strings.TrimSpace(a.Assumption))
+		if _, ok := seen[key]; !ok {
+			seen[key] = len(result)
+			result = append(result, a)
+		}
+	}
+	for _, a := range codex {
+		key := strings.ToLower(strings.TrimSpace(a.Assumption))
+		if idx, ok := seen[key]; ok {
+			if strings.TrimSpace(result[idx].Confidence) == "" && strings.TrimSpace(a.Confidence) != "" {
+				result[idx].Confidence = a.Confidence
+			}
+		} else {
+			seen[key] = len(result)
+			result = append(result, a)
+		}
+	}
+	return result
+}

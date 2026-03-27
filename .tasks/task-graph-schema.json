@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TaskGraphFile",
+  "description": "Structured task graph produced by the /taskify skill. This schema is authoritative — if the skill's output diverges, update the prompt, not this schema.",
+  "type": "object",
+  "required": ["version", "tasks"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Schema version identifier (e.g. \"0.1.0\")"
+    },
+    "tasks": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Non-empty array of task definitions",
+      "items": {
+        "type": "object",
+        "required": ["task_id", "task_name", "goal", "acceptance", "priority"],
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "description": "Unique kebab-case identifier for the task"
+          },
+          "task_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Human-readable task name"
+          },
+          "goal": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What this task achieves"
+          },
+          "inputs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "type"],
+              "properties": {
+                "name": { "type": "string" },
+                "type": { "type": "string" },
+                "constraints": { "type": "string" },
+                "source": { "type": "string" }
+              }
+            }
+          },
+          "outputs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "type"],
+              "properties": {
+                "name": { "type": "string" },
+                "type": { "type": "string" },
+                "constraints": { "type": "string" },
+                "destination": { "type": "string" }
+              }
+            }
+          },
+          "acceptance": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string" },
+            "description": "Non-empty list of acceptance criteria"
+          },
+          "depends_on": {
+            "description": "Task IDs this task depends on, or an object with status/reason when no dependencies exist",
+            "oneOf": [
+              {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "status": { "type": "string" },
+                  "reason": { "type": "string" }
+                }
+              }
+            ]
+          },
+          "constraints": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "files_scope": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "priority": {
+            "type": "string",
+            "description": "Task priority: critical, high, medium, or low (case-insensitive)"
+          },
+          "estimate": {
+            "type": "string",
+            "description": "Size estimate (e.g. small, medium, large)"
+          }
+        }
+      }
+    }
+  }
+}

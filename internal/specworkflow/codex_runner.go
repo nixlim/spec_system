@@ -27,7 +27,8 @@ type CodexRunner struct {
 }
 
 // buildArgs constructs the argument list for the codex CLI invocation.
-// schemaPath is the path to a temp file containing the JSON schema.
+// schemaPath is the path to a temp file containing the JSON schema; empty
+// string means no schema constraint is applied.
 // outputPath is where codex writes its last message.
 func (r *CodexRunner) buildArgs(schemaPath string, outputPath string) []string {
 	args := []string{"exec", "--full-auto"}
@@ -36,7 +37,9 @@ func (r *CodexRunner) buildArgs(schemaPath string, outputPath string) []string {
 		args = append(args, "-m", r.Model)
 	}
 
-	args = append(args, "--output-schema", schemaPath)
+	if schemaPath != "" {
+		args = append(args, "--output-schema", schemaPath)
+	}
 	args = append(args, "--output-last-message", outputPath)
 
 	if r.WorkspaceDir != "" {
@@ -59,21 +62,25 @@ func (r *CodexRunner) Run(prompt string, outputPath string, timeoutSeconds int) 
 		return 1, "", 0, 0, fmt.Errorf("empty output path")
 	}
 
-	// Write schema to a temp file.
-	schemaFile, tmpErr := os.CreateTemp("", "codex-schema-*.json")
-	if tmpErr != nil {
-		return 1, "", 0, 0, fmt.Errorf("create schema temp file: %w", tmpErr)
-	}
-	defer os.Remove(schemaFile.Name())
+	// Write schema to a temp file when schema bytes are provided.
+	var schemaPath string
+	if len(r.SchemaBytes) > 0 {
+		schemaFile, tmpErr := os.CreateTemp("", "codex-schema-*.json")
+		if tmpErr != nil {
+			return 1, "", 0, 0, fmt.Errorf("create schema temp file: %w", tmpErr)
+		}
+		defer os.Remove(schemaFile.Name())
 
-	if _, writeErr := schemaFile.Write(r.SchemaBytes); writeErr != nil {
+		if _, writeErr := schemaFile.Write(r.SchemaBytes); writeErr != nil {
+			schemaFile.Close()
+			return 1, "", 0, 0, fmt.Errorf("write schema temp file: %w", writeErr)
+		}
 		schemaFile.Close()
-		return 1, "", 0, 0, fmt.Errorf("write schema temp file: %w", writeErr)
+		schemaPath = schemaFile.Name()
 	}
-	schemaFile.Close()
 
 	// Build command.
-	args := r.buildArgs(schemaFile.Name(), outputPath)
+	args := r.buildArgs(schemaPath, outputPath)
 	cmd := exec.Command(r.Command, args...)
 	cmd.Stdin = strings.NewReader(prompt)
 

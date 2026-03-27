@@ -290,6 +290,27 @@ type orchSequentialRunner struct {
 }
 
 func (s *orchSequentialRunner) Run(prompt string, outputPath string, timeoutSeconds int) (int, string, float64, int64, error) {
+	// Handle taskify/review prompts so tests that run through FINALIZED → TASKIFY → COMPLETE work.
+	if orchContains(prompt, "Decompose this") || orchContains(prompt, "Revise this task graph") {
+		os.MkdirAll(filepath.Dir(outputPath), 0o755)
+		os.WriteFile(outputPath, validTaskGraphJSON(), 0o644)
+		return 0, "", 0.01, 100, nil
+	}
+	if orchContains(prompt, "Task Graph Review") {
+		out := &ReviewerOutput{
+			SchemaVersion: "1.0", Agent: "task-reviewer", Round: 1,
+			LensesApplied: []string{"completeness"},
+			Findings: []Finding{{ID: "TF-1", Description: "Minor", Severity: SeverityMinor,
+				Impact: "Low", Recommendation: "Fix", Lens: "scope", AffectedSection: "task-1"}},
+			StructuralIntegrity: StructuralIntegrity{Performed: true,
+				Checks: []IntegrityCheck{{Check: "dag-check", Result: "pass"}}},
+			MarkdownReportFile: "/tmp/report.md",
+		}
+		data, _ := json.MarshalIndent(out, "", "  ")
+		os.MkdirAll(filepath.Dir(outputPath), 0o755)
+		os.WriteFile(outputPath, data, 0o644)
+		return 0, "", 0.01, 100, nil
+	}
 	if orchContains(prompt, "Judge Agent") {
 		s.mu.Lock()
 		idx := s.judgeCallCount
@@ -393,6 +414,9 @@ func TestOrchestratorHappyPath2Rounds(t *testing.T) {
 	}
 	orch.runner = wrapper
 
+	// Ensure .tasks directory exists for taskify stage.
+	os.MkdirAll(filepath.Join(workspace, ".tasks"), 0o755)
+
 	// Write spec files for both rounds.
 	os.WriteFile(filepath.Join(specDir, "spec-v1.md"), []byte("# Revised Spec v1\n"), 0o644)
 	os.WriteFile(filepath.Join(specDir, "spec-v2.md"), []byte("# Revised Spec v2\n"), 0o644)
@@ -417,6 +441,9 @@ func TestOrchestratorHappyPath2Rounds(t *testing.T) {
 
 		// HUMAN_GATE_FINAL: accept (since critical findings → gate required).
 		sendGateResponse(orch, GateResponse{Action: "accept"})
+
+		// Task human gate: approve tasks.
+		sendGateResponse(orch, GateResponse{Action: "approve"})
 	}()
 
 	select {
@@ -424,13 +451,13 @@ func TestOrchestratorHappyPath2Rounds(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RunWorkflow returned error: %v", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("RunWorkflow timed out")
 	}
 
 	finalState := orch.sm.State()
-	if finalState.State != StateFinalized {
-		t.Errorf("expected FINALIZED, got %s", finalState.State)
+	if finalState.State != StateComplete {
+		t.Errorf("expected COMPLETE, got %s", finalState.State)
 	}
 
 	// Verify debate trail was written.
@@ -463,6 +490,9 @@ func TestOrchestratorZeroCriticalPath(t *testing.T) {
 	feature := "test-feature"
 	specDir := filepath.Join(workspace, "specs", feature)
 
+	// Ensure .tasks directory exists for taskify stage.
+	os.MkdirAll(filepath.Join(workspace, ".tasks"), 0o755)
+
 	runner.SetOutput("Discovery Agent", orchDiscoveryOutput())
 	runner.SetOutput("Drafter Agent", orchDrafterOutput(specDir))
 
@@ -487,6 +517,14 @@ func TestOrchestratorZeroCriticalPath(t *testing.T) {
 		StructuralDelta: StructuralDelta{RegressionsFound: false},
 	})
 
+	// Wrap with taskify/review-aware runner.
+	taskRunner := &regressionTaskGraphRunner{
+		base:         runner,
+		taskGraphDir: filepath.Join(workspace, ".tasks"),
+		featureName:  feature,
+	}
+	orch.runner = taskRunner
+
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- orch.RunWorkflow(GoalInput{
@@ -495,26 +533,27 @@ func TestOrchestratorZeroCriticalPath(t *testing.T) {
 		})
 	}()
 
-	// Gate 1: confirm.
-	time.Sleep(50 * time.Millisecond)
-	orch.HandleGateResponse(GateResponse{Action: "confirm"})
-
-	// Gate 2: confirm.
-	time.Sleep(50 * time.Millisecond)
-	orch.HandleGateResponse(GateResponse{Action: "confirm"})
+	go func() {
+		// Gate 1: confirm.
+		sendGateResponse(orch, GateResponse{Action: "confirm"})
+		// Gate 2: confirm.
+		sendGateResponse(orch, GateResponse{Action: "confirm"})
+		// Task human gate: approve.
+		sendGateResponse(orch, GateResponse{Action: "approve"})
+	}()
 
 	select {
 	case err := <-errCh:
 		if err != nil {
 			t.Fatalf("RunWorkflow returned error: %v", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("RunWorkflow timed out")
 	}
 
 	finalState := orch.sm.State()
-	if finalState.State != StateFinalized {
-		t.Errorf("expected FINALIZED, got %s", finalState.State)
+	if finalState.State != StateComplete {
+		t.Errorf("expected COMPLETE, got %s", finalState.State)
 	}
 	if finalState.HadCriticalFindings {
 		t.Error("expected HadCriticalFindings=false for zero-critical path")
@@ -676,6 +715,8 @@ func TestOrchestratorGateConfirm(t *testing.T) {
 	feature := "test-feature"
 	specDir := filepath.Join(workspace, "specs", feature)
 
+	os.MkdirAll(filepath.Join(workspace, ".tasks"), 0o755)
+
 	runner.SetOutput("Discovery Agent", orchDiscoveryOutput())
 	runner.SetOutput("Drafter Agent", orchDrafterOutput(specDir))
 	runner.SetOutput("Reviewer Agent", orchReviewerOutputWith("reviewer", 1, nil))
@@ -688,6 +729,13 @@ func TestOrchestratorGateConfirm(t *testing.T) {
 		StructuralDelta: StructuralDelta{RegressionsFound: false},
 	})
 
+	taskRunner := &regressionTaskGraphRunner{
+		base:         runner,
+		taskGraphDir: filepath.Join(workspace, ".tasks"),
+		featureName:  feature,
+	}
+	orch.runner = taskRunner
+
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- orch.RunWorkflow(GoalInput{
@@ -696,25 +744,23 @@ func TestOrchestratorGateConfirm(t *testing.T) {
 		})
 	}()
 
-	// Gate 1: confirm.
-	time.Sleep(50 * time.Millisecond)
-	orch.HandleGateResponse(GateResponse{Action: "confirm"})
-
-	// Gate 2: confirm.
-	time.Sleep(50 * time.Millisecond)
-	orch.HandleGateResponse(GateResponse{Action: "confirm"})
+	go func() {
+		sendGateResponse(orch, GateResponse{Action: "confirm"})
+		sendGateResponse(orch, GateResponse{Action: "confirm"})
+		sendGateResponse(orch, GateResponse{Action: "approve"})
+	}()
 
 	select {
 	case err := <-errCh:
 		if err != nil {
 			t.Fatalf("RunWorkflow returned error: %v", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("timeout")
 	}
 
-	if orch.sm.State().State != StateFinalized {
-		t.Errorf("expected FINALIZED, got %s", orch.sm.State().State)
+	if orch.sm.State().State != StateComplete {
+		t.Errorf("expected COMPLETE, got %s", orch.sm.State().State)
 	}
 	_ = specDir
 }
@@ -778,6 +824,8 @@ func TestOrchestratorGateCorrect(t *testing.T) {
 	feature := "test-feature"
 	specDir := filepath.Join(workspace, "specs", feature)
 
+	os.MkdirAll(filepath.Join(workspace, ".tasks"), 0o755)
+
 	runner.SetOutput("Discovery Agent", orchDiscoveryOutput())
 	runner.SetOutput("Drafter Agent", orchDrafterOutput(specDir))
 	runner.SetOutput("Reviewer Agent", orchReviewerOutputWith("reviewer", 1, nil))
@@ -790,6 +838,13 @@ func TestOrchestratorGateCorrect(t *testing.T) {
 		StructuralDelta: StructuralDelta{RegressionsFound: false},
 	})
 
+	taskRunner := &regressionTaskGraphRunner{
+		base:         runner,
+		taskGraphDir: filepath.Join(workspace, ".tasks"),
+		featureName:  feature,
+	}
+	orch.runner = taskRunner
+
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- orch.RunWorkflow(GoalInput{
@@ -798,30 +853,32 @@ func TestOrchestratorGateCorrect(t *testing.T) {
 		})
 	}()
 
-	// Gate 1: correct (goes back to DISCOVERY).
-	time.Sleep(50 * time.Millisecond)
-	corrections := map[string]string{"scope": "add feature C"}
-	orch.HandleGateResponse(GateResponse{Action: "correct", Data: corrections})
+	go func() {
+		// Gate 1: correct (goes back to DISCOVERY).
+		corrections := map[string]string{"scope": "add feature C"}
+		sendGateResponse(orch, GateResponse{Action: "correct", Data: corrections})
 
-	// Gate 1 again (after re-discovery): confirm.
-	time.Sleep(100 * time.Millisecond)
-	orch.HandleGateResponse(GateResponse{Action: "confirm"})
+		// Gate 1 again (after re-discovery): confirm.
+		sendGateResponse(orch, GateResponse{Action: "confirm"})
 
-	// Gate 2: confirm.
-	time.Sleep(50 * time.Millisecond)
-	orch.HandleGateResponse(GateResponse{Action: "confirm"})
+		// Gate 2: confirm.
+		sendGateResponse(orch, GateResponse{Action: "confirm"})
+
+		// Task human gate: approve.
+		sendGateResponse(orch, GateResponse{Action: "approve"})
+	}()
 
 	select {
 	case err := <-errCh:
 		if err != nil {
 			t.Fatalf("RunWorkflow returned error: %v", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("timeout")
 	}
 
-	if orch.sm.State().State != StateFinalized {
-		t.Errorf("expected FINALIZED, got %s", orch.sm.State().State)
+	if orch.sm.State().State != StateComplete {
+		t.Errorf("expected COMPLETE, got %s", orch.sm.State().State)
 	}
 	if orch.sm.State().Gate1CorrectionCount != 1 {
 		t.Errorf("expected Gate1CorrectionCount=1, got %d", orch.sm.State().Gate1CorrectionCount)
@@ -840,6 +897,7 @@ func TestOrchestratorResumeFromGate1(t *testing.T) {
 	feature := "test-feature"
 	specDir := filepath.Join(workspace, "specs", feature)
 	os.MkdirAll(specDir, 0o755)
+	os.MkdirAll(filepath.Join(workspace, ".tasks"), 0o755)
 
 	// Write discovery output (required for gate 1).
 	disco := orchDiscoveryOutput()
@@ -905,6 +963,14 @@ func TestOrchestratorResumeFromGate1(t *testing.T) {
 	orch.promptBuilder = NewPromptBuilder(orch.skills, workspace, feature)
 	os.WriteFile(filepath.Join(specDir, "spec-v0.md"), []byte("# Test Spec\n"), 0o644)
 
+	// Wrap runner with taskify/review support.
+	taskRunner := &regressionTaskGraphRunner{
+		base:         runner,
+		taskGraphDir: filepath.Join(workspace, ".tasks"),
+		featureName:  feature,
+	}
+	orch.runner = taskRunner
+
 	// Verify the orchestrator restored the gate state.
 	if orch.sm.Current() != StateHumanGate1 {
 		t.Fatalf("expected restored state HUMAN_GATE_1, got %s", orch.sm.Current())
@@ -919,23 +985,23 @@ func TestOrchestratorResumeFromGate1(t *testing.T) {
 		})
 	}()
 
-	// Gate 1: confirm.
-	sendGateResponse(orch, GateResponse{Action: "confirm"})
-
-	// Gate 2: confirm.
-	sendGateResponse(orch, GateResponse{Action: "confirm"})
+	go func() {
+		sendGateResponse(orch, GateResponse{Action: "confirm"})
+		sendGateResponse(orch, GateResponse{Action: "confirm"})
+		sendGateResponse(orch, GateResponse{Action: "approve"})
+	}()
 
 	select {
 	case err := <-errCh:
 		if err != nil {
 			t.Fatalf("RunWorkflow returned error: %v", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("RunWorkflow timed out")
 	}
 
-	if orch.sm.State().State != StateFinalized {
-		t.Errorf("expected FINALIZED, got %s", orch.sm.State().State)
+	if orch.sm.State().State != StateComplete {
+		t.Errorf("expected COMPLETE, got %s", orch.sm.State().State)
 	}
 }
 
@@ -945,6 +1011,7 @@ func TestOrchestratorResumeFromGate2(t *testing.T) {
 	feature := "test-feature"
 	specDir := filepath.Join(workspace, "specs", feature)
 	os.MkdirAll(specDir, 0o755)
+	os.MkdirAll(filepath.Join(workspace, ".tasks"), 0o755)
 
 	// Write drafter output (required for gate 2).
 	drafter := orchDrafterOutput(specDir)
@@ -1006,6 +1073,14 @@ func TestOrchestratorResumeFromGate2(t *testing.T) {
 	}
 	orch.promptBuilder = NewPromptBuilder(orch.skills, workspace, feature)
 
+	// Wrap runner with taskify/review support.
+	taskRunner := &regressionTaskGraphRunner{
+		base:         runner,
+		taskGraphDir: filepath.Join(workspace, ".tasks"),
+		featureName:  feature,
+	}
+	orch.runner = taskRunner
+
 	// Verify the orchestrator restored the gate state.
 	if orch.sm.Current() != StateHumanGate2 {
 		t.Fatalf("expected restored state HUMAN_GATE_2, got %s", orch.sm.Current())
@@ -1019,20 +1094,24 @@ func TestOrchestratorResumeFromGate2(t *testing.T) {
 		})
 	}()
 
-	// Gate 2: confirm — should proceed to REVIEWING.
-	sendGateResponse(orch, GateResponse{Action: "confirm"})
+	go func() {
+		// Gate 2: confirm — should proceed to REVIEWING.
+		sendGateResponse(orch, GateResponse{Action: "confirm"})
+		// Task human gate: approve.
+		sendGateResponse(orch, GateResponse{Action: "approve"})
+	}()
 
 	select {
 	case err := <-errCh:
 		if err != nil {
 			t.Fatalf("RunWorkflow returned error: %v", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("RunWorkflow timed out")
 	}
 
-	if orch.sm.State().State != StateFinalized {
-		t.Errorf("expected FINALIZED, got %s", orch.sm.State().State)
+	if orch.sm.State().State != StateComplete {
+		t.Errorf("expected COMPLETE, got %s", orch.sm.State().State)
 	}
 }
 

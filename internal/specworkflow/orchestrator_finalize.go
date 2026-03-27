@@ -27,12 +27,16 @@ func (o *Orchestrator) handleFinalized(state *WorkflowStateJSON, specDir string)
 		log.Printf("warning: AssembleFinalSpec failed: %v", err)
 	}
 
-	// Save final state.
+	// Save state before transitioning to taskify.
 	if err := SaveState(specDir, state); err != nil {
 		log.Printf("warning: failed to save finalized state: %v", err)
 	}
 
-	o.logger.LogStateTransition(StateFinalized, StateFinalized, state.Round)
+	// FINALIZED is no longer terminal — advance to TASKIFY.
+	o.logTransition(StateFinalized, StateTaskify)
+	if err := o.sm.Transition(StateTaskify); err != nil {
+		return fmt.Errorf("transition FINALIZED -> TASKIFY: %w", err)
+	}
 	return nil
 }
 

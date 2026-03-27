@@ -25,10 +25,41 @@ func NewGate1Handler(state *WorkflowStateJSON, emitter EventEmitter, maxGateCorr
 	}
 }
 
+// DiscoveryGateData carries the full discovery context for HUMAN_GATE_1 when
+// dual-provider discovery is active. In single-provider mode, only
+// MergedOutput is populated and DualProvider is false.
+type DiscoveryGateData struct {
+	// MergedOutput is the canonical discovery output (merged or single-provider).
+	MergedOutput *DiscoveryOutput `json:"merged_output"`
+	// ClaudeOutput is the raw Claude discovery output (nil if Claude failed or single-provider).
+	ClaudeOutput *DiscoveryOutput `json:"claude_output,omitempty"`
+	// CodexOutput is the raw Codex discovery output (nil if Codex failed or single-provider).
+	CodexOutput *DiscoveryOutput `json:"codex_output,omitempty"`
+	// DualProvider indicates whether dual-provider discovery was used.
+	DualProvider bool `json:"dual_provider"`
+	// ClaudeStatus is "success" or "failed" (empty in single-provider mode).
+	ClaudeStatus string `json:"claude_status,omitempty"`
+	// CodexStatus is "success" or "failed" (empty in single-provider mode).
+	CodexStatus string `json:"codex_status,omitempty"`
+	// FailureNotice describes which provider failed (empty if both succeeded or single-provider).
+	FailureNotice string `json:"failure_notice,omitempty"`
+}
+
 // EnterGate emits a gate_request event with gate_type "requirements_confirmation"
 // so that the UI can present the discovery output to the human for review.
+// Used for single-provider mode; see EnterDualGate for dual-provider.
 func (h *Gate1Handler) EnterGate(discovery *DiscoveryOutput) error {
-	event := NewGateRequestEvent("requirements_confirmation", h.state.FeatureName, discovery)
+	event := NewGateRequestEvent("requirements_confirmation", h.state.FeatureName, &DiscoveryGateData{
+		MergedOutput: discovery,
+		DualProvider: false,
+	})
+	return h.emitter.Emit(event)
+}
+
+// EnterDualGate emits a gate_request event with dual-provider discovery data,
+// including per-provider outputs and failure notices for side-by-side review.
+func (h *Gate1Handler) EnterDualGate(data *DiscoveryGateData) error {
+	event := NewGateRequestEvent("requirements_confirmation", h.state.FeatureName, data)
 	return h.emitter.Emit(event)
 }
 

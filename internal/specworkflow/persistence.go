@@ -10,6 +10,84 @@ import (
 
 const stateFileName = "workflow-state.json"
 
+const commentsFileName = "human-comments.json"
+
+// CommentEntry represents a single human comment persisted at a gate action.
+type CommentEntry struct {
+	Gate      string `json:"gate"`
+	Action    string `json:"action"`
+	Comment   string `json:"comment"`
+	Timestamp string `json:"timestamp"`
+}
+
+// ErrCommentsCorrupted is returned when human-comments.json contains invalid JSON.
+type ErrCommentsCorrupted struct {
+	Path string
+	Err  error
+}
+
+func (e *ErrCommentsCorrupted) Error() string {
+	return fmt.Sprintf("human-comments.json is corrupted: %s: %v", e.Path, e.Err)
+}
+
+func (e *ErrCommentsCorrupted) Unwrap() error {
+	return e.Err
+}
+
+// CommentsFilePath returns the full path to human-comments.json within the
+// given directory.
+func CommentsFilePath(dir string) string {
+	return filepath.Join(dir, commentsFileName)
+}
+
+// LoadComments reads the comment history from human-comments.json. It returns
+// an empty slice (not an error) if the file does not exist, and
+// *ErrCommentsCorrupted if the file contains invalid JSON.
+func LoadComments(dir string) ([]CommentEntry, error) {
+	p := CommentsFilePath(dir)
+	data, err := os.ReadFile(p)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read human-comments.json: %w", err)
+	}
+
+	var comments []CommentEntry
+	if err := json.Unmarshal(data, &comments); err != nil {
+		return nil, &ErrCommentsCorrupted{Path: p, Err: err}
+	}
+	return comments, nil
+}
+
+// AppendComment appends a single comment entry to human-comments.json in
+// append-only fashion. It returns *ErrCommentsCorrupted if the existing file
+// contains invalid JSON. An empty comment is a no-op.
+func AppendComment(dir string, entry CommentEntry) error {
+	if entry.Comment == "" {
+		return nil
+	}
+
+	comments, err := LoadComments(dir)
+	if err != nil {
+		return err
+	}
+
+	comments = append(comments, entry)
+
+	data, err := json.MarshalIndent(comments, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal human-comments.json: %w", err)
+	}
+	data = append(data, '\n')
+
+	p := CommentsFilePath(dir)
+	if err := os.WriteFile(p, data, 0o644); err != nil {
+		return fmt.Errorf("write human-comments.json: %w", err)
+	}
+	return nil
+}
+
 // ErrStateNotFound is returned when the workflow state file does not exist.
 type ErrStateNotFound struct {
 	Path string

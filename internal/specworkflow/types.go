@@ -37,6 +37,18 @@ const (
 	StateHumanGateFinal
 	// StateFinalized means the spec has been accepted and finalized.
 	StateFinalized
+	// StateTaskify is the task decomposition phase (post-finalization).
+	StateTaskify
+	// StateTaskReview is the dual-provider task review phase.
+	StateTaskReview
+	// StateTaskRevision is the automated task graph revision phase.
+	StateTaskRevision
+	// StateTaskHumanGate is the human review gate for the task graph.
+	StateTaskHumanGate
+	// StateTasksApproved means tasks were approved and Beads creation attempted.
+	StateTasksApproved
+	// StateComplete is the terminal state after taskify completes.
+	StateComplete
 	// StateEscalated means the workflow was escalated for human intervention.
 	StateEscalated
 	// StateError means the workflow encountered an unrecoverable error.
@@ -55,6 +67,12 @@ var workflowStateNames = [...]string{
 	StateJudging:        "JUDGING",
 	StateHumanGateFinal: "HUMAN_GATE_FINAL",
 	StateFinalized:      "FINALIZED",
+	StateTaskify:        "TASKIFY",
+	StateTaskReview:     "TASK_REVIEW",
+	StateTaskRevision:   "TASK_REVISION",
+	StateTaskHumanGate:  "TASK_HUMAN_GATE",
+	StateTasksApproved:  "TASKS_APPROVED",
+	StateComplete:       "COMPLETE",
 	StateEscalated:      "ESCALATED",
 	StateError:          "ERROR",
 }
@@ -296,4 +314,15 @@ type WorkflowStateJSON struct {
 	CurrentSpecVersion int `json:"current_spec_version"`
 	// SkillChecksums maps skill file paths to their SHA-256 checksums.
 	SkillChecksums map[string]string `json:"skill_checksums"`
+	// DraftSource indicates how the current draft was produced.
+	// Values: "combined" (both providers succeeded), "single_survivor" (one
+	// provider failed), "single_provider" (dual-provider disabled or Codex
+	// unavailable). Empty for workflows that have not yet reached DRAFTING.
+	DraftSource string `json:"draft_source,omitempty"`
+	// DraftFailureNotice is a human-readable notice when one drafter failed.
+	// Only set when DraftSource is "single_survivor".
+	DraftFailureNotice string `json:"draft_failure_notice,omitempty"`
+	// TaskReviewRound is the per-stage round counter for task review.
+	// Persisted for crash recovery so max rounds enforcement survives restarts.
+	TaskReviewRound int `json:"task_review_round,omitempty"`
 }

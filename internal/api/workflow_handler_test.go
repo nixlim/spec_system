@@ -408,7 +408,13 @@ func TestStatusMessage(t *testing.T) {
 		{specworkflow.StateRevising, 3, "Review round 3: revising spec to address findings"},
 		{specworkflow.StateJudging, 2, "Review round 2: judge evaluating convergence"},
 		{specworkflow.StateHumanGateFinal, 1, "Waiting for final human gate approval"},
-		{specworkflow.StateFinalized, 1, "Workflow complete: spec finalized"},
+		{specworkflow.StateFinalized, 1, "Spec finalized, advancing to task decomposition"},
+		{specworkflow.StateTaskify, 1, "Decomposing spec into task graph"},
+		{specworkflow.StateTaskReview, 1, "Reviewing task graph with dual providers"},
+		{specworkflow.StateTaskRevision, 1, "Revising task graph to address review findings"},
+		{specworkflow.StateTaskHumanGate, 1, "Waiting for human approval of task graph"},
+		{specworkflow.StateTasksApproved, 1, "Tasks approved, creating Beads issues"},
+		{specworkflow.StateComplete, 1, "Workflow complete"},
 		{specworkflow.StateEscalated, 1, "Workflow escalated for human intervention"},
 		{specworkflow.StateError, 1, "Workflow encountered an error"},
 	}
@@ -634,8 +640,8 @@ func TestHandleListFeatures_WithFeatures(t *testing.T) {
 	if !af.HasReviews {
 		t.Error("auth-flow has_reviews should be true")
 	}
-	if !af.IsTerminal {
-		t.Error("auth-flow is_terminal should be true for FINALIZED")
+	if af.IsTerminal {
+		t.Error("auth-flow is_terminal should be false for FINALIZED (no longer terminal)")
 	}
 	if len(af.Files) != 5 {
 		t.Errorf("auth-flow files count = %d, want 5", len(af.Files))

@@ -24,6 +24,9 @@ func TestIsRewindable(t *testing.T) {
 		{StateFinalized, false},
 		{StateEscalated, false},
 		{StateError, false},
+		{StateTaskify, true},
+		{StateTaskReview, false},
+		{StateComplete, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.state.String(), func(t *testing.T) {
@@ -104,6 +107,7 @@ func TestRewindPreservesAllFiles(t *testing.T) {
 		StateReviewing,
 		StateRevising,
 		StateJudging,
+		StateTaskify,
 	}
 
 	for _, target := range targets {
@@ -267,5 +271,83 @@ func TestRewindResetsFindings(t *testing.T) {
 
 	if state.FindingsSummary.Raised != 0 {
 		t.Errorf("FindingsSummary.Raised should be reset to 0, got %d", state.FindingsSummary.Raised)
+	}
+}
+
+// TestRewindCompleteToTaskify verifies that rewinding from StateComplete to
+// StateTaskify preserves the spec version and task files.
+func TestRewindCompleteToTaskify(t *testing.T) {
+	dir := t.TempDir()
+	specDir := filepath.Join(dir, "specs", "test")
+	os.MkdirAll(specDir, 0o755)
+	createTestArtefacts(t, specDir)
+
+	// Create a task file that should be preserved.
+	tasksDir := filepath.Join(dir, ".tasks")
+	os.MkdirAll(tasksDir, 0o755)
+	taskFilePath := filepath.Join(tasksDir, "test.task.json")
+	os.WriteFile(taskFilePath, []byte(`{"version":"0.1.0","tasks":[]}`), 0o644)
+
+	state := &WorkflowStateJSON{
+		State:              StateComplete,
+		Round:              1,
+		FeatureName:        "test",
+		CurrentSpecVersion: 3,
+	}
+
+	result, err := RewindWorkflow(specDir, state, StateTaskify, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// State should be TASKIFY.
+	if state.State != StateTaskify {
+		t.Errorf("state should be TASKIFY, got %s", state.State)
+	}
+	if result.PreviousState != StateComplete {
+		t.Errorf("previous state should be COMPLETE, got %s", result.PreviousState)
+	}
+	if result.TargetState != StateTaskify {
+		t.Errorf("target state should be TASKIFY, got %s", result.TargetState)
+	}
+
+	// Spec version should be preserved (not reset).
+	if state.CurrentSpecVersion != 3 {
+		t.Errorf("CurrentSpecVersion should be preserved at 3, got %d", state.CurrentSpecVersion)
+	}
+
+	// Task file should be preserved.
+	if _, err := os.Stat(taskFilePath); err != nil {
+		t.Errorf("task file should be preserved: %v", err)
+	}
+
+	// No files removed.
+	if len(result.FilesRemoved) != 0 {
+		t.Errorf("expected 0 files removed, got %d", len(result.FilesRemoved))
+	}
+}
+
+// TestRewindToTaskifyPreservesSpecVersion checks that the StateTaskify case
+// does not reset CurrentSpecVersion unlike discovery/drafting rewinds.
+func TestRewindToTaskifyPreservesSpecVersion(t *testing.T) {
+	dir := t.TempDir()
+	specDir := filepath.Join(dir, "specs", "test")
+	os.MkdirAll(specDir, 0o755)
+	createTestArtefacts(t, specDir)
+
+	state := &WorkflowStateJSON{
+		State:              StateFinalized,
+		Round:              1,
+		FeatureName:        "test",
+		CurrentSpecVersion: 5,
+	}
+
+	_, err := RewindWorkflow(specDir, state, StateTaskify, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if state.CurrentSpecVersion != 5 {
+		t.Errorf("CurrentSpecVersion should be preserved at 5, got %d", state.CurrentSpecVersion)
 	}
 }

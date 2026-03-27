@@ -21,9 +21,9 @@ import (
 )
 
 // isTerminalWorkflowState reports whether the given workflow state is terminal
-// (FINALIZED or ESCALATED), meaning a new workflow can safely be started.
+// (COMPLETE or ESCALATED), meaning a new workflow can safely be started.
 func isTerminalWorkflowState(s specworkflow.WorkflowState) bool {
-	return s == specworkflow.StateFinalized || s == specworkflow.StateEscalated
+	return s == specworkflow.StateComplete || s == specworkflow.StateEscalated
 }
 
 // ---------------------------------------------------------------------------
@@ -559,6 +559,9 @@ func HandleGateApprove(manager *WorkflowManager) http.HandlerFunc {
 			specDir := filepath.Join(manager.workspaceDir, "specs", featureName)
 			os.MkdirAll(specDir, 0o755) // ensure dir exists
 
+			// Determine current gate state to route persistence correctly.
+			currentState := orch.State().State
+
 			switch req.Action {
 			case "confirm":
 				// Save user answers.
@@ -566,26 +569,24 @@ func HandleGateApprove(manager *WorkflowManager) http.HandlerFunc {
 					persistGateData(specDir, "user-answers.json", req.UserAnswers)
 				}
 			case "correct":
-				// Save corrections + user answers + reviewer comment.
-				// Use numbered files (gate1-corrections-1.json, -2.json, ...)
-				// so the full correction history is preserved across rounds.
-				corrData := map[string]interface{}{
-					"action":      "correct",
-					"corrections": req.Corrections,
+				// Only write gate1-corrections files for HUMAN_GATE_1.
+				// TASK_HUMAN_GATE corrections are handled by the orchestrator.
+				if currentState == specworkflow.StateHumanGate1 {
+					corrData := map[string]interface{}{
+						"action":      "correct",
+						"corrections": req.Corrections,
+					}
+					if req.UserAnswers != nil {
+						corrData["user_answers"] = req.UserAnswers
+					}
+					if req.Comment != "" {
+						corrData["reviewer_comment"] = req.Comment
+					}
+					corrRound := nextGate1CorrectionRound(specDir)
+					corrFilename := fmt.Sprintf("gate1-corrections-%d.json", corrRound)
+					persistGateData(specDir, corrFilename, corrData)
+					persistGateData(specDir, "gate1-corrections.json", corrData)
 				}
-				if req.UserAnswers != nil {
-					corrData["user_answers"] = req.UserAnswers
-				}
-				if req.Comment != "" {
-					corrData["reviewer_comment"] = req.Comment
-				}
-				corrRound := nextGate1CorrectionRound(specDir)
-				corrFilename := fmt.Sprintf("gate1-corrections-%d.json", corrRound)
-				persistGateData(specDir, corrFilename, corrData)
-				// Also write to gate1-corrections.json for backward compat
-				// (orchestrator reads numbered files, but other tools may
-				// expect the unversioned file).
-				persistGateData(specDir, "gate1-corrections.json", corrData)
 			default:
 				// Gate 2 resolutions.
 				if len(req.Resolutions) > 0 {
@@ -595,8 +596,9 @@ func HandleGateApprove(manager *WorkflowManager) http.HandlerFunc {
 				}
 			}
 
-			// Always persist comment to human-comments.json (append).
-			if req.Comment != "" {
+			// Persist comment to human-comments.json (append).
+			// Skip for TASK_HUMAN_GATE — the orchestrator handles comment persistence there.
+			if req.Comment != "" && currentState != specworkflow.StateTaskHumanGate {
 				persistHumanComment(specDir, req.Action, req.Comment)
 			}
 
@@ -1049,7 +1051,19 @@ func StatusMessage(state specworkflow.WorkflowState, round int) string {
 	case specworkflow.StateHumanGateFinal:
 		return "Waiting for final human gate approval"
 	case specworkflow.StateFinalized:
-		return "Workflow complete: spec finalized"
+		return "Spec finalized, advancing to task decomposition"
+	case specworkflow.StateTaskify:
+		return "Decomposing spec into task graph"
+	case specworkflow.StateTaskReview:
+		return "Reviewing task graph with dual providers"
+	case specworkflow.StateTaskRevision:
+		return "Revising task graph to address review findings"
+	case specworkflow.StateTaskHumanGate:
+		return "Waiting for human approval of task graph"
+	case specworkflow.StateTasksApproved:
+		return "Tasks approved, creating Beads issues"
+	case specworkflow.StateComplete:
+		return "Workflow complete"
 	case specworkflow.StateEscalated:
 		return "Workflow escalated for human intervention"
 	case specworkflow.StateError:
@@ -1366,6 +1380,7 @@ func HandleRewindWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			FeatureName string `json:"feature_name"`
 			TargetState string `json:"target_state"`
 			Round       int    `json:"round"`
+			Comment     string `json:"comment,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
@@ -1414,6 +1429,11 @@ func HandleRewindWorkflow(manager *WorkflowManager) http.HandlerFunc {
 		if loadErr != nil {
 			writeError(w, http.StatusNotFound, fmt.Sprintf("no workflow state found for %q", req.FeatureName))
 			return
+		}
+
+		// Persist comment before rewind (comment must be saved before state change).
+		if req.Comment != "" {
+			persistHumanComment(specDir, "rewind_to_"+req.TargetState, req.Comment)
 		}
 
 		// Perform the rewind.
@@ -1488,17 +1508,17 @@ func HandleFinalizeWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			return
 		}
 
-		state.State = specworkflow.StateFinalized
+		state.State = specworkflow.StateComplete
 		state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		if err := specworkflow.SaveState(featureDir, state); err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save state: %v", err))
 			return
 		}
 
-		log.Printf("[workflow] force-finalized feature %q from previous state", req.FeatureName)
+		log.Printf("[workflow] force-completed feature %q from previous state", req.FeatureName)
 		writeJSON(w, http.StatusOK, map[string]string{
-			"status":  "finalized",
-			"message": fmt.Sprintf("Workflow %q has been finalized", req.FeatureName),
+			"status":  "completed",
+			"message": fmt.Sprintf("Workflow %q has been completed", req.FeatureName),
 		})
 	}
 }

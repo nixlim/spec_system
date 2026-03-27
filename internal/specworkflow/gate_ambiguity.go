@@ -17,6 +17,21 @@ type AmbiguityResolution struct {
 	Answer string `json:"answer,omitempty"`
 }
 
+// Gate2RequestData wraps the drafter output with draft source metadata for
+// the HUMAN_GATE_2 gate request event. When DraftSource is "single_survivor",
+// DraftFailureNotice contains a human-readable message identifying which
+// provider failed.
+type Gate2RequestData struct {
+	// DrafterOutput is the parsed drafter output for the human to review.
+	DrafterOutput *DrafterOutput `json:"drafter_output"`
+	// DraftSource indicates how the draft was produced: "combined",
+	// "single_survivor", or "single_provider".
+	DraftSource string `json:"draft_source"`
+	// DraftFailureNotice is a human-readable failure notice (set only when
+	// DraftSource is "single_survivor").
+	DraftFailureNotice string `json:"draft_failure_notice,omitempty"`
+}
+
 // Gate2Handler manages the HUMAN_GATE_2 phase where a human resolves
 // ambiguity warnings from the drafter output before review proceeds.
 type Gate2Handler struct {
@@ -38,8 +53,16 @@ func NewGate2Handler(state *WorkflowStateJSON, emitter EventEmitter, maxRedrafts
 
 // EnterGate emits a gate_request event with gate_type "ambiguity_resolution"
 // so that the UI can present the drafter's ambiguity warnings to the human.
+// The event data includes draft source metadata from the workflow state so
+// the UI can show combined-draft, single-survivor, or single-provider views
+// with appropriate failure notices.
 func (h *Gate2Handler) EnterGate(drafter *DrafterOutput) error {
-	event := NewGateRequestEvent("ambiguity_resolution", h.state.FeatureName, drafter)
+	data := &Gate2RequestData{
+		DrafterOutput:      drafter,
+		DraftSource:        h.state.DraftSource,
+		DraftFailureNotice: h.state.DraftFailureNotice,
+	}
+	event := NewGateRequestEvent("ambiguity_resolution", h.state.FeatureName, data)
 	return h.emitter.Emit(event)
 }
 

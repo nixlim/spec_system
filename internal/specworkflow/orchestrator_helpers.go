@@ -1,7 +1,6 @@
 package specworkflow
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -10,46 +9,51 @@ import (
 	"time"
 )
 
+// VersionedFilename returns a versioned output filename for dual-provider mode.
+// Format: {base}-{provider}-v{version}.{ext}
+// Example: VersionedFilename("discovery-output", "claude", 2, ".json") → "discovery-output-claude-v2.json"
+func VersionedFilename(base, provider string, version int, ext string) string {
+	return fmt.Sprintf("%s-%s-v%d%s", base, provider, version, ext)
+}
+
+// VersionedMergedFilename returns a versioned merged output filename for dual-provider mode.
+// Format: {base}-merged-v{version}.{ext}
+// Example: VersionedMergedFilename("discovery-output", 2, ".json") → "discovery-output-merged-v2.json"
+func VersionedMergedFilename(base string, version int, ext string) string {
+	return fmt.Sprintf("%s-merged-v%d%s", base, version, ext)
+}
+
+// VersionedCombinedFilename returns a versioned combined output filename for dual-provider mode.
+// Format: {base}-combined-v{version}.{ext}
+// Example: VersionedCombinedFilename("drafter-output", 1, ".json") → "drafter-output-combined-v1.json"
+func VersionedCombinedFilename(base string, version int, ext string) string {
+	return fmt.Sprintf("%s-combined-v%d%s", base, version, ext)
+}
+
+
 // persistComment appends a human reviewer comment to human-comments.json
 // in the spec directory. Comments accumulate across gate interactions so
 // downstream agents have the full history. No-op if comment is empty.
-func persistComment(specDir, gate, action, comment string) {
+// Returns *ErrCommentsCorrupted if the existing file contains invalid JSON.
+func persistComment(specDir, gate, action, comment string) error {
 	if comment == "" {
-		return
+		return nil
 	}
 
-	type commentEntry struct {
-		Gate      string `json:"gate"`
-		Action    string `json:"action"`
-		Comment   string `json:"comment"`
-		Timestamp string `json:"timestamp"`
-	}
-
-	commentsPath := filepath.Join(specDir, "human-comments.json")
-
-	// Load existing comments.
-	var comments []commentEntry
-	if data, err := os.ReadFile(commentsPath); err == nil {
-		json.Unmarshal(data, &comments) // ignore parse errors on corrupted file
-	}
-
-	comments = append(comments, commentEntry{
+	entry := CommentEntry{
 		Gate:      gate,
 		Action:    action,
 		Comment:   comment,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
-	})
+	}
 
-	data, err := json.MarshalIndent(comments, "", "  ")
-	if err != nil {
-		log.Printf("[orchestrator] failed to marshal comments: %v", err)
-		return
+	if err := AppendComment(specDir, entry); err != nil {
+		return err
 	}
-	if err := os.WriteFile(commentsPath, data, 0o644); err != nil {
-		log.Printf("[orchestrator] failed to write human-comments.json: %v", err)
-	} else {
-		log.Printf("[orchestrator] saved reviewer comment to %s (gate=%s, action=%s)", commentsPath, gate, action)
-	}
+
+	log.Printf("[orchestrator] saved reviewer comment to %s (gate=%s, action=%s)",
+		CommentsFilePath(specDir), gate, action)
+	return nil
 }
 
 // mkdirAll creates multiple directories, returning the first error.
@@ -96,7 +100,7 @@ func (o *Orchestrator) dispatchAgent(agentName, prompt, outputPath string) (cost
 	// Emit agent dispatch event.
 	o.emitter.Emit(NewAgentDispatchEvent(agentName, state.Round))
 
-	exitCode, stderr, cost, duration, runErr := o.runner.Run(prompt, outputPath, 120)
+	exitCode, stderr, cost, duration, runErr := o.runner.Run(prompt, outputPath, o.config.AgentTimeoutSeconds)
 	state.AgentInvocations++
 	state.CumulativeCostUSD += cost
 

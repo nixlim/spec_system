@@ -307,3 +307,235 @@ func TestPersistenceStateFilePath(t *testing.T) {
 		t.Errorf("StateFilePath: got %q, want %q", got, want)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Comment protocol tests
+// ---------------------------------------------------------------------------
+
+func TestCommentPersistence_AppendOnly(t *testing.T) {
+	dir := t.TempDir()
+
+	// Append first comment.
+	err := AppendComment(dir, CommentEntry{
+		Gate:      "HUMAN_GATE_1",
+		Action:    "correct",
+		Comment:   "Fix the actor list",
+		Timestamp: "2026-03-25T10:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("AppendComment (1): %v", err)
+	}
+
+	// Append second comment.
+	err = AppendComment(dir, CommentEntry{
+		Gate:      "HUMAN_GATE_2",
+		Action:    "confirm",
+		Comment:   "Looks good",
+		Timestamp: "2026-03-25T11:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("AppendComment (2): %v", err)
+	}
+
+	// Load and verify both comments exist (append-only).
+	comments, err := LoadComments(dir)
+	if err != nil {
+		t.Fatalf("LoadComments: %v", err)
+	}
+	if len(comments) != 2 {
+		t.Fatalf("expected 2 comments, got %d", len(comments))
+	}
+	if comments[0].Gate != "HUMAN_GATE_1" {
+		t.Errorf("comment[0].Gate = %q, want HUMAN_GATE_1", comments[0].Gate)
+	}
+	if comments[0].Comment != "Fix the actor list" {
+		t.Errorf("comment[0].Comment = %q, want 'Fix the actor list'", comments[0].Comment)
+	}
+	if comments[1].Gate != "HUMAN_GATE_2" {
+		t.Errorf("comment[1].Gate = %q, want HUMAN_GATE_2", comments[1].Gate)
+	}
+}
+
+func TestCommentPersistence_TaskHumanGate(t *testing.T) {
+	dir := t.TempDir()
+
+	err := AppendComment(dir, CommentEntry{
+		Gate:      "TASK_HUMAN_GATE",
+		Action:    "approve",
+		Comment:   "Looks good, ship it",
+		Timestamp: "2026-03-25T12:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("AppendComment: %v", err)
+	}
+
+	comments, err := LoadComments(dir)
+	if err != nil {
+		t.Fatalf("LoadComments: %v", err)
+	}
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(comments))
+	}
+	if comments[0].Gate != "TASK_HUMAN_GATE" {
+		t.Errorf("Gate = %q, want TASK_HUMAN_GATE", comments[0].Gate)
+	}
+	if comments[0].Action != "approve" {
+		t.Errorf("Action = %q, want approve", comments[0].Action)
+	}
+}
+
+func TestCommentPersistence_SurvivesRewind(t *testing.T) {
+	dir := t.TempDir()
+
+	// Append a comment.
+	err := AppendComment(dir, CommentEntry{
+		Gate:      "HUMAN_GATE_1",
+		Action:    "correct",
+		Comment:   "Pre-rewind comment",
+		Timestamp: "2026-03-25T10:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("AppendComment: %v", err)
+	}
+
+	// Simulate rewind: save a new workflow state (rewind doesn't touch comments).
+	state := &WorkflowStateJSON{
+		State:       StateDiscovery,
+		Round:       1,
+		FeatureName: "test-feature",
+	}
+	if err := SaveState(dir, state); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	// Comments must survive the rewind.
+	comments, err := LoadComments(dir)
+	if err != nil {
+		t.Fatalf("LoadComments after rewind: %v", err)
+	}
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment after rewind, got %d", len(comments))
+	}
+	if comments[0].Comment != "Pre-rewind comment" {
+		t.Errorf("comment = %q, want 'Pre-rewind comment'", comments[0].Comment)
+	}
+}
+
+func TestCommentPersistence_CorruptedFileEscalates(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write corrupted JSON to human-comments.json.
+	p := CommentsFilePath(dir)
+	if err := os.WriteFile(p, []byte("{not valid json!!!"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// LoadComments should return ErrCommentsCorrupted.
+	_, err := LoadComments(dir)
+	if err == nil {
+		t.Fatal("expected error for corrupted file, got nil")
+	}
+	var corrupted *ErrCommentsCorrupted
+	if !errors.As(err, &corrupted) {
+		t.Fatalf("expected *ErrCommentsCorrupted, got %T: %v", err, err)
+	}
+	if corrupted.Path != p {
+		t.Errorf("ErrCommentsCorrupted.Path = %q, want %q", corrupted.Path, p)
+	}
+	if corrupted.Unwrap() == nil {
+		t.Error("Unwrap() should return the underlying JSON error")
+	}
+
+	// AppendComment should also fail on corrupted file.
+	err = AppendComment(dir, CommentEntry{
+		Gate:      "HUMAN_GATE_1",
+		Action:    "confirm",
+		Comment:   "This should fail",
+		Timestamp: "2026-03-25T10:00:00Z",
+	})
+	if err == nil {
+		t.Fatal("expected error from AppendComment on corrupted file, got nil")
+	}
+	if !errors.As(err, &corrupted) {
+		t.Fatalf("expected *ErrCommentsCorrupted from AppendComment, got %T: %v", err, err)
+	}
+}
+
+func TestCommentPersistence_EmptyCommentIsNoop(t *testing.T) {
+	dir := t.TempDir()
+
+	err := AppendComment(dir, CommentEntry{
+		Gate:      "HUMAN_GATE_1",
+		Action:    "confirm",
+		Comment:   "",
+		Timestamp: "2026-03-25T10:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("AppendComment with empty comment: %v", err)
+	}
+
+	// File should not exist (no-op).
+	if _, err := os.Stat(CommentsFilePath(dir)); !os.IsNotExist(err) {
+		t.Error("expected no file for empty comment, but file exists")
+	}
+}
+
+func TestCommentPersistence_FileNotExistReturnsEmpty(t *testing.T) {
+	dir := t.TempDir()
+
+	comments, err := LoadComments(dir)
+	if err != nil {
+		t.Fatalf("LoadComments on non-existent file: %v", err)
+	}
+	if comments != nil {
+		t.Errorf("expected nil, got %v", comments)
+	}
+}
+
+func TestCommentPersistence_JSONRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+
+	entries := []CommentEntry{
+		{Gate: "HUMAN_GATE_1", Action: "correct", Comment: "Fix actors", Timestamp: "2026-03-25T10:00:00Z"},
+		{Gate: "HUMAN_GATE_2", Action: "confirm", Comment: "LGTM", Timestamp: "2026-03-25T11:00:00Z"},
+		{Gate: "HUMAN_GATE_FINAL", Action: "approve", Comment: "Ship it", Timestamp: "2026-03-25T12:00:00Z"},
+		{Gate: "TASK_HUMAN_GATE", Action: "approve", Comment: "Tasks look good", Timestamp: "2026-03-25T13:00:00Z"},
+	}
+
+	for _, e := range entries {
+		if err := AppendComment(dir, e); err != nil {
+			t.Fatalf("AppendComment(%s): %v", e.Gate, err)
+		}
+	}
+
+	loaded, err := LoadComments(dir)
+	if err != nil {
+		t.Fatalf("LoadComments: %v", err)
+	}
+	if len(loaded) != len(entries) {
+		t.Fatalf("expected %d comments, got %d", len(entries), len(loaded))
+	}
+	for i, want := range entries {
+		got := loaded[i]
+		if got.Gate != want.Gate || got.Action != want.Action || got.Comment != want.Comment || got.Timestamp != want.Timestamp {
+			t.Errorf("comment[%d]: got %+v, want %+v", i, got, want)
+		}
+	}
+
+	// Verify the file is valid JSON.
+	data, err := os.ReadFile(CommentsFilePath(dir))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !json.Valid(data) {
+		t.Error("human-comments.json is not valid JSON")
+	}
+}
+
+func TestCommentsFilePath(t *testing.T) {
+	got := CommentsFilePath("/foo/bar")
+	want := filepath.Join("/foo/bar", "human-comments.json")
+	if got != want {
+		t.Errorf("CommentsFilePath: got %q, want %q", got, want)
+	}
+}

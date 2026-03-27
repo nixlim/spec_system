@@ -42,13 +42,14 @@ type ResumeResult struct {
 
 // gateStates is the set of WorkflowState values that represent human gates.
 var gateStates = map[WorkflowState]bool{
-	StateHumanGate1:     true,
-	StateHumanGate2:     true,
+	StateHumanGate1:    true,
+	StateHumanGate2:    true,
 	StateHumanGateFinal: true,
+	StateTaskHumanGate: true,
 }
 
 // IsGateState reports whether the given state is a human gate state
-// (HUMAN_GATE_1, HUMAN_GATE_2, or HUMAN_GATE_FINAL).
+// (HUMAN_GATE_1, HUMAN_GATE_2, HUMAN_GATE_FINAL, or TASK_HUMAN_GATE).
 func IsGateState(s WorkflowState) bool {
 	return gateStates[s]
 }
@@ -56,11 +57,14 @@ func IsGateState(s WorkflowState) bool {
 // agentStates is the set of WorkflowState values that represent active agent
 // phases — phases where an agent is expected to produce an output file.
 var agentStates = map[WorkflowState]bool{
-	StateDiscovery: true,
-	StateDrafting:  true,
-	StateReviewing: true,
-	StateRevising:  true,
-	StateJudging:   true,
+	StateDiscovery:    true,
+	StateDrafting:     true,
+	StateReviewing:    true,
+	StateRevising:     true,
+	StateJudging:      true,
+	StateTaskify:      true,
+	StateTaskReview:   true,
+	StateTaskRevision: true,
 }
 
 // ---------------------------------------------------------------------------

@@ -65,6 +65,21 @@ type SpecWorkflowConfig struct {
 	// HoldoutTimeoutSeconds is the timeout for holdout generation agents
 	// in seconds.
 	HoldoutTimeoutSeconds int `yaml:"holdout_timeout_seconds"`
+	// EnableCodexDiscovery controls whether Codex CLI is used alongside
+	// Claude for the discovery phase. Default: false.
+	EnableCodexDiscovery bool `yaml:"enable_codex_discovery"`
+	// EnableCodexDrafting controls whether Codex CLI is used alongside
+	// Claude for the drafting phase. Default: false.
+	EnableCodexDrafting bool `yaml:"enable_codex_drafting"`
+	// AgentTimeoutSeconds is the per-agent timeout in seconds for
+	// dual-provider agent invocations (discovery, drafting, taskify).
+	AgentTimeoutSeconds int `yaml:"agent_timeout_seconds"`
+	// TaskifyMaxRetries is the maximum number of retry attempts for
+	// taskify when output fails schema/DAG validation.
+	TaskifyMaxRetries int `yaml:"taskify_max_retries"`
+	// TaskReviewMaxRounds is the maximum number of task review/revision
+	// rounds before findings pass to the human gate regardless of severity.
+	TaskReviewMaxRounds int `yaml:"task_review_max_rounds"`
 	// SkillPaths holds the filesystem paths to skill directories.
 	SkillPaths SkillPaths `yaml:"skill_paths"`
 }
@@ -86,6 +101,11 @@ func DefaultConfig() SpecWorkflowConfig {
 		CodexModel:             "gpt-5.4",
 		ReviewerTimeoutSeconds: 300,
 		HoldoutTimeoutSeconds:  300,
+		EnableCodexDiscovery:   false,
+		EnableCodexDrafting:    false,
+		AgentTimeoutSeconds:    300,
+		TaskifyMaxRetries:      3,
+		TaskReviewMaxRounds:    3,
 	}
 }
 
@@ -130,6 +150,15 @@ func (c *SpecWorkflowConfig) Validate() error {
 	}
 	if c.HoldoutTimeoutSeconds <= 0 {
 		return fmt.Errorf("holdout_timeout_seconds must be > 0, got %d", c.HoldoutTimeoutSeconds)
+	}
+	if c.AgentTimeoutSeconds <= 0 {
+		return fmt.Errorf("agent_timeout_seconds must be > 0, got %d", c.AgentTimeoutSeconds)
+	}
+	if c.TaskifyMaxRetries <= 0 {
+		return fmt.Errorf("taskify_max_retries must be > 0, got %d", c.TaskifyMaxRetries)
+	}
+	if c.TaskReviewMaxRounds <= 0 {
+		return fmt.Errorf("task_review_max_rounds must be > 0, got %d", c.TaskReviewMaxRounds)
 	}
 	if c.SkillPaths.PlanSpec != "" {
 		if _, err := os.Stat(c.SkillPaths.PlanSpec); err != nil {

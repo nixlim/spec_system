@@ -1,0 +1,443 @@
+{
+  "version": "0.1.0",
+  "tasks": [
+    {
+      "task_id": "extend-state-machine-taskify-states",
+      "task_name": "Add taskify, task review, and complete states to the state machine",
+      "goal": "The state machine includes StateTaskify, StateTaskReview, StateTaskRevision, StateTaskHumanGate, StateTasksApproved, and StateComplete with correct transitions, and StateFinalized is no longer terminal.",
+      "inputs": [
+        {"name": "spec-state-machine-definition", "type": "string", "constraints": "From spec section 'State Machine Definition'", "source": "spec-v0.md"}
+      ],
+      "outputs": [
+        {"name": "updated-types", "type": "Go source file", "constraints": "New state constants added to iota block", "destination": "internal/specworkflow/types.go"},
+        {"name": "updated-statemachine", "type": "Go source file", "constraints": "Transition table and isTerminal updated", "destination": "internal/specworkflow/statemachine.go"},
+        {"name": "updated-workflow-handler", "type": "Go source file", "constraints": "isTerminalWorkflowState updated", "destination": "internal/api/workflow_handler.go"}
+      ],
+      "acceptance": [
+        "StateTaskify, StateTaskReview, StateTaskRevision, StateTaskHumanGate, StateTasksApproved, and StateComplete are defined as WorkflowState constants in types.go",
+        "workflowStateNames array includes string names for all six new states",
+        "isTerminal() returns true only for StateComplete and StateEscalated, false for StateFinalized",
+        "isTerminalWorkflowState() returns true only for StateComplete and StateEscalated",
+        "isValidTransition() allows FINALIZED -> TASKIFY, TASKIFY -> TASK_REVIEW, TASKIFY -> TASKIFY (retry), TASKIFY -> ESCALATED, TASK_REVIEW -> TASK_HUMAN_GATE, TASK_REVIEW -> TASK_REVISION, TASK_REVIEW -> ESCALATED, TASK_REVISION -> TASK_REVIEW, TASK_HUMAN_GATE -> TASKS_APPROVED, TASK_HUMAN_GATE -> TASKIFY, TASK_HUMAN_GATE -> COMPLETE, TASKS_APPROVED -> COMPLETE",
+        "StateTaskify is included in RewindableStates",
+        "go build ./... succeeds with zero errors",
+        "Existing state machine tests pass without modification"
+      ],
+      "depends_on": {"status": "N/A", "reason": "Foundation task with no prerequisites"},
+      "constraints": ["Must not change existing state transitions", "Both isTerminal functions must be updated in lockstep"],
+      "files_scope": ["internal/specworkflow/types.go", "internal/specworkflow/statemachine.go", "internal/api/workflow_handler.go", "internal/specworkflow/rewind.go"],
+      "priority": "critical",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "add-config-fields",
+      "task_name": "Add new configuration fields for dual-provider and taskify features",
+      "goal": "SpecWorkflowConfig includes EnableCodexDiscovery, EnableCodexDrafting, AgentTimeoutSeconds, TaskifyMaxRetries, and TaskReviewMaxRounds with correct defaults and validation.",
+      "inputs": [
+        {"name": "config-spec", "type": "string", "constraints": "From spec 'Config Changes' section", "source": "spec-v0.md"}
+      ],
+      "outputs": [
+        {"name": "updated-config", "type": "Go source file", "constraints": "New fields with yaml tags and defaults", "destination": "internal/specworkflow/config.go"}
+      ],
+      "acceptance": [
+        "EnableCodexDiscovery defaults to false when absent from YAML",
+        "EnableCodexDrafting defaults to false when absent from YAML",
+        "AgentTimeoutSeconds defaults to 300 when absent from YAML",
+        "TaskifyMaxRetries defaults to 3 when absent from YAML",
+        "TaskReviewMaxRounds defaults to 3 when absent from YAML",
+        "ParseConfig rejects AgentTimeoutSeconds <= 0 with a validation error",
+        "ParseConfig rejects TaskifyMaxRetries <= 0 with a validation error",
+        "ParseConfig rejects TaskReviewMaxRounds <= 0 with a validation error",
+        "Existing YAML config files parse without error and existing fields retain their values",
+        "go test ./internal/specworkflow/... -run TestConfig passes"
+      ],
+      "depends_on": {"status": "N/A", "reason": "Config changes are independent of state machine changes"},
+      "constraints": ["Existing ReviewerTimeoutSeconds must remain unchanged", "New fields must have yaml struct tags matching snake_case names"],
+      "files_scope": ["internal/specworkflow/config.go", "internal/specworkflow/config_test.go"],
+      "priority": "high",
+      "estimate": "small"
+    },
+    {
+      "task_id": "implement-discovery-merge",
+      "task_name": "Implement discovery output merge function with union-unique logic",
+      "goal": "MergeDiscoveryOutputs combines two DiscoveryOutput structs using union-unique logic for all fields, with case-insensitive dedup and deterministic conflict resolution preferring Claude.",
+      "inputs": [
+        {"name": "claude-output", "type": "DiscoveryOutput", "constraints": "Valid parsed discovery JSON", "source": "Discovery agent output file"},
+        {"name": "codex-output", "type": "DiscoveryOutput", "constraints": "Valid parsed discovery JSON", "source": "Discovery agent output file"}
+      ],
+      "outputs": [
+        {"name": "merged-output", "type": "DiscoveryOutput", "constraints": "Union of unique items, both problem_statements if different", "destination": "Return value"}
+      ],
+      "acceptance": [
+        "MergeDiscoveryOutputs with identical actors from both providers produces each actor once",
+        "MergeDiscoveryOutputs with non-overlapping actors produces the union of all actors",
+        "Actor dedup is case-insensitive: 'admin' and 'Admin' are treated as the same actor",
+        "When both providers have an actor with the same name, Claude's version is used",
+        "When Claude's actor description is empty but Codex's is not, Codex's description is used",
+        "When problem_statements differ, both are included with provider attribution in the output",
+        "When problem_statements are identical, a single problem_statement is returned",
+        "MergeDiscoveryOutputs with one empty output returns the other output unchanged",
+        "MergeDiscoveryOutputs with both empty outputs returns an empty output",
+        "All 14 discovery merge unit tests from the TDD plan pass"
+      ],
+      "depends_on": {"status": "N/A", "reason": "Pure function with no state machine dependencies"},
+      "constraints": ["Conflict resolution: prefer Claude; if Claude field empty, use Codex", "Case-insensitive comparison for dedup keys"],
+      "files_scope": ["internal/specworkflow/merge.go", "internal/specworkflow/merge_test.go"],
+      "priority": "high",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "implement-dual-discovery-dispatch",
+      "task_name": "Implement dual-provider discovery dispatch with parallel execution and fallback",
+      "goal": "When EnableCodexDiscovery is true and Codex CLI is available, both Claude and Codex discovery agents run in parallel; when one fails the survivor is used; when both fail the workflow escalates.",
+      "inputs": [
+        {"name": "config", "type": "SpecWorkflowConfig", "constraints": "EnableCodexDiscovery may be true or false", "source": "Workflow config"},
+        {"name": "discovery-prompt", "type": "string", "constraints": "Existing discovery prompt content", "source": "Prompt builder"}
+      ],
+      "outputs": [
+        {"name": "discovery-files", "type": "list<string>", "constraints": "Per-provider versioned filenames when dual-provider active", "destination": "Workspace directory"},
+        {"name": "merged-output", "type": "DiscoveryOutput", "constraints": "Merged or single-provider output", "destination": "State for HUMAN_GATE_1"}
+      ],
+      "acceptance": [
+        "With EnableCodexDiscovery=true and Codex available, both agents are dispatched in parallel",
+        "Output files are named discovery-output-claude-v{N}.json and discovery-output-codex-v{N}.json when dual-provider is active",
+        "When both agents succeed, MergeDiscoveryOutputs is called and discovery-output-merged-v{N}.json is written",
+        "When Codex fails, Claude's output is used as sole discovery output with a log entry identifying the failure",
+        "When Codex CLI is not on PATH, falls back to Claude-only with log entry 'Codex CLI not available, falling back to Claude-only discovery'",
+        "When both agents fail, workflow escalates with combined failure reason",
+        "With EnableCodexDiscovery=false, only Claude runs producing discovery-output.json (current behavior)",
+        "AgentTimeoutSeconds from config is applied to each agent independently"
+      ],
+      "depends_on": ["extend-state-machine-taskify-states", "add-config-fields", "implement-discovery-merge"],
+      "constraints": ["Must not modify existing single-provider discovery path when feature is disabled", "Codex availability check must be done before dispatch"],
+      "files_scope": ["internal/specworkflow/orchestrator_discovery.go", "internal/specworkflow/orchestrator_discovery_test.go"],
+      "priority": "high",
+      "estimate": "large"
+    },
+    {
+      "task_id": "implement-dual-drafting-dispatch",
+      "task_name": "Implement dual-provider drafting dispatch with combine and fallback",
+      "goal": "When EnableCodexDrafting is true and Codex CLI is available, both Claude and Codex drafters run in parallel; a Claude reviser combines successful outputs; single-provider fallback works when one fails.",
+      "inputs": [
+        {"name": "config", "type": "SpecWorkflowConfig", "constraints": "EnableCodexDrafting may be true or false", "source": "Workflow config"},
+        {"name": "drafting-prompt", "type": "string", "constraints": "Existing drafting prompt content", "source": "Prompt builder"}
+      ],
+      "outputs": [
+        {"name": "drafter-files", "type": "list<string>", "constraints": "Per-provider versioned filenames when dual-provider active", "destination": "Workspace directory"},
+        {"name": "combined-draft", "type": "DrafterOutput", "constraints": "Combined or single-provider draft", "destination": "State for HUMAN_GATE_2"}
+      ],
+      "acceptance": [
+        "With EnableCodexDrafting=true and Codex available, both drafters are dispatched in parallel",
+        "Output files are named drafter-output-claude-v{N}.json and drafter-output-codex-v{N}.json",
+        "When both succeed, a Claude reviser combines them into drafter-output-combined-v{N}.json",
+        "When the combine reviser fails, drafts are concatenated with attribution headers as fallback",
+        "When one drafter fails, the surviving draft is used directly (no combine step), with UI notice and log entry",
+        "When both drafters fail, workflow escalates with combined failure reason",
+        "With EnableCodexDrafting=false, only Claude runs producing drafter-output.json (current behavior)",
+        "When Codex CLI is not on PATH, falls back to Claude-only with log entry"
+      ],
+      "depends_on": ["extend-state-machine-taskify-states", "add-config-fields"],
+      "constraints": ["Only Claude is used for the combine/revision step, never Codex", "Must not modify existing single-provider drafting path when feature is disabled"],
+      "files_scope": ["internal/specworkflow/orchestrator_drafting.go", "internal/specworkflow/orchestrator_drafting_test.go", "internal/specworkflow/prompts.go"],
+      "priority": "high",
+      "estimate": "large"
+    },
+    {
+      "task_id": "implement-task-graph-validation",
+      "task_name": "Implement task graph JSON schema and DAG validation",
+      "goal": "ValidateTaskGraph checks a task graph file for structural correctness (required fields, types, non-empty tasks, kebab-case IDs, valid priority) and DAG integrity (no cycles, no dangling references, no self-references).",
+      "inputs": [
+        {"name": "task-graph-json", "type": "bytes", "constraints": "JSON file content", "source": "File system (.tasks/{feature}.task.json)"}
+      ],
+      "outputs": [
+        {"name": "validation-errors", "type": "list<string>", "constraints": "Empty list if valid", "destination": "Return value"},
+        {"name": "task-graph-schema", "type": "JSON Schema file", "constraints": "Authoritative schema definition", "destination": ".tasks/task-graph-schema.json"}
+      ],
+      "acceptance": [
+        "A valid task graph with version, non-empty tasks, kebab-case IDs, all required fields, and valid DAG passes with zero errors",
+        "Missing version field returns error 'version required'",
+        "Empty tasks array returns error 'at least one task required'",
+        "Non-kebab-case task_id (e.g. 'MyTask') returns error identifying the invalid ID",
+        "Duplicate task_ids return error identifying the duplicates",
+        "Missing goal field returns error identifying the task",
+        "Invalid priority value (e.g. 'urgent') returns error listing valid values",
+        "Empty acceptance array returns error identifying the task",
+        "Circular dependency (task-a -> task-b -> task-a) returns error 'cycle detected'",
+        "Dangling depends_on reference returns error identifying the missing task ID",
+        "Self-referencing depends_on returns error identifying the self-reference",
+        "Three-node cycle (a -> b -> c -> a) returns error 'cycle detected'",
+        "All 14 task graph validation unit tests from the TDD plan pass"
+      ],
+      "depends_on": {"status": "N/A", "reason": "Pure validation logic with no state machine dependencies"},
+      "constraints": ["Schema file at .tasks/task-graph-schema.json is authoritative", "Priority values: critical, high, medium, low (case-insensitive)"],
+      "files_scope": ["internal/specworkflow/taskgraph_validation.go", "internal/specworkflow/taskgraph_validation_test.go", ".tasks/task-graph-schema.json"],
+      "priority": "high",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "implement-taskify-orchestration",
+      "task_name": "Implement taskify stage orchestration with retry logic",
+      "goal": "The handleTaskify function dispatches Claude CLI with /taskify skill, validates the output against the task graph schema, retries with validation errors on failure, and escalates when retries are exhausted.",
+      "inputs": [
+        {"name": "spec-final", "type": "string", "constraints": "spec-final.md must exist in workspace", "source": "File system"},
+        {"name": "human-comments", "type": "list<Comment>", "constraints": "From human-comments.json", "source": "File system"},
+        {"name": "config", "type": "SpecWorkflowConfig", "constraints": "TaskifyMaxRetries > 0", "source": "Workflow config"}
+      ],
+      "outputs": [
+        {"name": "task-graph-file", "type": "JSON file", "constraints": "Conforms to task-graph-schema.json", "destination": ".tasks/{feature}.task.json"}
+      ],
+      "acceptance": [
+        "handleTaskify dispatches Claude CLI with /taskify skill and spec-final.md content",
+        "Human comments from human-comments.json are included in the prompt via <human_feedback> block",
+        "When output passes schema and DAG validation, workflow transitions to StateTaskReview",
+        "When output fails validation, taskify is re-dispatched with validation errors in the prompt",
+        "When .tasks/{feature}.task.json does not exist after a run, this is treated as a validation failure triggering retry",
+        "When TaskifyMaxRetries attempts all fail, workflow transitions to StateEscalated with validation errors as reason",
+        "Validation errors and retry status are emitted as UI events and logged"
+      ],
+      "depends_on": ["extend-state-machine-taskify-states", "add-config-fields", "implement-task-graph-validation"],
+      "constraints": ["Only Claude CLI is used for taskify dispatch (not Codex)", "Must include validation errors from previous attempt in retry prompt"],
+      "files_scope": ["internal/specworkflow/orchestrator_taskify.go", "internal/specworkflow/orchestrator_taskify_test.go", "internal/specworkflow/prompts.go"],
+      "priority": "high",
+      "estimate": "large"
+    },
+    {
+      "task_id": "implement-task-review-dispatch",
+      "task_name": "Implement dual-provider task review with finding merge and severity routing",
+      "goal": "The handleTaskReview function dispatches Claude and Codex task reviewers in parallel, merges findings using the existing dedup algorithm, and routes to StateTaskRevision on CRITICAL/MAJOR findings or StateTaskHumanGate on minor-only findings.",
+      "inputs": [
+        {"name": "task-graph", "type": "JSON file", "constraints": "Valid task graph from .tasks/{feature}.task.json", "source": "File system"},
+        {"name": "config", "type": "SpecWorkflowConfig", "constraints": "TaskReviewMaxRounds > 0", "source": "Workflow config"}
+      ],
+      "outputs": [
+        {"name": "merged-findings", "type": "JSON file", "constraints": "Deduped findings with provider attribution", "destination": "task-findings-round-{N}.json"}
+      ],
+      "acceptance": [
+        "Both Claude and Codex task reviewers are dispatched in parallel with AgentTimeoutSeconds timeout",
+        "Findings are merged using the same dedup algorithm as MergeReviewerOutputs (section + category + severity key)",
+        "Provider attribution is preserved in merged findings",
+        "CRITICAL or MAJOR findings route to StateTaskRevision when rounds remain",
+        "MINOR or OBSERVATION-only findings route to StateTaskHumanGate",
+        "When TaskReviewMaxRounds is reached, findings pass to StateTaskHumanGate regardless of severity",
+        "When one reviewer fails, survivor's findings are used with a reduced-coverage notice",
+        "When both reviewers fail, workflow escalates",
+        "Findings file is named task-findings-round-{N}.json with incrementing round counter"
+      ],
+      "depends_on": ["extend-state-machine-taskify-states", "add-config-fields", "implement-taskify-orchestration"],
+      "constraints": ["Reuse existing MergeFindings dedup algorithm from merge.go", "Round counter is per-stage, independent of other counters"],
+      "files_scope": ["internal/specworkflow/orchestrator_task_review.go", "internal/specworkflow/orchestrator_task_review_test.go"],
+      "priority": "high",
+      "estimate": "large"
+    },
+    {
+      "task_id": "implement-task-revision",
+      "task_name": "Implement automated task graph revision stage",
+      "goal": "The handleTaskRevision function dispatches a Claude revision agent with current task graph and findings, re-validates the revised output, and transitions back to StateTaskReview.",
+      "inputs": [
+        {"name": "task-graph", "type": "JSON file", "constraints": "Current task graph", "source": "File system"},
+        {"name": "findings", "type": "JSON file", "constraints": "Merged review findings", "source": "task-findings-round-{N}.json"},
+        {"name": "human-comments", "type": "list<Comment>", "constraints": "From human-comments.json", "source": "File system"}
+      ],
+      "outputs": [
+        {"name": "revised-task-graph", "type": "JSON file", "constraints": "Updated task graph conforming to schema", "destination": ".tasks/{feature}.task.json"}
+      ],
+      "acceptance": [
+        "handleTaskRevision dispatches a Claude revision agent with the task revision prompt template",
+        "The prompt includes the current task graph JSON, merged review findings, and human comments",
+        "The revised task graph is validated against the schema before transitioning to StateTaskReview",
+        "If revision output fails validation, the validation error is logged and the workflow escalates",
+        "StateTaskRevision transitions to StateTaskReview on success"
+      ],
+      "depends_on": ["implement-task-review-dispatch", "implement-task-graph-validation"],
+      "constraints": ["Only Claude is used for revision (not Codex)", "Must re-validate output before transition"],
+      "files_scope": ["internal/specworkflow/orchestrator_task_review.go", "internal/specworkflow/orchestrator_task_review_test.go", "internal/specworkflow/prompts.go"],
+      "priority": "medium",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "implement-task-human-gate",
+      "task_name": "Implement task human gate with approve, correct, and skip actions",
+      "goal": "StateTaskHumanGate supports three actions: Approve (persist tasks + attempt taskval --create-beads), Correct (fresh /taskify re-run with feedback), and Skip (transition to StateComplete).",
+      "inputs": [
+        {"name": "gate-action", "type": "string", "constraints": "One of: approve, correct, skip", "source": "HTTP POST from UI"},
+        {"name": "comment", "type": "optional<string>", "constraints": "Free text", "source": "HTTP POST from UI"},
+        {"name": "task-graph", "type": "JSON file", "constraints": "Valid task graph", "source": ".tasks/{feature}.task.json"}
+      ],
+      "outputs": [
+        {"name": "persisted-tasks", "type": "JSON file", "constraints": "Confirmed persisted on approve", "destination": ".tasks/{feature}.task.json"},
+        {"name": "beads-result", "type": "string", "constraints": "Success or warning message", "destination": "UI event"}
+      ],
+      "acceptance": [
+        "Approve action persists .tasks/{feature}.task.json and transitions through StateTasksApproved to StateComplete",
+        "Approve action attempts taskval --create-beads; on success Beads IDs are logged",
+        "When taskval is unavailable on approve, a UI warning 'taskval unavailable -- tasks saved but Beads not created' is surfaced and workflow proceeds to StateComplete",
+        "When taskval partially succeeds, a warning with count is surfaced and workflow proceeds to StateComplete",
+        "Correct action with feedback persists comment to human-comments.json and dispatches fresh /taskify re-run with <human_feedback> block",
+        "Correct action transitions to StateTaskify, then output is validated and transitions to StateTaskReview",
+        "Skip action transitions directly to StateComplete without creating tasks, with log entry 'Task creation skipped by human'",
+        "Comments on any action are persisted to human-comments.json with gate='TASK_HUMAN_GATE'"
+      ],
+      "depends_on": ["implement-taskify-orchestration", "extend-state-machine-taskify-states"],
+      "constraints": ["taskval unavailability must not block workflow progression", "Comment persistence must happen before gate channel is signaled"],
+      "files_scope": ["internal/api/workflow_handler.go", "internal/api/workflow_handler_test.go", "internal/specworkflow/orchestrator_taskify.go"],
+      "priority": "high",
+      "estimate": "large"
+    },
+    {
+      "task_id": "implement-versioned-file-naming",
+      "task_name": "Implement versioned file naming with per-stage counters",
+      "goal": "All dual-provider output files follow the naming convention {output}-{provider}-v{N}.{ext} with per-stage version counters that increment on rewind and preserve prior files.",
+      "inputs": [
+        {"name": "stage", "type": "string", "constraints": "discovery, drafting, or task-review", "source": "Orchestrator context"},
+        {"name": "provider", "type": "string", "constraints": "claude or codex", "source": "Agent dispatch"}
+      ],
+      "outputs": [
+        {"name": "versioned-filename", "type": "string", "constraints": "Follows naming convention from spec", "destination": "Return value"}
+      ],
+      "acceptance": [
+        "Discovery outputs are named discovery-output-{provider}-v{N}.json when dual-provider is active",
+        "Drafting outputs are named drafter-output-{provider}-v{N}.json when dual-provider is active",
+        "Combined draft is named drafter-output-combined-v{N}.json",
+        "Task review findings are named task-findings-round-{N}.json",
+        "Version counter increments when a stage re-runs (e.g., after correction at gate)",
+        "Previous versioned files are never deleted on rewind",
+        "Single-provider mode uses current unversioned filenames (discovery-output.json, drafter-output.json)"
+      ],
+      "depends_on": ["implement-dual-discovery-dispatch", "implement-dual-drafting-dispatch"],
+      "constraints": ["Version counters are per-stage, not global", "No file deletion on rewind"],
+      "files_scope": ["internal/specworkflow/orchestrator_helpers.go", "internal/specworkflow/orchestrator_discovery.go", "internal/specworkflow/orchestrator_drafting.go", "internal/specworkflow/orchestrator_task_review.go"],
+      "priority": "medium",
+      "estimate": "small"
+    },
+    {
+      "task_id": "implement-comment-protocol",
+      "task_name": "Implement append-only comment protocol for all gates including corruption detection",
+      "goal": "All gates persist comments to human-comments.json in append-only fashion with gate name, action, text, and timestamp; comments survive rewind; corrupted JSON triggers escalation.",
+      "inputs": [
+        {"name": "gate-name", "type": "string", "constraints": "HUMAN_GATE_1, HUMAN_GATE_2, HUMAN_GATE_FINAL, or TASK_HUMAN_GATE", "source": "Gate handler"},
+        {"name": "action", "type": "string", "constraints": "Gate action (approve, correct, skip, etc.)", "source": "HTTP POST"},
+        {"name": "comment", "type": "string", "constraints": "Free text from user", "source": "HTTP POST"}
+      ],
+      "outputs": [
+        {"name": "updated-comments-file", "type": "JSON file", "constraints": "Append-only array of comment entries", "destination": "human-comments.json"}
+      ],
+      "acceptance": [
+        "Comments are appended to human-comments.json with gate, action, comment text, and ISO 8601 timestamp",
+        "Existing comments in human-comments.json are preserved (append-only, never overwritten)",
+        "Comments survive state rewind (file is never truncated or deleted)",
+        "When human-comments.json contains invalid JSON, the orchestrator escalates with reason 'human-comments.json is corrupted'",
+        "Comments are included in agent prompts via <human_feedback> block with priority instruction",
+        "TASK_HUMAN_GATE comments follow the same protocol as existing gates"
+      ],
+      "depends_on": ["extend-state-machine-taskify-states"],
+      "constraints": ["Append-only: entries are never deleted from human-comments.json", "Corruption must escalate, not silently discard"],
+      "files_scope": ["internal/specworkflow/persistence.go", "internal/specworkflow/persistence_test.go", "internal/specworkflow/orchestrator_helpers.go", "internal/specworkflow/prompts.go"],
+      "priority": "high",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "implement-gate1-dual-discovery-ui",
+      "task_name": "Update HUMAN_GATE_1 to show dual-provider discovery outputs side-by-side",
+      "goal": "HUMAN_GATE_1 presents both Claude and Codex discovery outputs for side-by-side comparison with checkboxes to select one or both, plus a comment field, when dual-provider discovery is active.",
+      "inputs": [
+        {"name": "claude-output", "type": "JSON file", "constraints": "discovery-output-claude-v{N}.json", "source": "Workspace directory"},
+        {"name": "codex-output", "type": "JSON file", "constraints": "discovery-output-codex-v{N}.json", "source": "Workspace directory"},
+        {"name": "merged-output", "type": "JSON file", "constraints": "discovery-output-merged-v{N}.json", "source": "Workspace directory"}
+      ],
+      "outputs": [
+        {"name": "gate-request-event", "type": "WebSocket event", "constraints": "Includes both provider outputs as separate payloads", "destination": "WebSocket hub"}
+      ],
+      "acceptance": [
+        "Gate request event includes both claude and codex discovery output files as separate payloads",
+        "When dual-provider discovery produced merged output, the UI data includes checkboxes for provider selection",
+        "A comment field is available in the gate data",
+        "When single-provider discovery was used, the existing gate behavior is unchanged",
+        "When one provider failed, a failure notice is included in the gate data"
+      ],
+      "depends_on": ["implement-dual-discovery-dispatch"],
+      "constraints": ["Must not break existing HUMAN_GATE_1 behavior for single-provider mode"],
+      "files_scope": ["internal/api/workflow_handler.go", "internal/specworkflow/orchestrator_discovery.go", "internal/specworkflow/events.go"],
+      "priority": "medium",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "implement-gate2-dual-drafting-ui",
+      "task_name": "Update HUMAN_GATE_2 to show combined or single draft with failure notices",
+      "goal": "HUMAN_GATE_2 displays the combined draft when both drafters succeed, or the single surviving draft with a failure notice when one drafter fails.",
+      "inputs": [
+        {"name": "draft-output", "type": "JSON file", "constraints": "Combined or single provider draft", "source": "Workspace directory"}
+      ],
+      "outputs": [
+        {"name": "gate-request-event", "type": "WebSocket event", "constraints": "Draft content plus optional failure notice", "destination": "WebSocket hub"}
+      ],
+      "acceptance": [
+        "When a combined draft exists, HUMAN_GATE_2 shows drafter-output-combined-v{N}.json for review",
+        "When only Claude's draft exists (Codex failed), a failure notice is visible in the gate data",
+        "A comment field is available",
+        "When single-provider drafting was used, the existing gate behavior is unchanged"
+      ],
+      "depends_on": ["implement-dual-drafting-dispatch"],
+      "constraints": ["Must not break existing HUMAN_GATE_2 behavior for single-provider mode"],
+      "files_scope": ["internal/api/workflow_handler.go", "internal/specworkflow/orchestrator_drafting.go", "internal/specworkflow/events.go"],
+      "priority": "medium",
+      "estimate": "small"
+    },
+    {
+      "task_id": "implement-rewind-complete-to-taskify",
+      "task_name": "Implement rewind from StateComplete to StateTaskify",
+      "goal": "The Request Revision action from StateComplete rewinds to StateTaskify with the user's comment persisted, preserving existing task files.",
+      "inputs": [
+        {"name": "comment", "type": "string", "constraints": "User feedback for taskify correction", "source": "HTTP POST from UI"},
+        {"name": "current-state", "type": "WorkflowState", "constraints": "Must be StateComplete", "source": "Workflow state"}
+      ],
+      "outputs": [
+        {"name": "new-state", "type": "WorkflowState", "constraints": "StateTaskify", "destination": "Workflow state"},
+        {"name": "persisted-comment", "type": "JSON entry", "constraints": "Appended to human-comments.json", "destination": "human-comments.json"}
+      ],
+      "acceptance": [
+        "Request Revision from StateComplete transitions workflow to StateTaskify",
+        "The user's comment is persisted to human-comments.json before state transition",
+        "Existing .tasks/{feature}.task.json files are preserved (not deleted) on rewind",
+        "New taskify round begins with incremented version counter",
+        "StateTaskify is present in RewindableStates"
+      ],
+      "depends_on": ["extend-state-machine-taskify-states", "implement-comment-protocol", "implement-taskify-orchestration"],
+      "constraints": ["No file deletion on rewind", "Comment must be persisted before state change"],
+      "files_scope": ["internal/specworkflow/rewind.go", "internal/api/workflow_handler.go", "internal/specworkflow/orchestrator_taskify.go"],
+      "priority": "medium",
+      "estimate": "small"
+    },
+    {
+      "task_id": "write-regression-and-e2e-tests",
+      "task_name": "Write regression tests and end-to-end integration tests",
+      "goal": "Regression tests confirm existing behavior is unchanged with dual-provider features disabled, and E2E tests verify the full workflow INIT through COMPLETE with all features enabled.",
+      "inputs": [
+        {"name": "tdd-plan", "type": "string", "constraints": "Tests 61-64 from spec TDD plan", "source": "spec-v0.md"}
+      ],
+      "outputs": [
+        {"name": "regression-tests", "type": "Go test files", "constraints": "Cover backward compatibility", "destination": "internal/specworkflow/*_test.go"},
+        {"name": "e2e-tests", "type": "Go test files", "constraints": "Cover full workflow", "destination": "internal/specworkflow/*_test.go"}
+      ],
+      "acceptance": [
+        "TestRegression_FullWorkflowNoCodex passes: full INIT -> FINALIZED -> TASKIFY -> COMPLETE with Codex disabled produces identical output files and transitions as current main (up to FINALIZED)",
+        "TestRegression_ExistingReviewUnchanged passes: dual-provider spec review works identically to before",
+        "TestE2E_DualDiscoveryDraftingTaskify passes: full workflow with all dual-provider features enabled completes INIT -> COMPLETE",
+        "TestE2E_TaskReviewRevisionLoop passes: task review dispatches dual reviewers, CRITICAL findings route to TASK_REVISION, revised graph transitions back to TASK_REVIEW, and max rounds routes to TASK_HUMAN_GATE",
+        "All 64 tests from the TDD plan pass with zero failures"
+      ],
+      "depends_on": [
+        "implement-dual-discovery-dispatch",
+        "implement-dual-drafting-dispatch",
+        "implement-taskify-orchestration",
+        "implement-task-review-dispatch",
+        "implement-task-revision",
+        "implement-task-human-gate",
+        "implement-rewind-complete-to-taskify"
+      ],
+      "constraints": ["Regression tests must verify identical behavior to current main branch", "E2E tests must cover the complete state machine path"],
+      "files_scope": ["internal/specworkflow/regression_test.go", "internal/specworkflow/e2e_test.go"],
+      "priority": "high",
+      "estimate": "large"
+    }
+  ]
+}

@@ -58,13 +58,19 @@ var transitionTable = map[WorkflowState][]WorkflowState{
 	StateRevising:       {StateJudging, StateError},
 	StateJudging:        {StateReviewing, StateHumanGateFinal, StateFinalized, StateEscalated, StateError},
 	StateHumanGateFinal: {StateFinalized, StateReviewing, StateEscalated},
-	// StateFinalized and StateEscalated are terminal — no outgoing edges
+	StateFinalized:      {StateTaskify},
+	StateTaskify:        {StateTaskReview, StateTaskify, StateEscalated},
+	StateTaskReview:     {StateTaskHumanGate, StateTaskRevision, StateEscalated},
+	StateTaskRevision:   {StateTaskReview},
+	StateTaskHumanGate:  {StateTasksApproved, StateTaskify, StateComplete},
+	StateTasksApproved:  {StateComplete},
+	// StateComplete and StateEscalated are terminal — no outgoing edges
 	// (except the universal "any -> ERROR" rule).
 }
 
 // isTerminal returns true for states that have no normal outgoing transitions.
 func isTerminal(s WorkflowState) bool {
-	return s == StateFinalized || s == StateEscalated
+	return s == StateComplete || s == StateEscalated
 }
 
 // isValidTransition checks whether transitioning from -> to is structurally
@@ -241,6 +247,12 @@ func (sm *StateMachine) RestoreState(ws *WorkflowStateJSON) {
 // Current returns the current workflow state value.
 func (sm *StateMachine) Current() WorkflowState {
 	return sm.state.State
+}
+
+// IsTerminal reports whether the state machine is in a terminal state
+// (COMPLETE or ESCALATED), meaning no further transitions are possible.
+func (sm *StateMachine) IsTerminal() bool {
+	return isTerminal(sm.state.State)
 }
 
 // State returns a pointer to the full workflow state snapshot.
