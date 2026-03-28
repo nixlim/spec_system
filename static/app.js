@@ -283,8 +283,16 @@
       case "HUMAN_GATE_1":
       case "HUMAN_GATE_2":
       case "HUMAN_GATE_FINAL":
+      case "TASK_HUMAN_GATE":
         return "state-badge-purple";
+      case "TASKIFY":
+      case "TASK_REVIEW":
+      case "TASK_REVISION":
+      case "TASKS_APPROVED":
+        return "state-badge-orange";
       case "FINALIZED":
+        return "state-badge-blue";
+      case "COMPLETE":
         return "state-badge-green";
       case "ESCALATED":
       case "ERROR":
@@ -310,7 +318,11 @@
     { state: "REVISING",         label: "Revise",   gate: false },
     { state: "JUDGING",          label: "Judge",    gate: false },
     { state: "HUMAN_GATE_FINAL", label: "Gate F",   gate: true  },
-    { state: "FINALIZED",        label: "Done",     gate: false }
+    { state: "FINALIZED",        label: "Finalized", gate: false },
+    { state: "TASKIFY",          label: "Taskify",  gate: false },
+    { state: "TASK_REVIEW",      label: "T.Review", gate: false },
+    { state: "TASK_HUMAN_GATE",  label: "T.Gate",   gate: true  },
+    { state: "COMPLETE",         label: "Done",     gate: false }
   ];
 
   /**
@@ -416,12 +428,19 @@
       case "HUMAN_GATE_1":
       case "HUMAN_GATE_2":
       case "HUMAN_GATE_FINAL":
+      case "TASK_HUMAN_GATE":
         return "wsi-badge-gate";
       case "REVIEWING":
       case "REVISING":
       case "JUDGING":
+      case "TASKIFY":
+      case "TASK_REVIEW":
+      case "TASK_REVISION":
+      case "TASKS_APPROVED":
         return "wsi-badge-review";
       case "FINALIZED":
+        return "wsi-badge-active";
+      case "COMPLETE":
         return "wsi-badge-done";
       case "ESCALATED":
       case "ERROR":
@@ -700,7 +719,7 @@
 
     // Start or stop the client-side timer based on workflow state.
     var upper = state.toUpperCase();
-    var shouldTick = upper !== "IDLE" && upper !== "FINALIZED" && upper !== "ESCALATED" && !data.paused;
+    var shouldTick = upper !== "IDLE" && upper !== "COMPLETE" && upper !== "ESCALATED" && !data.paused;
     if (shouldTick) {
       startWallClockTimer();
     } else {
@@ -1068,7 +1087,7 @@
       // If all workflows are idle or terminal, stop the workflow poller.
       var anyActive = statuses.some(function (s) {
         var st = (s.state || "").toUpperCase();
-        return st !== "IDLE" && st !== "FINALIZED" && st !== "ESCALATED";
+        return st !== "IDLE" && st !== "COMPLETE" && st !== "FINALIZED" && st !== "ESCALATED";
       });
       if (!anyActive) {
         stopWorkflowPoller();
@@ -1076,7 +1095,7 @@
       }
 
       // If gate state and gate panel not already showing, show it.
-      if (state.indexOf("HUMAN_GATE") !== -1) {
+      if (state.indexOf("HUMAN_GATE") !== -1 || state === "TASK_HUMAN_GATE") {
         var gatePanel = $(".gate-panel");
         if (!gatePanel) {
           var feature = displayStatus.feature_name;
@@ -1091,6 +1110,8 @@
             fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/files/drafter-output.json").then(function (drafter) {
               if (drafter) showGate2Panel({ gate_type: "ambiguity_resolution", data: drafter, task_id: feature });
             }).catch(function () {});
+          } else if (state === "TASK_HUMAN_GATE" && feature) {
+            showTaskGatePanel({ gate_type: "task_human_gate", data: {}, task_id: feature });
           }
         }
       }
@@ -1510,11 +1531,12 @@
 
   function getWorkflowStateBadgeClass(state) {
     var s = (state || "").toUpperCase();
-    if (s === "FINALIZED") return "ws-finalized";
+    if (s === "COMPLETE") return "ws-finalized";
+    if (s === "FINALIZED") return "ws-active";
     if (s === "ESCALATED" || s === "ERROR") return "ws-escalated";
-    if (s.indexOf("HUMAN_GATE") !== -1) return "ws-gate";
+    if (s.indexOf("HUMAN_GATE") !== -1 || s === "TASK_HUMAN_GATE") return "ws-gate";
     if (s === "UNKNOWN") return "ws-unknown";
-    // Active states: INIT, DISCOVERY, DRAFTING, REVIEWING, REVISING, JUDGING
+    // Active states: INIT, DISCOVERY, DRAFTING, REVIEWING, REVISING, JUDGING, TASKIFY, TASK_REVIEW, etc.
     return "ws-active";
   }
 
@@ -1581,7 +1603,7 @@
         var stateUpper = (f.state || "").toUpperCase();
         var isTerminal = f.is_terminal;
         var isPaused = f.is_paused;
-        var isGate = stateUpper.indexOf("HUMAN_GATE") !== -1;
+        var isGate = stateUpper.indexOf("HUMAN_GATE") !== -1 || stateUpper === "TASK_HUMAN_GATE";
         var isActive = !isTerminal && !isGate && !isPaused && stateUpper !== "UNKNOWN";
 
         if ((isTerminal || isPaused) && stateUpper !== "UNKNOWN") {
@@ -2544,6 +2566,8 @@
       showGate1Panel(data);
     } else if (data.gate_type === "ambiguity_resolution") {
       showGate2Panel(data);
+    } else if (data.gate_type === "task_human_gate") {
+      showTaskGatePanel(data);
     }
   }
 
@@ -3053,6 +3077,56 @@
         alert("Gate 2 submission failed: " + err.message);
       });
     });
+  }
+
+  // --- Task Human Gate: Task Graph Approval ---
+
+  function showTaskGatePanel(data) {
+    var container = $("#gate-panels");
+    clearChildren(container);
+
+    var taskId = data.task_id || "";
+    var gateData = data.data || {};
+    var taskGraphPath = gateData.task_graph_path || "";
+
+    var panel = el("div", { className: "gate-panel" });
+    panel.innerHTML =
+      '<h3><span class="gate-badge">Task Gate</span> Task Graph Review</h3>' +
+      '<p>The task graph has been generated and reviewed. Choose an action:</p>' +
+      (taskGraphPath ? '<p class="gate-detail"><strong>Task graph:</strong> <code>' + escapeHtml(taskGraphPath) + '</code></p>' : '') +
+      '<div class="gate-form">' +
+        '<div class="form-group">' +
+          '<label>Comment (optional)</label>' +
+          '<textarea id="task-gate-comment" rows="3" placeholder="Feedback for task graph revision..."></textarea>' +
+        '</div>' +
+        '<div class="gate-actions">' +
+          '<button id="task-gate-approve" class="btn btn-success">Approve Tasks</button>' +
+          '<button id="task-gate-correct" class="btn btn-warning">Correct (Re-run Taskify)</button>' +
+          '<button id="task-gate-skip" class="btn btn-secondary">Skip Task Creation</button>' +
+        '</div>' +
+      '</div>';
+
+    container.appendChild(panel);
+
+    function submitTaskGate(action) {
+      var comment = ($("#task-gate-comment") || {}).value || "";
+      var payload = { action: action };
+      if (comment.trim()) payload.comment = comment.trim();
+
+      fetchJSON("/api/tasks/" + encodeURIComponent(taskId) + "/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      }).then(function () {
+        clearChildren(container);
+      }).catch(function (err) {
+        alert("Task gate submission failed: " + err.message);
+      });
+    }
+
+    $("#task-gate-approve").addEventListener("click", function () { submitTaskGate("approve"); });
+    $("#task-gate-correct").addEventListener("click", function () { submitTaskGate("correct"); });
+    $("#task-gate-skip").addEventListener("click", function () { submitTaskGate("skip"); });
   }
 
   // -----------------------------------------------------------------------
