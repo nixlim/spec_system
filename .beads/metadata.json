@@ -1,6 +1,7 @@
 {
   "database": "dolt",
-  "jsonl_export": "issues.jsonl",
   "backend": "dolt",
-  "dolt_database": "beads_adversarial_spec_system"
+  "dolt_mode": "embedded",
+  "dolt_database": "beads_adversarial_spec_system",
+  "project_id": "5df41ef5-39a0-4b87-8ec8-757285e45524"
 }
