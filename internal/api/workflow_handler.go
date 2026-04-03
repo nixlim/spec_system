@@ -445,8 +445,17 @@ func HandleStartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			return
 		}
 
+		wsDir := manager.workspaceDir
+		if req.WorkspaceDir != "" {
+			if err := validateExistingDirectory("workspace_dir", req.WorkspaceDir); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			wsDir = req.WorkspaceDir
+		}
+
 		// Check for an existing workflow state on disk before creating a new one.
-		absWorkspace, _ := filepath.Abs(manager.workspaceDir)
+		absWorkspace, _ := filepath.Abs(wsDir)
 		resumeResult, resumeErr := specworkflow.ResumeWorkflow(absWorkspace, req.FeatureName, nil)
 		if resumeErr == nil && resumeResult.Found {
 			if !isTerminalWorkflowState(resumeResult.State.State) {
@@ -475,37 +484,29 @@ func HandleStartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			// Orchestrator exists but is not running — clean it up.
 			delete(manager.orchestrators, req.FeatureName)
 		}
+		if req.WorkspaceDir != "" {
+			manager.workspaceOverrides[req.FeatureName] = wsDir
+		} else {
+			delete(manager.workspaceOverrides, req.FeatureName)
+		}
 
 		// Resolve source doc paths — if none provided, scan source-docs directory.
 		// These are paths in the global library that will be copied below.
 		globalPaths := req.SourceDocPaths
 		if len(globalPaths) == 0 {
-			globalPaths = discoverSourceDocs(manager.workspaceDir)
+			globalPaths = discoverSourceDocs(wsDir)
 		}
 
 		// Copy source docs into the per-workflow directory for isolation.
 		var sourcePaths []string
 		if len(globalPaths) > 0 {
-			copied, copyErr := copySourceDocsToWorkflow(manager.workspaceDir, req.FeatureName, globalPaths)
+			copied, copyErr := copySourceDocsToWorkflow(wsDir, req.FeatureName, globalPaths)
 			if copyErr != nil {
 				manager.mu.Unlock()
 				writeError(w, http.StatusBadRequest, fmt.Sprintf("failed to copy source docs: %v", copyErr))
 				return
 			}
 			sourcePaths = copied
-		}
-
-		// Determine workspace directory (per-workflow override or manager default).
-		wsDir := manager.workspaceDir
-		if req.WorkspaceDir != "" {
-			info, statErr := os.Stat(req.WorkspaceDir)
-			if statErr != nil || !info.IsDir() {
-				manager.mu.Unlock()
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("workspace_dir is not a valid directory: %s", req.WorkspaceDir))
-				return
-			}
-			wsDir = req.WorkspaceDir
-			manager.workspaceOverrides[req.FeatureName] = wsDir
 		}
 
 		// Create orchestrator config.
@@ -517,7 +518,7 @@ func HandleStartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			FeatureName:    req.FeatureName,
 			SourceDocPaths: sourcePaths,
 			Config:         manager.config,
-			Runner:         specworkflow.DefaultClaudeRunner(manager.workspaceDir, manager.otelPort, req.FeatureName),
+			Runner:         specworkflow.DefaultClaudeRunner(wsDir, manager.otelPort, req.FeatureName),
 			Emitter:        specworkflow.NewFeatureEmitter(manager.emitter, req.FeatureName),
 		}
 
@@ -1954,10 +1955,10 @@ func HandleReplayPhase(manager *WorkflowManager) http.HandlerFunc {
 
 		// Validate phase name.
 		validPhases := map[string]bool{
-			"discovery_merge":    true,
-			"drafting_combine":   true,
-			"review_merge":       true,
-			"task_review_merge":  true,
+			"discovery_merge":   true,
+			"drafting_combine":  true,
+			"review_merge":      true,
+			"task_review_merge": true,
 		}
 		if !validPhases[req.Phase] {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid phase %q: must be one of discovery_merge, drafting_combine, review_merge, task_review_merge", req.Phase))
@@ -2048,6 +2049,14 @@ func ValidateFeatureName(name string) error {
 	}
 	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
 		return fmt.Errorf("feature name must not contain path separator")
+	}
+	return nil
+}
+
+func validateExistingDirectory(fieldName, dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("%s is not a valid directory: %s", fieldName, dir)
 	}
 	return nil
 }

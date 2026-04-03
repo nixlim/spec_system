@@ -227,6 +227,36 @@ func TestHandleStartWorkflow_FeatureNameFromTitle(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 }
 
+func TestHandleStartWorkflow_WorkspaceOverrideCopiesSourceDocsIntoOverrideWorkspace(t *testing.T) {
+	manager, _ := setupWorkflowManager(t)
+	overrideDir := t.TempDir()
+	sourceDocsDir := filepath.Join(overrideDir, "source-docs")
+	if err := os.MkdirAll(sourceDocsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDocsDir, "requirements.md"), []byte("# Requirements"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := HandleStartWorkflow(manager)
+	body := fmt.Sprintf(`{"title":"Override Feature","description":"test","feature_name":"override-feature","workspace_dir":"%s"}`, overrideDir)
+	req := httptest.NewRequest(http.MethodPost, "/api/workflow/start", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := manager.GetWorkspaceForFeature("override-feature"); got != overrideDir {
+		t.Fatalf("workspace override not recorded: got %s want %s", got, overrideDir)
+	}
+	if _, err := os.Stat(filepath.Join(overrideDir, "specs", "override-feature", "source-docs", "requirements.md")); err != nil {
+		t.Fatalf("expected copied source doc in override workspace: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+
 // ---------------------------------------------------------------------------
 // TestHandleGateApprove
 // ---------------------------------------------------------------------------

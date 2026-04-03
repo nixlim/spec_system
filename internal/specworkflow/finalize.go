@@ -46,8 +46,7 @@ func AssembleFinalSpec(config FinalizeConfig, state *WorkflowStateJSON, tracker 
 	}
 
 	// 2. Read holdout file and append holdout evaluation scenarios.
-	holdoutName := fmt.Sprintf("%s-holdouts.md", config.FeatureName)
-	holdoutPath := filepath.Join(dir, holdoutName)
+	holdoutPath := resolveFinalizeHoldoutPath(config, state)
 	holdoutContent, err := os.ReadFile(holdoutPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -121,6 +120,17 @@ func AssembleFinalSpec(config FinalizeConfig, state *WorkflowStateJSON, tracker 
 	}
 
 	return nil
+}
+
+func resolveFinalizeHoldoutPath(config FinalizeConfig, state *WorkflowStateJSON) string {
+	dir := specDir(config)
+	if state != nil && state.Round > 0 {
+		roundPath := filepath.Join(dir, fmt.Sprintf("holdouts-round-%d.md", state.Round))
+		if _, err := os.Stat(roundPath); err == nil {
+			return roundPath
+		}
+	}
+	return filepath.Join(dir, fmt.Sprintf("%s-holdouts.md", config.FeatureName))
 }
 
 // acceptedRisk is a helper type for accepted risk entries.

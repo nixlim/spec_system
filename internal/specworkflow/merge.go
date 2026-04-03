@@ -58,11 +58,12 @@ type DedupKeyFunc func(f *Finding) string
 func SpecDedupKey(f *Finding) string {
 	section := normalizeSection(f.AffectedSection)
 	lens := strings.ToLower(strings.TrimSpace(f.Lens))
+	target := normalizeFindingTarget(f.Target)
 	principle := ""
 	if f.ConstitutionPrinciple != nil {
 		principle = strings.ToLower(strings.TrimSpace(*f.ConstitutionPrinciple))
 	}
-	return section + "|" + lens + "|" + principle
+	return section + "|" + lens + "|" + target + "|" + principle
 }
 
 // isDuplicate returns true if two findings are considered duplicates.
@@ -76,6 +77,9 @@ func isDuplicate(a, b *Finding) bool {
 		return false
 	}
 	if strings.ToLower(strings.TrimSpace(a.Lens)) != strings.ToLower(strings.TrimSpace(b.Lens)) {
+		return false
+	}
+	if normalizeFindingTarget(a.Target) != normalizeFindingTarget(b.Target) {
 		return false
 	}
 	return principlesMatch(a.ConstitutionPrinciple, b.ConstitutionPrinciple)
@@ -229,6 +233,7 @@ func MergeReviewerOutputs(outputs []*ReviewerOutput, round int, dedupKeyFn Dedup
 			Recommendation:        c.finding.Recommendation,
 			Lens:                  c.finding.Lens,
 			AffectedSection:       c.finding.AffectedSection,
+			Target:                normalizeFindingTarget(c.finding.Target),
 			ConstitutionPrinciple: c.finding.ConstitutionPrinciple,
 			Status:                "open",
 			RoundRaised:           round,

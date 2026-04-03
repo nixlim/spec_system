@@ -328,6 +328,7 @@
     { state: "DRAFTING",         label: "Draft",    gate: false },
     { state: "HUMAN_GATE_2",     label: "Gate 2",   gate: true  },
     { state: "REVIEWING",        label: "Review",   gate: false },
+    { state: "HOLDOUT",          label: "Holdout",  gate: false },
     { state: "REVISING",         label: "Revise",   gate: false },
     { state: "JUDGING",          label: "Judge",    gate: false },
     { state: "HUMAN_GATE_FINAL", label: "Gate F",   gate: true  },
@@ -377,8 +378,8 @@
     else if (workflowType === "codedoc") stages = CD_PIPELINE_STAGES;
 
     // Find the index of the current state in the pipeline (-1 if not in happy path).
-    var currentIdx = -1;
-    for (var i = 0; i < stages.length; i++) {
+    var currentIdx = getPipelineStageIndex(state, workflowType, stages);
+    for (var i = 0; currentIdx === -1 && i < stages.length; i++) {
       if (stages[i].state === state) {
         currentIdx = i;
         break;
@@ -443,6 +444,33 @@
       termStep.appendChild(termNode);
       container.appendChild(termStep);
     }
+  }
+
+  function getPipelineStageIndex(state, workflowType, stages) {
+    if (workflowType !== "spec") return -1;
+    var specStageIndex = {
+      "INIT": 0,
+      "DISCOVERY": 1,
+      "HUMAN_GATE_1": 2,
+      "DRAFTING": 3,
+      "HUMAN_GATE_2": 4,
+      "REVIEWING": 5,
+      "REVISING": 7,
+      "JUDGING": 8,
+      "HUMAN_GATE_FINAL": 9,
+      "FINALIZED": 10,
+      "TASKIFY": 11,
+      "TASK_REVIEW": 12,
+      "TASK_HUMAN_GATE": 13,
+      "COMPLETE": 14
+    };
+    if (Object.prototype.hasOwnProperty.call(specStageIndex, state)) {
+      return specStageIndex[state];
+    }
+    for (var i = 0; i < stages.length; i++) {
+      if (stages[i].state === state) return i;
+    }
+    return -1;
   }
 
   // -----------------------------------------------------------------------
@@ -599,16 +627,12 @@
       if (isTerminalState) {
         // Reset button — clears workspace so user can start fresh with same feature name
         var resetBtn = el("button", { className: "btn btn-sm", textContent: "Reset", style: "background:#ffc107;color:#212529;border-color:#ffc107;" });
-        resetBtn.addEventListener("click", (function (fname) {
+        resetBtn.addEventListener("click", (function (fname, workflowType) {
           return function (e) {
             e.stopPropagation();
             if (!confirm("Reset workflow \"" + fname + "\"? This clears the workspace so you can re-run it with the same feature name.")) return;
             resetBtn.disabled = true;
-            fetchJSON("/api/workflow/restart", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ feature_name: fname })
-            }).then(function () {
+            runWorkflowReset(workflowType, fname).then(function () {
               addActivityEntry("Workflow reset: " + fname + " — start a new workflow with the same feature name", "info");
               if (selectedFeature === fname) selectedFeature = null;
               refreshWorkflowStatusList();
@@ -618,7 +642,7 @@
               resetBtn.disabled = false;
             });
           };
-        })(featureName));
+        })(featureName, wfType));
         actionsDiv.appendChild(resetBtn);
       }
 
@@ -2077,14 +2101,10 @@
           className: "btn btn-danger btn-sm",
           textContent: "Delete"
         });
-        deleteBtn.addEventListener("click", (function (featureName) {
+        deleteBtn.addEventListener("click", (function (featureName, workflowType) {
           return function () {
             if (!confirm("Delete all files for '" + featureName + "'? This cannot be undone.")) return;
-            fetchJSON("/api/workflow/reset", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ feature_name: featureName })
-            }).then(function () {
+            runWorkflowReset(workflowType, featureName).then(function () {
               // If the deleted workflow is currently displayed, clear the status panel.
               var displayed = ($("#status-feature").textContent || "").trim();
               if (displayed === featureName) {
@@ -2104,7 +2124,7 @@
               alert("Delete failed: " + err.message);
             });
           };
-        })(f.feature_name));
+        })(f.feature_name, wfType));
         actions.appendChild(deleteBtn);
 
         // Rewind controls — stage dropdown + rewind button.
@@ -2215,6 +2235,12 @@
   function initGoalForm() {
     var form = $("#goal-form");
     var activeWfType = "spec";
+    var workspaceDirGroup = $("#goal-workspace-dir-group");
+
+    function updateWorkspaceDirVisibility() {
+      if (!workspaceDirGroup) return;
+      workspaceDirGroup.style.display = activeWfType === "spec" ? "block" : "none";
+    }
 
     // Workflow type tab switching
     $$(".workflow-type-tab").forEach(function (btn) {
@@ -2247,8 +2273,10 @@
           $("#goal-title").setAttribute("required", "required");
           $("#goal-description").setAttribute("required", "required");
         }
+        updateWorkspaceDirVisibility();
       });
     });
+    updateWorkspaceDirVisibility();
 
     // Select all / deselect all for document picker
     $("#doc-select-all").addEventListener("click", function () {
@@ -2282,7 +2310,6 @@
           spec_path: $("#cr-spec-path").value.trim() || undefined,
           task_list_path: $("#cr-task-list-path").value.trim() || undefined
         };
-        if (workspaceDir) payload.workspace_dir = workspaceDir;
       } else if (activeWfType === "codedoc") {
         url = "/api/codedoc/start";
         payload = {
@@ -2291,7 +2318,6 @@
           mode: $("#cd-mode").value,
           description: $("#cd-description").value.trim() || undefined
         };
-        if (workspaceDir) payload.workspace_dir = workspaceDir;
       } else {
         url = "/api/workflow/start";
         payload = {
@@ -2343,6 +2369,8 @@
         activeWfType = "spec";
         $("#spec-fields").style.display = "block";
         $("#cr-fields").style.display = "none";
+        $("#cd-fields").style.display = "none";
+        updateWorkspaceDirVisibility();
         // Collapse the new workflow section and refresh the list
         var details = $("#new-workflow-section");
         if (details) details.open = false;
@@ -3983,6 +4011,24 @@
   // -----------------------------------------------------------------------
   // Workflow Control Buttons (Reset)
   // -----------------------------------------------------------------------
+
+  function runWorkflowReset(workflowType, featureName) {
+    if (workflowType === "code_review") {
+      return fetchJSON("/api/codereview/" + encodeURIComponent(featureName) + "/reset", {
+        method: "POST"
+      });
+    }
+    if (workflowType === "codedoc") {
+      return fetchJSON("/api/codedoc/" + encodeURIComponent(featureName) + "/reset", {
+        method: "POST"
+      });
+    }
+    return fetchJSON("/api/workflow/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ feature_name: featureName })
+    });
+  }
 
   function initWorkflowControls() {
     var resetBtn = $("#btn-reset-workflow");

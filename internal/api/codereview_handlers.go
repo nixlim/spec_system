@@ -161,6 +161,18 @@ func HandleCRStart(manager *CodeReviewManager) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "feature_name is required")
 			return
 		}
+		if err := ValidateFeatureName(req.FeatureName); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid feature_name: %v", err))
+			return
+		}
+		if err := validateExistingDirectory("code_path", req.CodePath); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if req.WorkspaceDir != "" {
+			writeError(w, http.StatusBadRequest, "workspace_dir overrides are not supported for code review workflows")
+			return
+		}
 
 		// Check for duplicate feature name.
 		manager.mu.Lock()
@@ -170,21 +182,9 @@ func HandleCRStart(manager *CodeReviewManager) http.HandlerFunc {
 			return
 		}
 
-		// Determine workspace directory (per-workflow override or manager default).
-		wsDir := manager.workspaceDir
-		if req.WorkspaceDir != "" {
-			info, statErr := os.Stat(req.WorkspaceDir)
-			if statErr != nil || !info.IsDir() {
-				manager.mu.Unlock()
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("workspace_dir is not a valid directory: %s", req.WorkspaceDir))
-				return
-			}
-			wsDir = req.WorkspaceDir
-		}
-
 		// Create orchestrator with runners and emitter.
 		orch := codereview.NewCodeReviewOrchestrator(codereview.CROrchestratorConfig{
-			WorkspaceDir: wsDir,
+			WorkspaceDir: manager.workspaceDir,
 			Config:       manager.config,
 			Runner:       manager.runner,
 			CodexRunner:  manager.codexRunner,

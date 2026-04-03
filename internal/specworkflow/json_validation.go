@@ -160,3 +160,22 @@ func DiscoveryOutputValidator() JSONValidator {
 		return result
 	}
 }
+
+// HoldoutOutputValidator returns a JSONValidator for HoldoutOutput.
+func HoldoutOutputValidator(expectedRound int, expectedHoldoutFile string) JSONValidator {
+	return func(data []byte) []string {
+		var output HoldoutOutput
+		if err := json.Unmarshal(data, &output); err != nil {
+			return []string{fmt.Sprintf("invalid JSON structure: %v", err)}
+		}
+		errs := ValidateHoldoutOutput(&output, expectedRound, expectedHoldoutFile)
+		if len(errs) == 0 {
+			return nil
+		}
+		result := make([]string, len(errs))
+		for i, e := range errs {
+			result[i] = e.Error()
+		}
+		return result
+	}
+}

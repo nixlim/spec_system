@@ -401,6 +401,14 @@ func (pb *PromptBuilder) BuildReviewerPrompt(lensGroup string, round int, specPa
 	b.WriteString("## Specification Under Review\n\n")
 	fmt.Fprintf(&b, "Read and review the specification at: %s\n\n", specPath)
 
+	if round > 1 {
+		holdoutPath := filepath.Join(pb.specDir(), fmt.Sprintf("holdouts-round-%d.md", round-1))
+		b.WriteString("## Prior Round Holdouts\n\n")
+		fmt.Fprintf(&b, "Also read the latest holdout scenarios from: %s\n\n", holdoutPath)
+		b.WriteString("If a finding is about the specification itself, set `target` to `spec`.\n")
+		b.WriteString("If a finding is about the holdout scenarios or their coverage, set `target` to `holdout`.\n\n")
+	}
+
 	// Output schema.
 	b.WriteString("## Output Schema\n\n")
 	b.WriteString("You MUST produce valid JSON conforming to the ReviewerOutput schema:\n")
@@ -408,7 +416,7 @@ func (pb *PromptBuilder) BuildReviewerPrompt(lensGroup string, round int, specPa
 	b.WriteString("- agent (string, required): set to \"reviewer\"\n")
 	fmt.Fprintf(&b, "- round (int, required): set to %d\n", round)
 	b.WriteString("- lenses_applied (array of string, required, non-empty)\n")
-	b.WriteString("- findings (array of Finding): id, description, severity, impact, recommendation, lens, affected_section, constitution_principle (optional)\n")
+	b.WriteString("- findings (array of Finding): id, description, severity, impact, recommendation, lens, affected_section, target (spec|holdout), constitution_principle (optional)\n")
 	b.WriteString("- structural_integrity (object): performed (bool), checks (array of IntegrityCheck)\n")
 	b.WriteString("- markdown_report_file (string, required)\n\n")
 
@@ -419,6 +427,44 @@ func (pb *PromptBuilder) BuildReviewerPrompt(lensGroup string, round int, specPa
 	}
 	b.WriteString("## Output File\n\n")
 	fmt.Fprintf(&b, "Write your JSON output to: %s\n", outPath)
+
+	return b.String(), nil
+}
+
+// BuildHoldoutPrompt constructs the prompt for a holdout-generation agent.
+// It references the current spec and merged findings, and instructs the agent
+// to write both markdown scenarios and structured JSON metadata.
+func (pb *PromptBuilder) BuildHoldoutPrompt(specPath, mergedFindingsPath string, round int, outputJSONPath, holdoutMDPath string) (string, error) {
+	var b strings.Builder
+
+	b.WriteString("# Holdout Agent\n\n")
+	b.WriteString("You are the Holdout agent in the adversarial spec review workflow.\n")
+	fmt.Fprintf(&b, "This is holdout generation round %d.\n\n", round)
+	b.WriteString("Your task is to generate realistic evaluation scenarios that stress the specification, ")
+	b.WriteString("especially around the areas highlighted by the merged review findings.\n\n")
+
+	b.WriteString("## Inputs\n\n")
+	fmt.Fprintf(&b, "Read the current specification from: %s\n", specPath)
+	fmt.Fprintf(&b, "Read the merged findings from: %s\n\n", mergedFindingsPath)
+
+	b.WriteString("## Output Schema\n\n")
+	b.WriteString("You MUST produce valid JSON conforming to the HoldoutOutput schema:\n")
+	b.WriteString("- schema_version (string, required)\n")
+	b.WriteString("- agent (string, required)\n")
+	fmt.Fprintf(&b, "- round (int, required): set to %d\n", round)
+	b.WriteString("- scenario_count (int, required, > 0)\n")
+	b.WriteString("- categories (array of string, required, non-empty)\n")
+	b.WriteString("- holdout_file (string, required): MUST exactly match the markdown output path below\n\n")
+
+	b.WriteString("## Output Files\n\n")
+	fmt.Fprintf(&b, "1. Write the holdout markdown to: %s\n", holdoutMDPath)
+	fmt.Fprintf(&b, "2. Write the HoldoutOutput JSON to: %s\n\n", outputJSONPath)
+
+	b.WriteString("Rules:\n")
+	b.WriteString("- The JSON must be pure JSON with no markdown fences or commentary\n")
+	b.WriteString("- The holdout_file field must exactly equal the markdown path above\n")
+	b.WriteString("- The markdown file must exist before you finish\n")
+	b.WriteString("- The markdown should contain the full holdout scenarios, not just headings\n")
 
 	return b.String(), nil
 }

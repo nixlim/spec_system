@@ -110,6 +110,8 @@ type Finding struct {
 	Lens string `json:"lens"`
 	// AffectedSection is the spec section affected.
 	AffectedSection string `json:"affected_section"`
+	// Target indicates whether the finding applies to the spec or the holdout set.
+	Target string `json:"target,omitempty"`
 	// ConstitutionPrinciple optionally links the finding to a constitution
 	// principle.
 	ConstitutionPrinciple *string `json:"constitution_principle,omitempty"`
@@ -207,6 +209,8 @@ type MergedFinding struct {
 	Lens string `json:"lens"`
 	// AffectedSection is the spec section affected.
 	AffectedSection string `json:"affected_section"`
+	// Target indicates whether the finding applies to the spec or the holdout set.
+	Target string `json:"target,omitempty"`
 	// ConstitutionPrinciple optionally links to a constitution principle.
 	ConstitutionPrinciple *string `json:"constitution_principle,omitempty"`
 	// Status is the current lifecycle status (e.g. "open", "closed").
@@ -361,6 +365,7 @@ var (
 	integrationDirs    = map[string]bool{"inbound": true, "outbound": true, "bidirectional": true}
 	priorityLevels     = map[string]bool{"P0": true, "P1": true, "P2": true, "P3": true, "P4": true}
 	confidenceLevels   = map[string]bool{"high": true, "medium": true, "low": true}
+	findingTargets     = map[string]bool{"spec": true, "holdout": true}
 	ambiguityIDPattern = regexp.MustCompile(`^AMB-W-\d{3}$`)
 	changeActions      = map[string]bool{"revised": true, "dismissed": true}
 	issueStatuses      = map[string]bool{"verified": true, "reopened": true, "dismissed": true}
@@ -378,6 +383,14 @@ func requirePositive(errs *[]error, field string, value int) {
 	if value < 1 {
 		*errs = append(*errs, fmt.Errorf("%s must be >= 1, got %d", field, value))
 	}
+}
+
+func normalizeFindingTarget(target string) string {
+	target = strings.ToLower(strings.TrimSpace(target))
+	if target == "" {
+		return "spec"
+	}
+	return target
 }
 
 // ---------------------------------------------------------------------------
@@ -505,6 +518,12 @@ func ValidateReviewerOutput(o *ReviewerOutput) (validFindings []Finding, rejecte
 		requireNonEmpty(&errs, fmt.Sprintf("findings[%d].impact", i), f.Impact)
 		requireNonEmpty(&errs, fmt.Sprintf("findings[%d].lens", i), f.Lens)
 		requireNonEmpty(&errs, fmt.Sprintf("findings[%d].affected_section", i), f.AffectedSection)
+		f.Target = normalizeFindingTarget(f.Target)
+		if !findingTargets[f.Target] {
+			rejected++
+			errs = append(errs, fmt.Errorf("findings[%d] (id=%q): rejected — target must be spec|holdout, got %q", i, f.ID, f.Target))
+			continue
+		}
 
 		// Severity is already normalised to uppercase by the Severity
 		// UnmarshalJSON. No extra work needed here — the type guarantees it.

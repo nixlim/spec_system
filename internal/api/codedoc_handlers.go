@@ -81,6 +81,36 @@ func (m *CodedocManager) getOrchestrator(featureName string) *codedoc.CodedocOrc
 	return m.orchestrators[featureName]
 }
 
+func (m *CodedocManager) loadOrchestratorFromDisk(featureName string) (*codedoc.CodedocOrchestrator, *codedoc.CDStateJSON, error) {
+	featureDir := filepath.Join(m.workspaceDir, "codedoc", featureName)
+	state, err := codedoc.LoadCDState(featureDir)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if orch := m.orchestrators[featureName]; orch != nil {
+		return orch, orch.State(), nil
+	}
+
+	orch := codedoc.NewCodedocOrchestrator(codedoc.CodedocOrchestratorConfig{
+		WorkspaceDir: m.workspaceDir,
+		FeatureName:  featureName,
+		CodePath:     state.CodePath,
+		Mode:         state.Mode,
+		Config:       m.config,
+		Runner:       m.runner,
+		CodexRunner:  m.codexRunner,
+		MergeRunner:  m.mergeRunner,
+		Emitter:      m.emitter,
+	})
+	orch.RestoreFromState(state)
+	m.orchestrators[featureName] = orch
+	return orch, state, nil
+}
+
 // GetAllOrchestrators returns a snapshot of all active orchestrators.
 func (m *CodedocManager) GetAllOrchestrators() map[string]*codedoc.CodedocOrchestrator {
 	m.mu.RLock()
@@ -113,10 +143,11 @@ func extractCDFeature(path string) string {
 
 // cdStartRequest is the JSON body for POST /api/codedoc/start.
 type cdStartRequest struct {
-	FeatureName string `json:"feature_name"`
-	CodePath    string `json:"code_path"`
-	Mode        string `json:"mode"`
-	Description string `json:"description,omitempty"`
+	FeatureName  string `json:"feature_name"`
+	CodePath     string `json:"code_path"`
+	Mode         string `json:"mode"`
+	Description  string `json:"description,omitempty"`
+	WorkspaceDir string `json:"workspace_dir,omitempty"`
 }
 
 // cdGateRequest is the JSON body for POST /api/codedoc/{feature}/gate.
@@ -157,6 +188,18 @@ func HandleCDStart(manager *CodedocManager) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "feature_name is required")
 			return
 		}
+		if err := ValidateFeatureName(req.FeatureName); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid feature_name: %v", err))
+			return
+		}
+		if err := validateExistingDirectory("code_path", req.CodePath); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if req.WorkspaceDir != "" {
+			writeError(w, http.StatusBadRequest, "workspace_dir overrides are not supported for codedoc workflows")
+			return
+		}
 
 		// Default mode to "full".
 		mode := req.Mode
@@ -174,6 +217,15 @@ func HandleCDStart(manager *CodedocManager) http.HandlerFunc {
 			writeError(w, http.StatusConflict, fmt.Sprintf("codedoc workflow already exists for feature: %s", req.FeatureName))
 			return
 		}
+		if existingState, err := codedoc.LoadCDState(filepath.Join(manager.workspaceDir, "codedoc", req.FeatureName)); err == nil {
+			manager.mu.Unlock()
+			writeJSON(w, http.StatusConflict, map[string]interface{}{
+				"error":        fmt.Sprintf("codedoc workflow already exists on disk for feature: %s", req.FeatureName),
+				"feature_name": req.FeatureName,
+				"resume_state": existingState.State.String(),
+			})
+			return
+		}
 
 		orch := codedoc.NewCodedocOrchestrator(codedoc.CodedocOrchestratorConfig{
 			WorkspaceDir: manager.workspaceDir,
@@ -187,6 +239,11 @@ func HandleCDStart(manager *CodedocManager) http.HandlerFunc {
 			MergeRunner:  manager.mergeRunner,
 			Emitter:      manager.emitter,
 		})
+		if err := orch.EnsurePersisted(); err != nil {
+			manager.mu.Unlock()
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("persist codedoc workflow: %v", err))
+			return
+		}
 
 		manager.orchestrators[req.FeatureName] = orch
 		manager.mu.Unlock()
@@ -262,10 +319,7 @@ func buildGatePayload(orch *codedoc.CodedocOrchestrator) interface{} {
 	case codedoc.CDHumanGateDraft:
 		return codedoc.DraftGatePayload{}
 	case codedoc.CDHumanGateFinal:
-		return codedoc.FinalGatePayload{
-			TotalUnresolved: 0, // populated from state
-			DriftWarning:    "", // populated by caller if available
-		}
+		return orch.FinalGatePayload()
 	default:
 		return nil
 	}
@@ -274,12 +328,12 @@ func buildGatePayload(orch *codedoc.CodedocOrchestrator) interface{} {
 // buildCDStatusResponse constructs the status response from workflow state.
 func buildCDStatusResponse(state *codedoc.CDStateJSON) map[string]interface{} {
 	return map[string]interface{}{
-		"state":                state.State.String(),
-		"round":                state.Round,
-		"mode":                 state.Mode,
-		"cost_usd":             state.CumulativeCostUSD,
-		"wall_clock_seconds":   state.CumulativeWallClockSeconds,
-		"agent_invocations":    state.AgentInvocations,
+		"state":                 state.State.String(),
+		"round":                 state.Round,
+		"mode":                  state.Mode,
+		"cost_usd":              state.CumulativeCostUSD,
+		"wall_clock_seconds":    state.CumulativeWallClockSeconds,
+		"agent_invocations":     state.AgentInvocations,
 		"had_critical_findings": state.HadCriticalFindings,
 	}
 }
@@ -306,8 +360,12 @@ func HandleCDGate(manager *CodedocManager) http.HandlerFunc {
 
 		orch := manager.getOrchestrator(featureName)
 		if orch == nil {
-			writeError(w, http.StatusNotFound, fmt.Sprintf("no codedoc workflow found for feature: %s", featureName))
-			return
+			var err error
+			orch, _, err = manager.loadOrchestratorFromDisk(featureName)
+			if err != nil {
+				writeError(w, http.StatusNotFound, fmt.Sprintf("no codedoc workflow found for feature: %s", featureName))
+				return
+			}
 		}
 
 		var req cdGateRequest
@@ -414,31 +472,13 @@ func HandleCDResume(manager *CodedocManager) http.HandlerFunc {
 		}
 
 		orch := manager.getOrchestrator(featureName)
-
-		// If no in-memory orchestrator, try loading from disk.
 		if orch == nil {
-			featureDir := filepath.Join(manager.workspaceDir, "codedoc", featureName)
-			state, err := codedoc.LoadCDState(featureDir)
+			var err error
+			orch, _, err = manager.loadOrchestratorFromDisk(featureName)
 			if err != nil {
 				writeError(w, http.StatusNotFound, fmt.Sprintf("no codedoc workflow found for feature: %s", featureName))
 				return
 			}
-
-			manager.mu.Lock()
-			orch = codedoc.NewCodedocOrchestrator(codedoc.CodedocOrchestratorConfig{
-				WorkspaceDir: manager.workspaceDir,
-				FeatureName:  featureName,
-				CodePath:     state.CodePath,
-				Mode:         state.Mode,
-				Config:       manager.config,
-				Runner:       manager.runner,
-				CodexRunner:  manager.codexRunner,
-				MergeRunner:  manager.mergeRunner,
-				Emitter:      manager.emitter,
-			})
-			orch.RestoreFromState(state)
-			manager.orchestrators[featureName] = orch
-			manager.mu.Unlock()
 		}
 
 		currentState := orch.State().State

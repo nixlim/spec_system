@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -160,30 +161,15 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 // fail, returns an error for escalation.
 func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specDir string, merged *MergedFindings) error {
 	specPath := o.currentSpecPath(state)
-	specContent, err := os.ReadFile(specPath)
-	if err != nil {
-		log.Printf("[orchestrator] warning: cannot read spec for holdout generation: %v", err)
-		return nil // non-fatal: spec read failure shouldn't block the review flow
-	}
-
-	// Build holdout prompt from spec content and findings summary.
-	holdoutPrompt := fmt.Sprintf("Generate holdout evaluation scenarios for this specification.\n\n"+
-		"## Spec Content\n\n%s\n\n## Findings Summary\n\nRound %d: %d findings after dedup (%d critical, %d major).\n",
-		string(specContent), state.Round, merged.TotalAfterDedup,
-		state.FindingsSummary.OpenCritical, state.FindingsSummary.OpenMajor)
-
+	mergedFindingsPath := filepath.Join(specDir, fmt.Sprintf("merged-findings-round-%d.json", state.Round))
 	timeout := o.config.HoldoutTimeoutSeconds
-
-	type holdoutResult struct {
-		provider string
-		mdPath   string
-		jsonPath string
-		cost     float64
-		err      error
+	maxAttempts := o.config.MaxRetries
+	if maxAttempts < 1 {
+		maxAttempts = 1
 	}
 
 	var wg sync.WaitGroup
-	resultsCh := make(chan holdoutResult, 2)
+	resultsCh := make(chan holdoutDispatchResult, 2)
 
 	// Track and emit dispatch events for holdout agents.
 	o.SetAgentStatus("holdout-claude", "running")
@@ -194,20 +180,13 @@ func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specD
 	}
 
 	// Claude holdout agent — uses o.runner.Run() directly with configured
-	// holdout timeout (not dispatchAgent which hardcodes 120s).
+	// holdout timeout plus explicit JSON contract validation.
 	claudeJSONPath := filepath.Join(specDir, fmt.Sprintf("holdout-claude-round-%d.json", state.Round))
 	claudeMDPath := filepath.Join(specDir, fmt.Sprintf("holdouts-claude-round-%d.md", state.Round))
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		exitCode, stderr, cost, _, runErr := o.runner.Run(holdoutPrompt, claudeJSONPath, timeout)
-		var dispatchErr error
-		if runErr != nil {
-			dispatchErr = runErr
-		} else if exitCode != 0 {
-			dispatchErr = fmt.Errorf("claude holdout exited with code %d: %s", exitCode, stderr)
-		}
-		resultsCh <- holdoutResult{provider: "claude", mdPath: claudeMDPath, jsonPath: claudeJSONPath, cost: cost, err: dispatchErr}
+		resultsCh <- o.runHoldoutProvider("claude", o.runner, specPath, mergedFindingsPath, state.Round, claudeJSONPath, claudeMDPath, timeout, maxAttempts)
 	}()
 
 	// Codex holdout agent (when available).
@@ -217,18 +196,7 @@ func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specD
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			exitCode, stderr, _, _, runErr := o.codexHoldoutRunner.Run(
-				holdoutPrompt, codexJSONPath, timeout)
-			var dispatchErr error
-			if runErr != nil {
-				dispatchErr = runErr
-			} else if exitCode != 0 {
-				dispatchErr = fmt.Errorf("codex holdout exited with code %d: %s", exitCode, stderr)
-			}
-			resultsCh <- holdoutResult{
-				provider: "codex", mdPath: codexMDPath, jsonPath: codexJSONPath,
-				cost: 0, err: dispatchErr,
-			}
+			resultsCh <- o.runHoldoutProvider("codex", o.codexHoldoutRunner, specPath, mergedFindingsPath, state.Round, codexJSONPath, codexMDPath, timeout, maxAttempts)
 		}()
 	}
 
@@ -236,7 +204,7 @@ func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specD
 	close(resultsCh)
 
 	// Collect results and emit completion events.
-	var claudeOK, codexOK bool
+	var claudeOutput, codexOutput *HoldoutOutput
 	var claudeMD, codexMD string
 	for r := range resultsCh {
 		state.CumulativeCostUSD += r.cost
@@ -246,43 +214,151 @@ func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specD
 			o.emitter.Emit(NewAgentCompleteEvent("holdout-"+r.provider, state.Round, false, 0, r.cost))
 			continue
 		}
-		// Try to read the markdown file written by the agent.
-		// The agent may have written only the JSON output (via --output-last-message)
-		// without a separate markdown file. If the runner succeeded but no MD
-		// exists, treat as success with empty markdown (the JSON is what matters).
-		var md string
-		if mdContent, readErr := os.ReadFile(r.mdPath); readErr == nil {
-			md = string(mdContent)
-		} else {
-			log.Printf("[orchestrator] holdout-%s: no markdown file at %s (JSON output exists)", r.provider, r.mdPath)
-		}
 		o.SetAgentStatus("holdout-"+r.provider, "done")
 		o.emitter.Emit(NewAgentCompleteEvent("holdout-"+r.provider, state.Round, true, 0, r.cost))
 		switch r.provider {
 		case "claude":
-			claudeOK = true
-			claudeMD = md
+			claudeOutput = r.output
+			claudeMD = r.md
 		case "codex":
-			codexOK = true
-			codexMD = md
+			codexOutput = r.output
+			codexMD = r.md
 		}
 	}
 
 	// Merge holdout outputs with provider attribution.
-	if claudeOK || codexOK {
-		mergedMD := MergeHoldoutMarkdown(state.Round, claudeMD, codexMD, claudeOK, codexOK)
-		mergedPath := filepath.Join(specDir, fmt.Sprintf("holdouts-round-%d.md", state.Round))
-		if writeErr := os.WriteFile(mergedPath, []byte(mergedMD), 0o644); writeErr != nil {
-			log.Printf("[orchestrator] warning: failed to write merged holdouts: %v", writeErr)
-		} else {
-			log.Printf("[orchestrator] holdout generation complete: claude=%v codex=%v merged=%s",
-				claudeOK, codexOK, mergedPath)
-		}
-		return nil
+	claudeOK := claudeOutput != nil
+	codexOK := codexOutput != nil
+	if !claudeOK && !codexOK {
+		return fmt.Errorf("holdout generation failed: all providers failed — escalation required")
 	}
 
-	// Both providers failed — escalate per spec US-8 Acceptance Scenario 5.
-	return fmt.Errorf("holdout generation failed: all providers failed — escalation required")
+	mergedMD := MergeHoldoutMarkdown(state.Round, claudeMD, codexMD, claudeOK, codexOK)
+	mergedPath := filepath.Join(specDir, fmt.Sprintf("holdouts-round-%d.md", state.Round))
+	if err := os.WriteFile(mergedPath, []byte(mergedMD), 0o644); err != nil {
+		return fmt.Errorf("write merged holdouts: %w", err)
+	}
+	if _, err := os.Stat(mergedPath); err != nil {
+		return fmt.Errorf("merged holdout markdown missing: %w", err)
+	}
+
+	finalOutput := mergeHoldoutOutputs(state.Round, mergedPath, claudeOutput, codexOutput)
+	if errs := ValidateHoldoutOutput(&finalOutput, state.Round, mergedPath); len(errs) > 0 {
+		msgs := make([]string, len(errs))
+		for i, err := range errs {
+			msgs[i] = err.Error()
+		}
+		return fmt.Errorf("validate merged holdout output: %s", strings.Join(msgs, "; "))
+	}
+
+	finalJSONPath := filepath.Join(specDir, fmt.Sprintf("holdout-round-%d.json", state.Round))
+	data, err := json.MarshalIndent(finalOutput, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal merged holdout output: %w", err)
+	}
+	if err := os.WriteFile(finalJSONPath, data, 0o644); err != nil {
+		return fmt.Errorf("write merged holdout output: %w", err)
+	}
+
+	log.Printf("[orchestrator] holdout generation complete: claude=%v codex=%v merged=%s",
+		claudeOK, codexOK, mergedPath)
+	_ = merged.TotalAfterDedup
+	return nil
+}
+
+type holdoutDispatchResult struct {
+	provider string
+	output   *HoldoutOutput
+	md       string
+	cost     float64
+	err      error
+}
+
+func (o *Orchestrator) runHoldoutProvider(provider string, runner AgentRunner, specPath, mergedFindingsPath string, round int, outputJSONPath, expectedMDPath string, timeout, maxAttempts int) holdoutDispatchResult {
+	cfg := ValidateAndRetryConfig{
+		AgentName:      "holdout-" + provider,
+		MaxAttempts:    maxAttempts,
+		OutputPath:     outputJSONPath,
+		TimeoutSeconds: timeout,
+		Runner:         runner,
+		Validator:      HoldoutOutputValidator(round, expectedMDPath),
+		BuildPrompt: func(validationErrors []string) string {
+			basePrompt, err := o.promptBuilder.BuildHoldoutPrompt(specPath, mergedFindingsPath, round, outputJSONPath, expectedMDPath)
+			if err != nil {
+				return AppendValidationErrorsToPrompt(fmt.Sprintf("prompt build failed: %v", err), validationErrors)
+			}
+			return AppendValidationErrorsToPrompt(basePrompt, validationErrors)
+		},
+	}
+
+	result, err := RunWithValidation(cfg)
+	if err != nil {
+		return holdoutDispatchResult{provider: provider, err: err}
+	}
+	if result == nil {
+		return holdoutDispatchResult{provider: provider, err: fmt.Errorf("holdout validation returned no result")}
+	}
+	if result.Data == nil {
+		return holdoutDispatchResult{
+			provider: provider,
+			cost:     result.TotalCost,
+			err:      fmt.Errorf("holdout validation failed: %s", strings.Join(result.LastErrors, "; ")),
+		}
+	}
+
+	var output HoldoutOutput
+	if err := json.Unmarshal(result.Data, &output); err != nil {
+		return holdoutDispatchResult{
+			provider: provider,
+			cost:     result.TotalCost,
+			err:      fmt.Errorf("parse validated holdout output: %w", err),
+		}
+	}
+
+	mdData, err := os.ReadFile(output.HoldoutFile)
+	if err != nil {
+		return holdoutDispatchResult{
+			provider: provider,
+			cost:     result.TotalCost,
+			err:      fmt.Errorf("read holdout markdown: %w", err),
+		}
+	}
+
+	return holdoutDispatchResult{
+		provider: provider,
+		output:   &output,
+		md:       string(mdData),
+		cost:     result.TotalCost,
+	}
+}
+
+func mergeHoldoutOutputs(round int, mergedPath string, outputs ...*HoldoutOutput) HoldoutOutput {
+	categories := make([]string, 0, 8)
+	seen := make(map[string]struct{})
+	totalScenarios := 0
+
+	for _, output := range outputs {
+		if output == nil {
+			continue
+		}
+		totalScenarios += output.ScenarioCount
+		for _, category := range output.Categories {
+			if _, ok := seen[category]; ok {
+				continue
+			}
+			seen[category] = struct{}{}
+			categories = append(categories, category)
+		}
+	}
+
+	return HoldoutOutput{
+		SchemaVersion: "1.0",
+		Agent:         "holdout-merge",
+		Round:         round,
+		ScenarioCount: totalScenarios,
+		Categories:    categories,
+		HoldoutFile:   mergedPath,
+	}
 }
 
 // handleRevising dispatches the revision agent to address findings and
@@ -290,8 +366,13 @@ func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specD
 func (o *Orchestrator) handleRevising(state *WorkflowStateJSON, specDir string) error {
 	specPath := o.currentSpecPath(state)
 	mergedPath := filepath.Join(specDir, fmt.Sprintf("merged-findings-round-%d.json", state.Round))
+	revisionInputPath := filepath.Join(specDir, fmt.Sprintf("merged-findings-spec-round-%d.json", state.Round))
 
-	prompt, err := o.promptBuilder.BuildReviserPrompt(specPath, mergedPath, state.Round)
+	if err := writeRevisionFindingsInput(mergedPath, revisionInputPath); err != nil {
+		return fmt.Errorf("prepare revision findings: %w", err)
+	}
+
+	prompt, err := o.promptBuilder.BuildReviserPrompt(specPath, revisionInputPath, state.Round)
 	if err != nil {
 		return fmt.Errorf("build reviser prompt: %w", err)
 	}
@@ -365,6 +446,37 @@ func (o *Orchestrator) handleRevising(state *WorkflowStateJSON, specDir string) 
 		return fmt.Errorf("transition REVISING -> JUDGING: %w", err)
 	}
 	return nil
+}
+
+func writeRevisionFindingsInput(sourcePath, outputPath string) error {
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return err
+	}
+
+	var merged MergedFindings
+	if err := json.Unmarshal(data, &merged); err != nil {
+		return err
+	}
+
+	filtered := merged
+	filteredFindings := make([]MergedFinding, 0, len(merged.Findings))
+	for _, finding := range merged.Findings {
+		if normalizeFindingTarget(finding.Target) == "holdout" {
+			continue
+		}
+		finding.Target = normalizeFindingTarget(finding.Target)
+		filteredFindings = append(filteredFindings, finding)
+	}
+	filtered.Findings = filteredFindings
+	filtered.TotalAfterDedup = len(filteredFindings)
+	filtered.TotalFindings = len(filteredFindings)
+
+	out, err := json.MarshalIndent(filtered, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(outputPath, out, 0o644)
 }
 
 // handleJudging dispatches the judge agent, processes its verdict, checks

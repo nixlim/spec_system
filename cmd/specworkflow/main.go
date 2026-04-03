@@ -113,6 +113,10 @@ func main() {
 			cdConfig = cdWrapper.Codedoc
 		}
 	}
+	config, err = resolveStartupSpecConfig(config)
+	if err != nil {
+		log.Fatalf("spec workflow startup configuration invalid: %v", err)
+	}
 
 	log.Printf("[codedoc] config loaded (max_rounds=%d, mode=%s, cost_budget=$%.2f)",
 		cdConfig.MaxRounds, cdConfig.DefaultMode, cdConfig.MaxCostUSD)
@@ -445,4 +449,51 @@ func findStaticDir() string {
 	// Fall back — the FileServer will return 404 for missing files.
 	log.Println("WARNING: static/ directory not found; dashboard will not be served")
 	return "static"
+}
+
+func resolveStartupSpecConfig(cfg specworkflow.SpecWorkflowConfig) (specworkflow.SpecWorkflowConfig, error) {
+	resolved := cfg
+	detected := detectDefaultSkillPaths()
+	if resolved.SkillPaths.PlanSpec == "" {
+		resolved.SkillPaths.PlanSpec = detected.PlanSpec
+	}
+	if resolved.SkillPaths.GrillSpec == "" {
+		resolved.SkillPaths.GrillSpec = detected.GrillSpec
+	}
+	if resolved.SkillPaths.PlanSpec == "" || resolved.SkillPaths.GrillSpec == "" {
+		return resolved, fmt.Errorf("missing required spec workflow skills: set skill_paths.plan_spec and skill_paths.grill_spec, or install plan-spec and grill-spec under ~/.agents/skills")
+	}
+	if err := resolved.Validate(); err != nil {
+		return resolved, err
+	}
+	return resolved, nil
+}
+
+func detectDefaultSkillPaths() specworkflow.SkillPaths {
+	roots := []string{
+		".agents/skills",
+		".claude/skills",
+	}
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		roots = append([]string{
+			filepath.Join(homeDir, ".agents", "skills"),
+			filepath.Join(homeDir, ".codex", "skills"),
+		}, roots...)
+	}
+	for _, root := range roots {
+		planSpec := filepath.Join(root, "plan-spec")
+		grillSpec := filepath.Join(root, "grill-spec")
+		if isDir(planSpec) && isDir(grillSpec) {
+			return specworkflow.SkillPaths{
+				PlanSpec:  planSpec,
+				GrillSpec: grillSpec,
+			}
+		}
+	}
+	return specworkflow.SkillPaths{}
+}
+
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }

@@ -173,6 +173,7 @@ func (o *CodedocOrchestrator) RestoreFromState(state *CDStateJSON) {
 	o.featureName = state.FeatureName
 	o.codePath = state.CodePath
 	o.mode = state.Mode
+	o.loadArtifactsForState(state)
 }
 
 // ResetWorkspace deletes the feature directory from disk.
@@ -207,8 +208,18 @@ func (o *CodedocOrchestrator) persistState() error {
 	if err != nil {
 		return fmt.Errorf("marshalling workflow state: %w", err)
 	}
+	if err := os.MkdirAll(o.featureDir, 0o755); err != nil {
+		return fmt.Errorf("creating feature dir: %w", err)
+	}
 	path := filepath.Join(o.featureDir, "workflow-state.json")
 	return os.WriteFile(path, data, 0o644)
+}
+
+// EnsurePersisted creates the feature directory and writes the current
+// workflow state to disk. API handlers use this before launching background
+// execution so restarts can recover the workflow immediately.
+func (o *CodedocOrchestrator) EnsurePersisted() error {
+	return o.persistState()
 }
 
 func (o *CodedocOrchestrator) emitEvent(eventType string, data interface{}) {
@@ -260,6 +271,38 @@ func (o *CodedocOrchestrator) loadMergedFindings(path string) {
 	if json.Unmarshal(data, &merged) == nil {
 		o.mergedFindings = merged.Findings
 	}
+}
+
+func (o *CodedocOrchestrator) loadArtifactsForState(state *CDStateJSON) {
+	if state == nil {
+		return
+	}
+
+	discoveryPath := filepath.Join(o.featureDir, "discovery-output.json")
+	drafterPath := filepath.Join(o.featureDir, "drafter-output.json")
+	mergedPath := filepath.Join(o.featureDir, fmt.Sprintf("merged-findings-round-%d.json", maxInt(state.Round, 1)))
+
+	switch state.State {
+	case CDHumanGateScope, CDDrafting, CDSanitising, CDHumanGateDraft, CDReviewing, CDRevising, CDJudging, CDHumanGateFinal, CDWriting, CDComplete, CDError:
+		o.loadDiscoveryOutput(discoveryPath)
+	}
+
+	switch state.State {
+	case CDHumanGateDraft, CDReviewing, CDRevising, CDJudging, CDHumanGateFinal, CDWriting, CDComplete, CDError:
+		o.loadDrafterOutput(drafterPath)
+	}
+
+	switch state.State {
+	case CDReviewing, CDRevising, CDJudging, CDHumanGateFinal, CDWriting, CDComplete, CDError:
+		o.loadMergedFindings(mergedPath)
+	}
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // collectDraftFiles reads all files from the draft directory into a map.

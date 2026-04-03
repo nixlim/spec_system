@@ -53,8 +53,8 @@ type testGitProvider struct {
 	sha    string
 }
 
-func (g *testGitProvider) IsGitRepo(path string) bool           { return g.isRepo }
-func (g *testGitProvider) GetBranch(path string) (string, error) { return g.branch, nil }
+func (g *testGitProvider) IsGitRepo(path string) bool             { return g.isRepo }
+func (g *testGitProvider) GetBranch(path string) (string, error)  { return g.branch, nil }
 func (g *testGitProvider) GetHeadSHA(path string) (string, error) { return g.sha, nil }
 
 func postJSON(handler http.HandlerFunc, path string, body interface{}) *httptest.ResponseRecorder {
@@ -147,6 +147,24 @@ func TestCodeReview_Start_DuplicateFeatureName(t *testing.T) {
 
 	if rr.Code != http.StatusConflict {
 		t.Errorf("expected 409, got %d", rr.Code)
+	}
+}
+
+func TestCodeReview_Start_RejectsWorkspaceOverride(t *testing.T) {
+	manager, _ := newTestCRManager(t)
+	handler := HandleCRStart(manager)
+	rr := postJSON(handler, "/api/codereview/start", crStartRequest{
+		CodePath:     t.TempDir(),
+		FeatureName:  "test-feature",
+		WorkspaceDir: t.TempDir(),
+	})
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	body := decodeBody(t, rr)
+	if !strings.Contains(body["error"].(string), "workspace_dir overrides are not supported") {
+		t.Fatalf("unexpected error: %v", body["error"])
 	}
 }
 

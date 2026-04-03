@@ -30,7 +30,6 @@ func VersionedCombinedFilename(base string, version int, ext string) string {
 	return fmt.Sprintf("%s-combined-v%d%s", base, version, ext)
 }
 
-
 // persistComment appends a human reviewer comment to human-comments.json
 // in the spec directory. Comments accumulate across gate interactions so
 // downstream agents have the full history. No-op if comment is empty.
@@ -297,6 +296,7 @@ func findingsToMerged(findings []Finding, agent string, round int) []MergedFindi
 			Recommendation:  f.Recommendation,
 			Lens:            f.Lens,
 			AffectedSection: f.AffectedSection,
+			Target:          normalizeFindingTarget(f.Target),
 			Status:          "open",
 			RoundRaised:     round,
 		})

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/foundry-zero/adversarial-spec-system/internal/codedoc"
 )
@@ -179,6 +180,60 @@ func TestCodedocHandlers_Start_MissingFeatureName(t *testing.T) {
 	}
 }
 
+func TestCodedocHandlers_Start_InvalidFeatureName(t *testing.T) {
+	manager, _ := newTestCDManager(t)
+	handler := HandleCDStart(manager)
+	rr := postJSON(handler, "/api/codedoc/start", cdStartRequest{
+		FeatureName: "../escape",
+		CodePath:    t.TempDir(),
+	})
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if len(manager.GetAllOrchestrators()) != 0 {
+		t.Fatal("unexpected codedoc orchestrator created for invalid feature name")
+	}
+	if _, err := os.Stat(filepath.Join(manager.workspaceDir, "codedoc")); !os.IsNotExist(err) {
+		t.Fatal("unexpected codedoc workspace created for invalid feature name")
+	}
+}
+
+func TestCodedocHandlers_Start_FileCodePath(t *testing.T) {
+	manager, _ := newTestCDManager(t)
+	handler := HandleCDStart(manager)
+	filePath := filepath.Join(t.TempDir(), "code.txt")
+	if err := os.WriteFile(filePath, []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rr := postJSON(handler, "/api/codedoc/start", cdStartRequest{
+		FeatureName: "test-docs",
+		CodePath:    filePath,
+	})
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestCodedocHandlers_Start_RejectsWorkspaceOverride(t *testing.T) {
+	manager, _ := newTestCDManager(t)
+	handler := HandleCDStart(manager)
+	rr := postJSON(handler, "/api/codedoc/start", cdStartRequest{
+		FeatureName:  "test-docs",
+		CodePath:     t.TempDir(),
+		WorkspaceDir: t.TempDir(),
+	})
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	body := decodeBody(t, rr)
+	if !strings.Contains(body["error"].(string), "workspace_dir overrides are not supported") {
+		t.Fatalf("unexpected error: %v", body["error"])
+	}
+}
+
 func TestCodedocHandlers_Start_DuplicateFeature(t *testing.T) {
 	manager, _ := setupCDWithOrchestrator(t, "existing", codedoc.CDInit)
 	handler := HandleCDStart(manager)
@@ -190,6 +245,68 @@ func TestCodedocHandlers_Start_DuplicateFeature(t *testing.T) {
 
 	if rr.Code != http.StatusConflict {
 		t.Errorf("expected 409, got %d", rr.Code)
+	}
+}
+
+func TestCodedocHandlers_Start_PersistsStateBeforeReturn(t *testing.T) {
+	workspaceDir, err := os.MkdirTemp("", "codedoc-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(workspaceDir)
+
+	cfg := codedoc.DefaultCodedocConfig()
+	manager := NewCodedocManager(workspaceDir, cfg)
+	manager.SetRunners(noopAgentRunner{}, noopAgentRunner{}, noopAgentRunner{})
+
+	codePath := t.TempDir()
+	handler := HandleCDStart(manager)
+	rr := postJSON(handler, "/api/codedoc/start", cdStartRequest{
+		FeatureName: "durable-start",
+		CodePath:    codePath,
+		Mode:        "full",
+	})
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	statePath := filepath.Join(workspaceDir, "codedoc", "durable-start", "workflow-state.json")
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("expected persisted workflow state: %v", err)
+	}
+}
+
+func TestCodedocHandlers_Start_ExistingPersistedStateConflicts(t *testing.T) {
+	manager, workspaceDir := newTestCDManager(t)
+	featureDir := filepath.Join(workspaceDir, "codedoc", "existing")
+	if err := os.MkdirAll(featureDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := &codedoc.CDStateJSON{
+		State:       codedoc.CDHumanGateScope,
+		FeatureName: "existing",
+		CodePath:    t.TempDir(),
+		Mode:        "full",
+	}
+	data, _ := json.MarshalIndent(state, "", "  ")
+	if err := os.WriteFile(filepath.Join(featureDir, "workflow-state.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := HandleCDStart(manager)
+	rr := postJSON(handler, "/api/codedoc/start", cdStartRequest{
+		FeatureName: "existing",
+		CodePath:    t.TempDir(),
+		Mode:        "full",
+	})
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rr.Code, rr.Body.String())
+	}
+	body := decodeBody(t, rr)
+	if body["resume_state"] != "CD_HUMAN_GATE_SCOPE" {
+		t.Fatalf("expected resume_state CD_HUMAN_GATE_SCOPE, got %v", body["resume_state"])
 	}
 }
 
@@ -326,6 +443,7 @@ func TestCodedocHandlers_Gate_ScopeConfirm(t *testing.T) {
 	if body["new_state"] != "CD_DRAFTING" {
 		t.Errorf("expected new_state CD_DRAFTING, got %v", body["new_state"])
 	}
+	time.Sleep(100 * time.Millisecond)
 }
 
 func TestCodedocHandlers_Gate_NotInGateState(t *testing.T) {
@@ -370,6 +488,72 @@ func TestCodedocHandlers_Gate_DraftApprove(t *testing.T) {
 	body := decodeBody(t, rr)
 	if body["new_state"] != "CD_REVIEWING" {
 		t.Errorf("expected CD_REVIEWING, got %v", body["new_state"])
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestCodedocHandlers_Gate_ScopeAction_FromDisk(t *testing.T) {
+	manager, workspaceDir := newTestCDManager(t)
+	featureDir := filepath.Join(workspaceDir, "codedoc", "disk-scope")
+	if err := os.MkdirAll(featureDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := &codedoc.CDStateJSON{
+		State:       codedoc.CDHumanGateScope,
+		FeatureName: "disk-scope",
+		CodePath:    t.TempDir(),
+		Mode:        "full",
+	}
+	data, _ := json.MarshalIndent(state, "", "  ")
+	if err := os.WriteFile(filepath.Join(featureDir, "workflow-state.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := HandleCDGate(manager)
+	rr := postJSON(handler, "/api/codedoc/disk-scope/gate", cdGateRequest{Action: "cancel"})
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	body := decodeBody(t, rr)
+	if body["new_state"] != "CD_ESCALATED" {
+		t.Fatalf("expected CD_ESCALATED, got %v", body["new_state"])
+	}
+	if manager.getOrchestrator("disk-scope") == nil {
+		t.Fatal("expected gate handler to restore orchestrator from disk")
+	}
+}
+
+func TestCodedocHandlers_Gate_FinalAction_FromDisk(t *testing.T) {
+	manager, workspaceDir := newTestCDManager(t)
+	featureDir := filepath.Join(workspaceDir, "codedoc", "disk-final")
+	if err := os.MkdirAll(featureDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := &codedoc.CDStateJSON{
+		State:       codedoc.CDHumanGateFinal,
+		FeatureName: "disk-final",
+		CodePath:    t.TempDir(),
+		Mode:        "full",
+		Round:       1,
+	}
+	data, _ := json.MarshalIndent(state, "", "  ")
+	if err := os.WriteFile(filepath.Join(featureDir, "workflow-state.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := HandleCDGate(manager)
+	rr := postJSON(handler, "/api/codedoc/disk-final/gate", cdGateRequest{Action: "reject"})
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	body := decodeBody(t, rr)
+	if body["new_state"] != "CD_ESCALATED" {
+		t.Fatalf("expected CD_ESCALATED, got %v", body["new_state"])
+	}
+	if manager.getOrchestrator("disk-final") == nil {
+		t.Fatal("expected gate handler to restore final-gate orchestrator from disk")
 	}
 }
 

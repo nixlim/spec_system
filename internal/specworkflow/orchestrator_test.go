@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -28,6 +30,21 @@ type orchMockRunner struct {
 type orchMockCall struct {
 	Prompt     string
 	OutputPath string
+}
+
+func holdoutRoundFromOutputPath(outputPath string) int {
+	base := filepath.Base(outputPath)
+	marker := "-round-"
+	idx := strings.LastIndex(base, marker)
+	if idx == -1 {
+		return 1
+	}
+	roundPart := strings.TrimSuffix(base[idx+len(marker):], filepath.Ext(base))
+	round, err := strconv.Atoi(roundPart)
+	if err != nil || round < 1 {
+		return 1
+	}
+	return round
 }
 
 func newOrchMockRunner() *orchMockRunner {
@@ -74,6 +91,26 @@ func (m *orchMockRunner) Run(prompt string, outputPath string, timeoutSeconds in
 	m.mu.Unlock()
 
 	if payload == nil {
+		if orchContains(prompt, "Holdout Agent") {
+			round := holdoutRoundFromOutputPath(outputPath)
+			mdPath := strings.Replace(filepath.Base(outputPath), "holdout-", "holdouts-", 1)
+			mdPath = strings.TrimSuffix(mdPath, ".json") + ".md"
+			mdPath = filepath.Join(filepath.Dir(outputPath), mdPath)
+
+			os.MkdirAll(filepath.Dir(outputPath), 0o755)
+			_ = os.WriteFile(mdPath, []byte("### Scenario H1\n\nExercise the edge cases.\n"), 0o644)
+			holdout := HoldoutOutput{
+				SchemaVersion: "1.0",
+				Agent:         "holdout",
+				Round:         round,
+				ScenarioCount: 2,
+				Categories:    []string{"edge-cases", "error-paths"},
+				HoldoutFile:   mdPath,
+			}
+			data, _ := json.MarshalIndent(holdout, "", "  ")
+			_ = os.WriteFile(outputPath, data, 0o644)
+			return 0, "", 0.01, 100, nil
+		}
 		os.MkdirAll(filepath.Dir(outputPath), 0o755)
 		os.WriteFile(outputPath, []byte(`{}`), 0o644)
 		return 0, "", 0.01, 100, nil
@@ -234,6 +271,7 @@ func orchJudgePass(round int) *JudgeOutput {
 // setupOrch creates an Orchestrator with an orchMockRunner for testing.
 func setupOrch(t *testing.T) (*Orchestrator, *orchMockRunner, string) {
 	t.Helper()
+	t.Setenv("PATH", t.TempDir())
 	workspace := t.TempDir()
 	feature := "test-feature"
 	config := orchTestConfig()
@@ -352,9 +390,145 @@ func sendGateResponse(orch *Orchestrator, resp GateResponse) {
 	}
 }
 
+type orchHoldoutRunner struct {
+	invalidJSON  bool
+	skipMarkdown bool
+}
+
+func (r orchHoldoutRunner) Run(_ string, outputPath string, _ int) (int, string, float64, int64, error) {
+	round := holdoutRoundFromOutputPath(outputPath)
+	mdPath := strings.Replace(filepath.Base(outputPath), "holdout-", "holdouts-", 1)
+	mdPath = strings.TrimSuffix(mdPath, ".json") + ".md"
+	mdPath = filepath.Join(filepath.Dir(outputPath), mdPath)
+
+	if !r.skipMarkdown {
+		if err := os.WriteFile(mdPath, []byte("### Scenario H1\n\nExercise the edge cases.\n"), 0o644); err != nil {
+			return 1, err.Error(), 0, 0, err
+		}
+	}
+	if r.invalidJSON {
+		if err := os.WriteFile(outputPath, []byte(`{"broken":`), 0o644); err != nil {
+			return 1, err.Error(), 0, 0, err
+		}
+		return 0, "", 0.01, 100, nil
+	}
+
+	data, _ := json.MarshalIndent(HoldoutOutput{
+		SchemaVersion: "1.0",
+		Agent:         "holdout",
+		Round:         round,
+		ScenarioCount: 2,
+		Categories:    []string{"edge-cases", "error-paths"},
+		HoldoutFile:   mdPath,
+	}, "", "  ")
+	if err := os.WriteFile(outputPath, data, 0o644); err != nil {
+		return 1, err.Error(), 0, 0, err
+	}
+	return 0, "", 0.01, 100, nil
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+func TestDispatchHoldoutGeneration_WritesRoundArtifacts(t *testing.T) {
+	orch, _, workspace := setupOrch(t)
+	specDir := filepath.Join(workspace, "specs", "test-feature")
+	state := orch.sm.State()
+	state.Round = 1
+	state.FindingsSummary = FindingsSummary{OpenCritical: 1}
+	orch.runner = orchHoldoutRunner{}
+
+	merged := &MergedFindings{TotalAfterDedup: 1}
+	if err := orch.dispatchHoldoutGeneration(state, specDir, merged); err != nil {
+		t.Fatalf("dispatchHoldoutGeneration: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(specDir, "holdouts-round-1.md")); err != nil {
+		t.Fatalf("expected merged holdout markdown: %v", err)
+	}
+	jsonPath := filepath.Join(specDir, "holdout-round-1.json")
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatalf("expected merged holdout JSON: %v", err)
+	}
+	var output HoldoutOutput
+	if err := json.Unmarshal(data, &output); err != nil {
+		t.Fatalf("unmarshal merged holdout JSON: %v", err)
+	}
+	if output.HoldoutFile != filepath.Join(specDir, "holdouts-round-1.md") {
+		t.Fatalf("unexpected holdout_file: %s", output.HoldoutFile)
+	}
+}
+
+func TestDispatchHoldoutGeneration_FailsWhenMarkdownMissing(t *testing.T) {
+	orch, _, workspace := setupOrch(t)
+	specDir := filepath.Join(workspace, "specs", "test-feature")
+	state := orch.sm.State()
+	state.Round = 1
+	state.FindingsSummary = FindingsSummary{OpenCritical: 1}
+	orch.runner = orchHoldoutRunner{skipMarkdown: true}
+
+	err := orch.dispatchHoldoutGeneration(state, specDir, &MergedFindings{TotalAfterDedup: 1})
+	if err == nil {
+		t.Fatal("expected holdout generation to fail when markdown is missing")
+	}
+}
+
+func TestDispatchHoldoutGeneration_FailsWhenJSONInvalid(t *testing.T) {
+	orch, _, workspace := setupOrch(t)
+	specDir := filepath.Join(workspace, "specs", "test-feature")
+	state := orch.sm.State()
+	state.Round = 1
+	state.FindingsSummary = FindingsSummary{OpenCritical: 1}
+	orch.runner = orchHoldoutRunner{invalidJSON: true}
+
+	err := orch.dispatchHoldoutGeneration(state, specDir, &MergedFindings{TotalAfterDedup: 1})
+	if err == nil {
+		t.Fatal("expected holdout generation to fail when JSON is invalid")
+	}
+}
+
+func TestWriteRevisionFindingsInput_ExcludesHoldoutTargets(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "merged-findings-round-2.json")
+	outputPath := filepath.Join(dir, "merged-findings-spec-round-2.json")
+
+	merged := MergedFindings{
+		SchemaVersion:   "1.0",
+		Round:           2,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
+		TotalFindings:   2,
+		TotalAfterDedup: 2,
+		Findings: []MergedFinding{
+			{ID: "CRIT-001", AffectedSection: "FR-1", Lens: "SEC", Description: "spec issue", Impact: "high", Recommendation: "fix", Severity: SeverityCritical, Target: "spec"},
+			{ID: "MAJ-001", AffectedSection: "H1", Lens: "COR", Description: "holdout issue", Impact: "medium", Recommendation: "review", Severity: SeverityMajor, Target: "holdout"},
+		},
+	}
+	data, _ := json.MarshalIndent(merged, "", "  ")
+	if err := os.WriteFile(sourcePath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeRevisionFindingsInput(sourcePath, outputPath); err != nil {
+		t.Fatalf("writeRevisionFindingsInput: %v", err)
+	}
+
+	out, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var filtered MergedFindings
+	if err := json.Unmarshal(out, &filtered); err != nil {
+		t.Fatalf("unmarshal filtered findings: %v", err)
+	}
+	if len(filtered.Findings) != 1 {
+		t.Fatalf("expected 1 spec finding, got %d", len(filtered.Findings))
+	}
+	if filtered.Findings[0].ID != "CRIT-001" {
+		t.Fatalf("unexpected surviving finding: %s", filtered.Findings[0].ID)
+	}
+}
 
 func TestOrchestratorHappyPath2Rounds(t *testing.T) {
 	orch, runner, workspace := setupOrch(t)
@@ -893,6 +1067,7 @@ func TestOrchestratorResumeFromGate1(t *testing.T) {
 	// Simulate: a workflow ran discovery, reached HUMAN_GATE_1, then the
 	// server restarted. A new orchestrator should restore the persisted
 	// state and resume from HUMAN_GATE_1, accepting a gate response.
+	t.Setenv("PATH", t.TempDir())
 	workspace := t.TempDir()
 	feature := "test-feature"
 	specDir := filepath.Join(workspace, "specs", feature)
@@ -1007,6 +1182,7 @@ func TestOrchestratorResumeFromGate1(t *testing.T) {
 
 func TestOrchestratorResumeFromGate2(t *testing.T) {
 	// Simulate: workflow reached HUMAN_GATE_2, server restarted.
+	t.Setenv("PATH", t.TempDir())
 	workspace := t.TempDir()
 	feature := "test-feature"
 	specDir := filepath.Join(workspace, "specs", feature)

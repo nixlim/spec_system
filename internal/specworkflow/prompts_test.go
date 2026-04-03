@@ -155,6 +155,29 @@ func TestPromptDiscoveryIncludesPlanSpecInstructions(t *testing.T) {
 	}
 }
 
+func TestPromptHoldoutIncludesContractPaths(t *testing.T) {
+	pb := newTestPromptBuilder(t)
+	prompt, err := pb.BuildHoldoutPrompt("/tmp/spec-v1.md", "/tmp/merged-findings-round-1.json", 1, "/tmp/holdout-round-1.json", "/tmp/holdouts-round-1.md")
+	if err != nil {
+		t.Fatalf("BuildHoldoutPrompt error: %v", err)
+	}
+	if !strings.Contains(prompt, "/tmp/spec-v1.md") {
+		t.Error("expected prompt to reference the spec path")
+	}
+	if !strings.Contains(prompt, "/tmp/merged-findings-round-1.json") {
+		t.Error("expected prompt to reference merged findings path")
+	}
+	if !strings.Contains(prompt, "/tmp/holdout-round-1.json") {
+		t.Error("expected prompt to reference holdout JSON output path")
+	}
+	if !strings.Contains(prompt, "/tmp/holdouts-round-1.md") {
+		t.Error("expected prompt to reference holdout markdown output path")
+	}
+	if !strings.Contains(prompt, "HoldoutOutput") {
+		t.Error("expected prompt to reference HoldoutOutput schema")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Drafter prompt tests
 // ---------------------------------------------------------------------------
@@ -405,19 +428,30 @@ func TestPromptReviewerOutputPath(t *testing.T) {
 	}
 }
 
-func TestPromptReviewerDoesNotIncludeHoldout(t *testing.T) {
+func TestPromptReviewerRoundOneDoesNotIncludeHoldout(t *testing.T) {
 	pb := newTestPromptBuilder(t)
 	for _, group := range []string{"clarity", "consistency", "security", "correctness"} {
 		prompt, err := pb.BuildReviewerPrompt(group, 1, "/tmp/spec-v0.md")
 		if err != nil {
 			t.Fatalf("BuildReviewerPrompt(%s) error: %v", group, err)
 		}
-		if strings.Contains(prompt, "holdout") {
-			t.Errorf("reviewer prompt for %s should NEVER contain holdout reference", group)
+		if strings.Contains(prompt, "holdouts-round-") {
+			t.Errorf("reviewer prompt for %s should not reference prior round holdout files in round 1", group)
 		}
-		if strings.Contains(prompt, "holdouts") {
-			t.Errorf("reviewer prompt for %s should NEVER contain holdouts reference", group)
-		}
+	}
+}
+
+func TestPromptReviewerRoundTwoIncludesLatestHoldoutPath(t *testing.T) {
+	pb := newTestPromptBuilder(t)
+	prompt, err := pb.BuildReviewerPrompt("clarity", 2, "/tmp/spec-v1.md")
+	if err != nil {
+		t.Fatalf("BuildReviewerPrompt error: %v", err)
+	}
+	if !strings.Contains(prompt, "holdouts-round-1.md") {
+		t.Fatal("expected reviewer prompt to reference prior round holdouts")
+	}
+	if !strings.Contains(prompt, "target` to `holdout`") {
+		t.Fatal("expected reviewer prompt to explain holdout targeting")
 	}
 }
 

@@ -139,6 +139,63 @@ func TestFinalizeFullAssembly(t *testing.T) {
 	}
 }
 
+func TestFinalizePrefersRoundHoldoutFile(t *testing.T) {
+	config, dir := newFinalizeTestDir(t, "test-feature")
+	state := newFinalizeState()
+	tracker := NewIssueTracker()
+
+	if err := os.WriteFile(filepath.Join(dir, "spec-v3.md"), []byte("# Spec\n"), 0o644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "test-feature-holdouts.md"), []byte("legacy holdouts\n"), 0o644); err != nil {
+		t.Fatalf("write legacy holdouts: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "holdouts-round-3.md"), []byte("round holdouts\n"), 0o644); err != nil {
+		t.Fatalf("write round holdouts: %v", err)
+	}
+
+	if err := AssembleFinalSpec(config, state, tracker); err != nil {
+		t.Fatalf("AssembleFinalSpec: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "spec-final.md"))
+	if err != nil {
+		t.Fatalf("read final spec: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "round holdouts") {
+		t.Fatal("expected final spec to use round holdout content")
+	}
+	if strings.Contains(content, "legacy holdouts") {
+		t.Fatal("expected round holdouts to override legacy holdouts")
+	}
+}
+
+func TestFinalizeFallsBackToLegacyHoldoutFile(t *testing.T) {
+	config, dir := newFinalizeTestDir(t, "test-feature")
+	state := newFinalizeState()
+	tracker := NewIssueTracker()
+
+	if err := os.WriteFile(filepath.Join(dir, "spec-v3.md"), []byte("# Spec\n"), 0o644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "test-feature-holdouts.md"), []byte("legacy holdouts\n"), 0o644); err != nil {
+		t.Fatalf("write legacy holdouts: %v", err)
+	}
+
+	if err := AssembleFinalSpec(config, state, tracker); err != nil {
+		t.Fatalf("AssembleFinalSpec: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "spec-final.md"))
+	if err != nil {
+		t.Fatalf("read final spec: %v", err)
+	}
+	if !strings.Contains(string(data), "legacy holdouts") {
+		t.Fatal("expected final spec to fall back to legacy holdouts")
+	}
+}
+
 func TestFinalizeMissingHoldoutFile(t *testing.T) {
 	config, dir := newFinalizeTestDir(t, "test-feature")
 	state := newFinalizeState()
