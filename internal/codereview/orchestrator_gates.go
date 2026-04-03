@@ -6,48 +6,6 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// ScopeGateData
-// ---------------------------------------------------------------------------
-
-// ScopeGateData contains the structured data presented at the scope
-// confirmation gate (CR_HUMAN_GATE_SCOPE).
-type ScopeGateData struct {
-	// SpecPath is the optional path to the spec file.
-	SpecPath string `json:"spec_path,omitempty"`
-	// CodePath is the filesystem path to the target repository.
-	CodePath string `json:"code_path"`
-	// TaskListPath is the optional path to the task list file.
-	TaskListPath string `json:"task_list_path,omitempty"`
-	// GrillCodeMode is the detected review context mode.
-	GrillCodeMode string `json:"grill_code_mode"`
-	// GitBranch is the branch name at workflow start.
-	GitBranch string `json:"git_branch"`
-	// GitSHA is the HEAD commit SHA at workflow start.
-	GitSHA string `json:"git_sha"`
-}
-
-// ---------------------------------------------------------------------------
-// FixesGateData
-// ---------------------------------------------------------------------------
-
-// FixesGateData contains the structured data presented at the fixes review
-// gate (CR_HUMAN_GATE_FIXES).
-type FixesGateData struct {
-	// FindingsSummary holds aggregate finding counts by severity and status.
-	FindingsSummary CodeReviewFindingsSummary `json:"findings_summary"`
-	// FixDetails lists the individual fix actions taken by the fix agent.
-	FixDetails []FixAction `json:"fix_details"`
-	// DeferredItems lists finding IDs that were intentionally deferred.
-	DeferredItems []string `json:"deferred_items"`
-	// GitDiffStat is the output of `git diff --stat` after fixes.
-	GitDiffStat string `json:"git_diff_stat"`
-	// TestResults contains structured test execution results.
-	TestResults *TestResults `json:"test_results"`
-	// Warnings holds any warnings (e.g., reduced_coverage, staleness).
-	Warnings []string `json:"warnings,omitempty"`
-}
-
-// ---------------------------------------------------------------------------
 // GetScopeGateData
 // ---------------------------------------------------------------------------
 

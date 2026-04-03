@@ -12,21 +12,6 @@ import (
 	"github.com/foundry-zero/adversarial-spec-system/internal/specworkflow"
 )
 
-// ---------------------------------------------------------------------------
-// GitBranchManager
-// ---------------------------------------------------------------------------
-
-// GitBranchManager abstracts git branch operations for the fix phase.
-type GitBranchManager interface {
-	// CreateFixBranch creates (or recreates) the fix branch for the given round.
-	// If the branch already exists, it is deleted first.
-	CreateFixBranch(codePath string, round int) error
-	// DiffNameOnly returns the list of files modified since the given commit SHA.
-	DiffNameOnly(codePath, baseSHA string) ([]string, error)
-	// SubmodulePaths returns the list of submodule directory paths in the repo.
-	SubmodulePaths(codePath string) ([]string, error)
-}
-
 // defaultGitBranchManager implements GitBranchManager using exec.Command.
 type defaultGitBranchManager struct{}
 
@@ -83,54 +68,6 @@ func (g *defaultGitBranchManager) DiffNameOnly(codePath, baseSHA string) ([]stri
 		}
 	}
 	return files, nil
-}
-
-// ---------------------------------------------------------------------------
-// FixPhaseConfig
-// ---------------------------------------------------------------------------
-
-// FixPhaseConfig holds the parameters for running the fix phase.
-type FixPhaseConfig struct {
-	// Runner is the agent runner for the fix agent (ClaudeRunner).
-	Runner specworkflow.AgentRunner
-	// BranchManager abstracts git branch operations (nil = default).
-	BranchManager GitBranchManager
-	// CodePath is the path to the target repository.
-	CodePath string
-	// WorkspaceDir is the feature workspace directory for storing artefacts.
-	WorkspaceDir string
-	// Round is the current review round.
-	Round int
-	// CommitMode is "branch_per_round" or "direct_commit".
-	CommitMode string
-	// FindingsPath is the path to the merged findings JSON file.
-	FindingsPath string
-	// SpecContent is optional spec content for context.
-	SpecContent string
-	// FixerTimeoutSeconds is the timeout for the fix agent.
-	FixerTimeoutSeconds int
-	// CriticalMajorIDs is the set of CRITICAL+MAJOR finding IDs for routing.
-	CriticalMajorIDs map[string]bool
-	// HeadSHA is the HEAD commit SHA before fixes, for post-fix diff validation.
-	HeadSHA string
-}
-
-// ---------------------------------------------------------------------------
-// FixPhaseResult
-// ---------------------------------------------------------------------------
-
-// FixPhaseResult captures the outcome of the fix phase.
-type FixPhaseResult struct {
-	// RouteDecision describes where the workflow should transition next.
-	RouteDecision FixRouteDecision
-	// FixOutput is the parsed fix output, nil on parse or agent failure.
-	FixOutput *FixOutput
-	// CostUSD is the cost of the fix agent invocation.
-	CostUSD float64
-	// DurationMS is the wall-clock duration of the fix agent invocation.
-	DurationMS int64
-	// FixOutputRaw is the raw JSON output from the fix agent for logging.
-	FixOutputRaw string
 }
 
 // ---------------------------------------------------------------------------

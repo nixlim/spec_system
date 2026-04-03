@@ -6,7 +6,24 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/foundry-zero/adversarial-spec-system/internal/specworkflow"
 )
+
+// revisionMockRunner implements specworkflow.AgentRunner for revision tests.
+// It writes a predetermined JSON payload to outputPath on each Run call.
+type revisionMockRunner struct {
+	outputJSON []byte
+}
+
+func (r *revisionMockRunner) Run(_ string, outputPath string, _ int) (int, string, float64, int64, error) {
+	if err := os.WriteFile(outputPath, r.outputJSON, 0o644); err != nil {
+		return 1, err.Error(), 0, 0, err
+	}
+	return 0, "", 0, 0, nil
+}
+
+var _ specworkflow.AgentRunner = (*revisionMockRunner)(nil)
 
 // ---------------------------------------------------------------------------
 // PrioritizeFindings tests
@@ -303,6 +320,95 @@ func TestRevision_ReadMergedFindings_NotFound(t *testing.T) {
 	_, err := ReadMergedFindings(dir, 99)
 	if err == nil {
 		t.Error("expected error for missing findings file")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// MAJ-001 regression: handleRevising must increment DraftVersion
+// ---------------------------------------------------------------------------
+
+// TestHandleRevising_IncrementsDraftVersion ensures that each call to
+// handleRevising copies the current draft directory to a new versioned
+// directory (draft-v{N+1}/) and increments ws.DraftVersion. Before the fix,
+// DraftVersion was never updated so every revision round overwrote draft-v1/.
+func TestHandleRevising_IncrementsDraftVersion(t *testing.T) {
+	featureDir := t.TempDir()
+
+	// Create an initial draft-v1/ with a sentinel file.
+	draftV1 := filepath.Join(featureDir, "draft-v1")
+	if err := os.MkdirAll(draftV1, 0o755); err != nil {
+		t.Fatalf("mkdir draft-v1: %v", err)
+	}
+	sentinelContent := []byte("original content")
+	if err := os.WriteFile(filepath.Join(draftV1, "README.md"), sentinelContent, 0o644); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	// Build a minimal orchestrator — we only need to exercise the versioning
+	// logic, so the runner writes a valid but minimal revision JSON.
+	ws := &CDStateJSON{
+		State:        CDRevising,
+		Round:        1,
+		FeatureName:  "test-docs",
+		DraftVersion: 1,
+	}
+	sm := &CDStateMachine{}
+	sm.RestoreState(ws)
+
+	revisionOutput := RevisionOutput{
+		SchemaVersion: "1.0",
+		Agent:         "codedoc-revision",
+		Round:         1,
+		Addressed:     []RevisedFinding{},
+		WontFix:       []RevisedFinding{},
+		Remaining:     []RevisedFinding{},
+	}
+	revJSON, _ := json.Marshal(revisionOutput)
+
+	o := &CodedocOrchestrator{
+		featureDir:     featureDir,
+		sm:             sm,
+		mergedFindings: []ReviewFinding{},
+		runner:         &revisionMockRunner{outputJSON: revJSON},
+		config:         CodedocConfig{AgentTimeoutSeconds: 10},
+	}
+
+	// Run one revision.
+	if err := o.handleRevising(); err != nil {
+		t.Fatalf("handleRevising: %v", err)
+	}
+
+	// DraftVersion must be incremented.
+	if got := o.sm.State().DraftVersion; got != 2 {
+		t.Errorf("DraftVersion after first revision: want 2, got %d", got)
+	}
+
+	// draft-v2/ must exist and contain the sentinel file.
+	draftV2 := filepath.Join(featureDir, "draft-v2")
+	if _, err := os.Stat(draftV2); err != nil {
+		t.Errorf("draft-v2 not created: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(draftV2, "README.md"))
+	if err != nil {
+		t.Errorf("sentinel file not copied to draft-v2: %v", err)
+	}
+	if string(data) != string(sentinelContent) {
+		t.Errorf("sentinel content mismatch: got %q", data)
+	}
+
+	// A second revision must create draft-v3/.
+	// handleRevising transitions to CDJudging at the end; rewind to CDRevising
+	// to simulate the state machine being driven back for a second revision round.
+	ws.State = CDRevising
+	ws.Round = 2
+	if err := o.handleRevising(); err != nil {
+		t.Fatalf("handleRevising round 2: %v", err)
+	}
+	if got := o.sm.State().DraftVersion; got != 3 {
+		t.Errorf("DraftVersion after second revision: want 3, got %d", got)
+	}
+	if _, err := os.Stat(filepath.Join(featureDir, "draft-v3")); err != nil {
+		t.Errorf("draft-v3 not created: %v", err)
 	}
 }
 

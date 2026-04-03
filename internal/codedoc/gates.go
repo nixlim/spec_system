@@ -3,65 +3,6 @@ package codedoc
 import "fmt"
 
 // ---------------------------------------------------------------------------
-// Gate payload types
-// ---------------------------------------------------------------------------
-
-// ScopeGatePayload carries the data presented to the human at CD_HUMAN_GATE_SCOPE.
-type ScopeGatePayload struct {
-	// Modules is the discovered module inventory.
-	Modules []ModuleInfo `json:"modules"`
-	// CompletionStatus indicates whether the inventory is complete or partial.
-	CompletionStatus CompletionStatus `json:"completion_status"`
-	// DependencyGraph holds the dependency edges.
-	DependencyGraph DependencyGraph `json:"dependency_graph"`
-	// ExistingDocs lists documentation files already in the codebase.
-	ExistingDocs []ExistingDoc `json:"existing_docs"`
-	// SuggestedScope is the recommended scope for documentation.
-	SuggestedScope SuggestedScope `json:"suggested_scope"`
-	// MergeConflicts lists any conflicts from dual-provider discovery merge.
-	MergeConflicts []MergeConflict `json:"merge_conflicts,omitempty"`
-	// DualProvider indicates whether dual-provider discovery was used.
-	DualProvider bool `json:"dual_provider"`
-	// DiscoverySource indicates how the discovery was produced ("combined", "single_survivor", "single_provider").
-	DiscoverySource string `json:"discovery_source,omitempty"`
-}
-
-// DraftGatePayload carries the data presented at CD_HUMAN_GATE_DRAFT.
-type DraftGatePayload struct {
-	// GeneratedFiles lists the files produced by the drafter.
-	GeneratedFiles []string `json:"generated_files"`
-	// Summary holds aggregate statistics about the draft.
-	Summary StructuralSummary `json:"summary"`
-	// RedactionLog is the sanitisation report (nil if no secrets detected).
-	RedactionLog *SanitisationReport `json:"redaction_log,omitempty"`
-	// RedraftCount is the number of re-drafts already performed.
-	RedraftCount int `json:"redraft_count"`
-	// MaxRedrafts is the configured maximum re-drafts.
-	MaxRedrafts int `json:"max_redrafts"`
-	// RedraftDisabled is true when the redraft limit has been exhausted.
-	RedraftDisabled bool `json:"redraft_disabled"`
-}
-
-// FinalGatePayload carries the data presented at CD_HUMAN_GATE_FINAL.
-type FinalGatePayload struct {
-	// UnresolvedFindings lists CRITICAL and MAJOR findings that remain open.
-	UnresolvedFindings []UnresolvedFinding `json:"unresolved_findings"`
-	// TotalUnresolved is the count of unresolved CRITICAL + MAJOR findings.
-	TotalUnresolved int `json:"total_unresolved"`
-	// DriftWarning is set if the codebase has changed significantly since discovery.
-	DriftWarning string `json:"drift_warning,omitempty"`
-}
-
-// UnresolvedFinding is a simplified finding for display at the final gate.
-type UnresolvedFinding struct {
-	ID          string `json:"id"`
-	Description string `json:"description"`
-	Severity    string `json:"severity"`
-	Lens        string `json:"lens"`
-	Section     string `json:"affected_section"`
-}
-
-// ---------------------------------------------------------------------------
 // ScopeGateHandler — CD_HUMAN_GATE_SCOPE
 // ---------------------------------------------------------------------------
 

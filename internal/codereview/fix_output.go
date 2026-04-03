@@ -7,20 +7,6 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Parse result
-// ---------------------------------------------------------------------------
-
-// ParseFixOutputResult holds the outcome of parsing a fix agent's JSON output.
-type ParseFixOutputResult struct {
-	// Output is the parsed FixOutput, nil on parse error.
-	Output *FixOutput
-	// Warnings holds non-fatal issues found during validation.
-	Warnings []string
-	// Err is set when the JSON is invalid or missing required fields.
-	Err error
-}
-
-// ---------------------------------------------------------------------------
 // ParseFixOutput
 // ---------------------------------------------------------------------------
 
@@ -74,20 +60,6 @@ func ParseFixOutput(data []byte) ParseFixOutputResult {
 
 	result.Output = &output
 	return result
-}
-
-// ---------------------------------------------------------------------------
-// Route result
-// ---------------------------------------------------------------------------
-
-// FixRouteDecision describes where the workflow should transition after a fix.
-type FixRouteDecision struct {
-	// NextState is the recommended next state.
-	NextState CodeReviewState
-	// Reason explains why this route was chosen.
-	Reason string
-	// Warnings holds advisory messages to display at the human gate.
-	Warnings []string
 }
 
 // ---------------------------------------------------------------------------

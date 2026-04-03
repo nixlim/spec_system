@@ -5,22 +5,6 @@ import (
 	"time"
 )
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
-// CRStateMachineConfig holds tuneable limits for the code review state
-// machine guards.
-type CRStateMachineConfig struct {
-	// MaxRounds is the maximum number of re-review rounds after the initial
-	// review. The guard blocks when round > MaxRounds. 0 = no re-reviews.
-	MaxRounds int
-	// MaxCostUSD is the cumulative cost budget. Workflow escalates when exceeded.
-	MaxCostUSD float64
-	// MaxWallClockMinutes is the maximum wall-clock time in minutes.
-	MaxWallClockMinutes int
-}
-
 // DefaultCRStateMachineConfig returns a CRStateMachineConfig with sensible defaults.
 func DefaultCRStateMachineConfig() CRStateMachineConfig {
 	return CRStateMachineConfig{
@@ -39,15 +23,6 @@ func CRStateMachineConfigFromConfig(cfg *CodeReviewConfig) CRStateMachineConfig 
 		MaxWallClockMinutes: cfg.MaxWallClockMinutes,
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Guard function type
-// ---------------------------------------------------------------------------
-
-// CRGuard is a predicate that decides whether a transition from one code
-// review state to another is permitted given the current workflow snapshot.
-// It returns a non-nil error describing the reason when the transition is blocked.
-type CRGuard func(from, to CodeReviewState, ws *CodeReviewStateJSON) error
 
 // ---------------------------------------------------------------------------
 // Transition table

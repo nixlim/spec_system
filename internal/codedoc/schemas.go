@@ -238,6 +238,9 @@ func ValidateReviewerOutput(o *ReviewerOutput) (validFindings []ReviewFinding, r
 		requireNonEmpty(&errs, fmt.Sprintf("findings[%d].lens", i), f.Lens)
 		requireNonEmpty(&errs, fmt.Sprintf("findings[%d].affected_section", i), f.AffectedSection)
 
+		// Normalise severity to lowercase so countFindings/CountOpenCriticalMajor
+		// can safely compare against the lowercase severity constants.
+		f.Severity = strings.ToLower(strings.TrimSpace(f.Severity))
 		valid = append(valid, f)
 	}
 

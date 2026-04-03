@@ -305,6 +305,29 @@ func maxInt(a, b int) int {
 	return b
 }
 
+// copyDir recursively copies src to dst, creating dst if it does not exist.
+// Files that already exist in dst are overwritten.
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		dstPath := filepath.Join(dst, relPath)
+		if info.IsDir() {
+			return os.MkdirAll(dstPath, info.Mode())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(dstPath, data, info.Mode())
+	})
+}
+
 // collectDraftFiles reads all files from the draft directory into a map.
 func collectDraftFiles(draftDir string) (map[string][]byte, error) {
 	files := make(map[string][]byte)

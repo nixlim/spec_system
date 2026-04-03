@@ -384,11 +384,22 @@ func (o *CodedocOrchestrator) handleRevising() error {
 	if err != nil {
 		return fmt.Errorf("marshal findings for revision: %w", err)
 	}
-	draftVersion := ws.DraftVersion
-	if draftVersion == 0 {
-		draftVersion = 1
+
+	// Determine the source draft directory (current version).
+	srcVersion := ws.DraftVersion
+	if srcVersion == 0 {
+		srcVersion = 1
 	}
-	draftDir := filepath.Join(o.featureDir, fmt.Sprintf("draft-v%d", draftVersion))
+	srcDraftDir := filepath.Join(o.featureDir, fmt.Sprintf("draft-v%d", srcVersion))
+
+	// Each revision round writes to a new versioned directory to preserve the
+	// artefact trail and enable crash recovery per round.
+	nextVersion := srcVersion + 1
+	draftDir := filepath.Join(o.featureDir, fmt.Sprintf("draft-v%d", nextVersion))
+	if err := copyDir(srcDraftDir, draftDir); err != nil {
+		return fmt.Errorf("copy draft-v%d to draft-v%d: %w", srcVersion, nextVersion, err)
+	}
+	ws.DraftVersion = nextVersion
 
 	prompt := BuildRevisionPrompt(string(findingsJSON), draftDir, round)
 	outPath := filepath.Join(o.featureDir, fmt.Sprintf("revision-round-%d.json", round))

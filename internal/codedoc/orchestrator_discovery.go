@@ -7,8 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-
-	"github.com/foundry-zero/adversarial-spec-system/internal/specworkflow"
 )
 
 // ---------------------------------------------------------------------------
@@ -32,44 +30,6 @@ type cdDiscoveryResult struct {
 // versionedFilename builds a filename like "discovery-output-claude-v1.json".
 func versionedFilename(base, provider string, round int, ext string) string {
 	return fmt.Sprintf("%s-%s-v%d%s", base, provider, round, ext)
-}
-
-// ---------------------------------------------------------------------------
-// RunDiscovery — the main entry point for the discovery phase
-// ---------------------------------------------------------------------------
-
-// DiscoveryDeps holds the dependencies needed by RunDiscovery. This avoids
-// coupling to a full orchestrator struct and makes testing straightforward.
-type DiscoveryDeps struct {
-	// Runner is the Claude agent runner.
-	Runner specworkflow.AgentRunner
-	// CodexRunner is the Codex agent runner (nil when dual-provider is disabled).
-	CodexRunner specworkflow.AgentRunner
-	// MergeRunner is the agent runner used for the merge agent (typically Claude).
-	MergeRunner specworkflow.AgentRunner
-	// Config is the validated codedoc configuration.
-	Config CodedocConfig
-	// FeatureDir is the workspace directory for this feature
-	// (e.g., workspace/codedoc/{feature}/).
-	FeatureDir string
-	// CodePath is the filesystem path to the target repository.
-	CodePath string
-	// Mode is "full" or "incremental".
-	Mode string
-	// Round is the discovery round number (1-indexed).
-	Round int
-}
-
-// DiscoveryResult holds the outputs of a successful discovery phase.
-type DiscoveryResult struct {
-	// Output is the canonical (possibly merged) discovery output.
-	Output *DiscoveryOutput
-	// CostUSD is the total cost across all agent invocations.
-	CostUSD float64
-	// DurationMS is the wall-clock duration of the longest agent.
-	DurationMS int64
-	// Warnings accumulated during discovery (e.g., single-provider fallback).
-	Warnings []string
 }
 
 // RunDiscovery executes the discovery phase. When dual-provider is enabled,

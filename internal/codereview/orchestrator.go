@@ -14,50 +14,8 @@ import (
 	"github.com/foundry-zero/adversarial-spec-system/internal/specworkflow"
 )
 
-// ---------------------------------------------------------------------------
-// StartCodeReviewRequest
-// ---------------------------------------------------------------------------
-
-// StartCodeReviewRequest contains the parameters for starting a code review.
-type StartCodeReviewRequest struct {
-	// CodePath is the filesystem path to the target git repository (required).
-	CodePath string
-	// FeatureName is the kebab-case identifier for this code review (required).
-	FeatureName string
-	// SpecPath is the optional path to a spec markdown file.
-	SpecPath string
-	// TaskListPath is the optional path to a task list file.
-	TaskListPath string
-}
-
 // kebabCaseRegex matches valid kebab-case identifiers.
 var kebabCaseRegex = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
-
-// ---------------------------------------------------------------------------
-// CRGateResponse
-// ---------------------------------------------------------------------------
-
-// CRGateResponse carries a human's response to a code review gate.
-type CRGateResponse struct {
-	// Action is the gate action: "confirm", "cancel", "re-review", "accept", "escalate".
-	Action string
-	// Comment is optional free-text feedback.
-	Comment string
-}
-
-// ---------------------------------------------------------------------------
-// GitInfoProvider
-// ---------------------------------------------------------------------------
-
-// GitInfoProvider abstracts git operations for testing.
-type GitInfoProvider interface {
-	// IsGitRepo returns true if the path is a git repository.
-	IsGitRepo(path string) bool
-	// GetBranch returns the current branch name.
-	GetBranch(path string) (string, error)
-	// GetHeadSHA returns the HEAD commit SHA.
-	GetHeadSHA(path string) (string, error)
-}
 
 // defaultGitInfoProvider uses exec.Command to query git.
 type defaultGitInfoProvider struct{}
@@ -88,31 +46,6 @@ func (g *defaultGitInfoProvider) GetHeadSHA(path string) (string, error) {
 // ---------------------------------------------------------------------------
 // CodeReviewOrchestrator
 // ---------------------------------------------------------------------------
-
-// CROrchestratorConfig holds the parameters required to construct a
-// CodeReviewOrchestrator.
-type CROrchestratorConfig struct {
-	// WorkspaceDir is the root directory for all workflow artefacts.
-	WorkspaceDir string
-	// Config is the code review configuration.
-	Config CodeReviewConfig
-	// GitProvider abstracts git operations (nil = default).
-	GitProvider GitInfoProvider
-	// Runner is the primary agent runner (Claude).
-	Runner specworkflow.AgentRunner
-	// CodexRunner is the optional Codex agent runner (nil = Claude-only).
-	CodexRunner specworkflow.AgentRunner
-	// FixRunner is the runner for the fix agent, constructed with
-	// --allowedTools "Read,Write,Bash" (no --dangerously-skip-permissions).
-	// If nil, falls back to Runner.
-	FixRunner specworkflow.AgentRunner
-	// Emitter broadcasts workflow events via WebSocket.
-	Emitter specworkflow.EventEmitter
-	// AuditLogger writes structured events to JSONL audit log (nil = no logging).
-	AuditLogger *CRAuditLogger
-	// OTELPort is the gRPC OTLP receiver port for telemetry (0 = disabled).
-	OTELPort int
-}
 
 // CodeReviewOrchestrator drives a single code review workflow through its
 // lifecycle.

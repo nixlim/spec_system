@@ -7,6 +7,61 @@ import (
 )
 
 // ---------------------------------------------------------------------------
+// MAJ-002 regression: severity normalisation in ValidateReviewerOutput
+// ---------------------------------------------------------------------------
+
+// TestValidateReviewerOutput_SeverityCaseMismatch ensures that findings with
+// uppercase or mixed-case severities (e.g. "CRITICAL", "Major") are accepted,
+// normalised to lowercase, and correctly counted by countFindings /
+// CountOpenCriticalMajor. Before the fix, such findings passed validation but
+// silently fell through the switch-cases, producing a zero CRITICAL count.
+func TestValidateReviewerOutput_SeverityCaseMismatch(t *testing.T) {
+	o := &ReviewerOutput{
+		SchemaVersion: "1.0",
+		Agent:         "reviewer",
+		Round:         1,
+		LensesApplied: []string{"correctness"},
+		Findings: []ReviewFinding{
+			{ID: "F1", Severity: "CRITICAL", Status: "open", Description: "d", Impact: "i", Recommendation: "r", Lens: "correctness", AffectedSection: "s"},
+			{ID: "F2", Severity: "Major", Status: "open", Description: "d", Impact: "i", Recommendation: "r", Lens: "correctness", AffectedSection: "s"},
+			{ID: "F3", Severity: "MINOR", Status: "open", Description: "d", Impact: "i", Recommendation: "r", Lens: "correctness", AffectedSection: "s"},
+		},
+	}
+
+	valid, rejected, errs := ValidateReviewerOutput(o)
+	if rejected != 0 {
+		t.Errorf("expected 0 rejected, got %d (errs: %v)", rejected, errs)
+	}
+	if len(valid) != 3 {
+		t.Errorf("expected 3 valid findings, got %d", len(valid))
+	}
+
+	// All severities must be normalised to lowercase.
+	for _, f := range valid {
+		if f.Severity != strings.ToLower(f.Severity) {
+			t.Errorf("severity not normalised: got %q", f.Severity)
+		}
+	}
+
+	// countFindings must count the normalised findings correctly.
+	summary := countFindings(valid)
+	if summary.OpenCritical != 1 {
+		t.Errorf("OpenCritical: want 1, got %d", summary.OpenCritical)
+	}
+	if summary.OpenMajor != 1 {
+		t.Errorf("OpenMajor: want 1, got %d", summary.OpenMajor)
+	}
+	if summary.OpenMinor != 1 {
+		t.Errorf("OpenMinor: want 1, got %d", summary.OpenMinor)
+	}
+
+	// CountOpenCriticalMajor must see both CRITICAL and MAJOR.
+	if n := CountOpenCriticalMajor(valid); n != 2 {
+		t.Errorf("CountOpenCriticalMajor: want 2, got %d", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // DiscoveryOutput JSON schema conformance
 // ---------------------------------------------------------------------------
 

@@ -88,6 +88,12 @@ func (s *MetricsStore) Close() error {
 
 func (s *MetricsStore) createSchema() error {
 	const schema = `
+	-- workflow_metrics aggregates cost and token usage per workflow run.
+	-- feature_name is the logical foreign key to the filesystem state snapshot:
+	--   spec workflows:   workspace/specs/{feature_name}/workflow-state.json
+	--   codedoc workflows: workspace/codedoc/{feature_name}/workflow-state.json
+	--   codereview workflows: workspace/codereview/{feature_name}/workflow-state.json
+	-- It is also the primary key of metric_events.feature_name below.
 	CREATE TABLE IF NOT EXISTS workflow_metrics (
 		feature_name    TEXT PRIMARY KEY,
 		input_tokens    INTEGER NOT NULL DEFAULT 0,

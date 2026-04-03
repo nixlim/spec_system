@@ -1,60 +1,6 @@
 package codedoc
 
 // ---------------------------------------------------------------------------
-// Codedoc Verdict
-// ---------------------------------------------------------------------------
-
-const (
-	// VerdictPass means all findings are resolved or MINOR/OBSERVATION only.
-	// Routes to CD_WRITING.
-	VerdictPass = "PASS"
-	// VerdictPassWithGate means unresolved CRITICAL or MAJOR remain but
-	// min_rounds is met. Routes to CD_HUMAN_GATE_FINAL for human decision.
-	VerdictPassWithGate = "PASS_WITH_GATE"
-	// VerdictRevise means unresolved CRITICAL or MAJOR remain and min_rounds
-	// not yet met. Routes to CD_REVIEWING for another round.
-	VerdictRevise = "REVISE"
-)
-
-// ---------------------------------------------------------------------------
-// Codedoc states (string constants for next-state routing)
-// ---------------------------------------------------------------------------
-
-const (
-	CDStateReviewing     = "CD_REVIEWING"
-	CDStateHumanGateFinal = "CD_HUMAN_GATE_FINAL"
-	CDStateWriting       = "CD_WRITING"
-)
-
-// ---------------------------------------------------------------------------
-// FindingSummary
-// ---------------------------------------------------------------------------
-
-// FindingSummary holds per-severity counts for the judge output.
-type FindingSummary struct {
-	OpenCritical    int `json:"open_critical"`
-	OpenMajor       int `json:"open_major"`
-	OpenMinor       int `json:"open_minor"`
-	OpenObservation int `json:"open_observation"`
-	Resolved        int `json:"resolved"`
-	WontFix         int `json:"wontfix"`
-}
-
-// ---------------------------------------------------------------------------
-// ConvergenceResult
-// ---------------------------------------------------------------------------
-
-// ConvergenceResult is the outcome of evaluating convergence for a codedoc
-// review round.
-type ConvergenceResult struct {
-	Verdict        string         `json:"verdict"`
-	NextState      string         `json:"next_state"`
-	Reasoning      string         `json:"reasoning"`
-	FindingSummary FindingSummary `json:"finding_summary"`
-	StaleDetected  bool           `json:"stale_detected"`
-}
-
-// ---------------------------------------------------------------------------
 // EvaluateConvergence
 // ---------------------------------------------------------------------------
 
