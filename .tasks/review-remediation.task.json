@@ -1,0 +1,200 @@
+{
+  "version": "0.1.0",
+  "tasks": [
+    {
+      "task_id": "secure-codedoc-start-inputs",
+      "task_name": "Secure codedoc start input validation",
+      "goal": "Codedoc start rejects unsafe feature names and invalid code paths before any workspace path is constructed or a 202 response is returned.",
+      "inputs": [
+        {"name": "feature_name", "type": "string", "constraints": "must be a safe slug with no path separators or traversal segments", "source": "POST /api/codedoc/start"},
+        {"name": "code_path", "type": "string", "constraints": "must exist and resolve to a directory", "source": "POST /api/codedoc/start"}
+      ],
+      "outputs": [
+        {"name": "validated_request", "type": "HTTP request handling", "constraints": "invalid input returns 4xx without creating workspace files", "destination": "internal/api/codedoc_handlers.go"},
+        {"name": "safe_workspace_paths", "type": "filesystem path usage", "constraints": "all codedoc paths stay under workspace/codedoc/<feature>", "destination": "internal/codedoc/orchestrator.go"}
+      ],
+      "acceptance": [
+        "POST /api/codedoc/start with feature_name ../escape returns 400 and does not create files outside workspace/codedoc",
+        "POST /api/codedoc/start with a missing code_path returns 400",
+        "POST /api/codedoc/start with a file code_path returns 400",
+        "Valid codedoc start requests still return 202",
+        "go test ./internal/api ./internal/codedoc -run 'TestCodedocHandlers|TestOrchestrator' passes for input validation cases"
+      ],
+      "depends_on": {"status": "N/A", "reason": "Highest-priority security fix"},
+      "constraints": ["Do not rely on UI-only validation", "Reject unsafe input before any goroutine launch"],
+      "files_scope": [
+        "internal/api/codedoc_handlers.go",
+        "internal/codedoc/orchestrator.go",
+        "internal/codedoc/orchestrator_helpers.go",
+        "internal/api/codedoc_handlers_test.go",
+        "internal/codedoc/orchestrator_test.go"
+      ],
+      "priority": "critical",
+      "estimate": "small"
+    },
+    {
+      "task_id": "durable-codedoc-start-and-resume",
+      "task_name": "Make codedoc start durable and resumable",
+      "goal": "Codedoc start persists initial workflow state before returning, detects persisted conflicts after restart, and allows gate actions to resume workflows instead of failing on missing in-memory orchestrators.",
+      "inputs": [
+        {"name": "start_request", "type": "HTTP request", "constraints": "validated codedoc start payload", "source": "POST /api/codedoc/start"},
+        {"name": "persisted_state", "type": "workflow-state.json", "constraints": "may exist from a prior run or restart", "source": "workspace/codedoc/<feature>"}
+      ],
+      "outputs": [
+        {"name": "durable_start", "type": "workflow state persistence", "constraints": "initial state exists on disk before async execution proceeds", "destination": "internal/codedoc/orchestrator_helpers.go"},
+        {"name": "resume_gate_support", "type": "HTTP workflow recovery", "constraints": "gate POSTs work after restart", "destination": "internal/api/codedoc_handlers.go"}
+      ],
+      "acceptance": [
+        "Starting a codedoc workflow creates the state directory and workflow-state.json before the background transition begins",
+        "Starting a codedoc workflow with an existing persisted feature returns conflict or resume guidance instead of overwriting state",
+        "A codedoc scope gate action succeeds after server restart when persisted state exists",
+        "A codedoc final gate action succeeds after server restart when persisted state exists",
+        "go test ./internal/api ./internal/codedoc passes for durable start and resume scenarios"
+      ],
+      "depends_on": ["secure-codedoc-start-inputs"],
+      "constraints": ["Do not require manual re-registration of workflows after restart", "Avoid breaking existing in-memory fast path"],
+      "files_scope": [
+        "internal/api/codedoc_handlers.go",
+        "internal/codedoc/orchestrator.go",
+        "internal/codedoc/orchestrator_helpers.go",
+        "internal/api/codedoc_handlers_test.go",
+        "internal/codedoc/orchestrator_test.go"
+      ],
+      "priority": "critical",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "repair-holdout-generation-contract",
+      "task_name": "Repair holdout generation artifact contract",
+      "goal": "Holdout generation dispatch produces validated JSON and markdown artifacts per round, and invalid or missing holdout outputs fail the stage instead of being treated as success.",
+      "inputs": [
+        {"name": "spec_input", "type": "markdown file", "constraints": "current spec exists for the active round", "source": "workspace/specs/<feature>"},
+        {"name": "merged_findings", "type": "JSON file", "constraints": "current round merged findings exist", "source": "workspace/specs/<feature>"}
+      ],
+      "outputs": [
+        {"name": "holdout_json", "type": "HoldoutOutput JSON", "constraints": "validates against HoldoutOutput schema for the active round", "destination": "workspace/specs/<feature>/holdout-round-{N}.json"},
+        {"name": "holdout_markdown", "type": "markdown file", "constraints": "exists and is referenced by the validated JSON output", "destination": "workspace/specs/<feature>/holdouts-round-{N}.md"}
+      ],
+      "acceptance": [
+        "Holdout generation uses a single structured prompt builder rather than an ad hoc inline prompt string",
+        "A successful holdout run writes holdout-round-{N}.json and holdouts-round-{N}.md",
+        "Missing holdouts-round-{N}.md causes the stage to fail",
+        "Invalid holdout-round-{N}.json causes the stage to fail",
+        "go test ./internal/specworkflow -run 'Test.*Holdout' passes with contract validation coverage"
+      ],
+      "depends_on": {"status": "N/A", "reason": "Independent of codedoc hardening and blocks correct holdout behavior"},
+      "constraints": ["Preserve legacy workflows that do not yet have round holdouts", "Use existing HoldoutOutput schema as the validation boundary or update it alongside callers"],
+      "files_scope": [
+        "internal/specworkflow/orchestrator_review.go",
+        "internal/specworkflow/holdout_output_schema.go",
+        "internal/specworkflow/codex_runner.go",
+        "internal/specworkflow/claude_runner.go",
+        "internal/specworkflow/prompts.go",
+        "internal/specworkflow/orchestrator_review_test.go",
+        "internal/specworkflow/prompts_test.go"
+      ],
+      "priority": "critical",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "integrate-holdouts-through-workflow",
+      "task_name": "Integrate holdouts into review, revise, finalize, and UI flow",
+      "goal": "Round holdouts affect reviewer inputs, reviser filtering, finalization output, and dashboard stage rendering in the way described by the holdout spec.",
+      "inputs": [
+        {"name": "round_holdouts", "type": "markdown file", "constraints": "latest holdouts-round-{N}.md may exist after holdout generation", "source": "workspace/specs/<feature>"},
+        {"name": "merged_findings", "type": "merged finding set", "constraints": "must distinguish spec-targeted from holdout-targeted findings", "source": "internal/specworkflow/agent_output.go"}
+      ],
+      "outputs": [
+        {"name": "targeted_findings", "type": "finding model", "constraints": "each finding carries target=spec or target=holdout", "destination": "internal/specworkflow/agent_output.go"},
+        {"name": "aligned_pipeline_ui", "type": "dashboard behavior", "constraints": "stepper includes holdout stage between review and revise", "destination": "static/app.js"}
+      ],
+      "acceptance": [
+        "Reviewer prompts in round 2+ include the latest round holdout path",
+        "Reviser prompts exclude holdout-targeted findings and never receive holdout files",
+        "Finalization uses holdouts-round-{N}.md when present and falls back to the legacy holdout file otherwise",
+        "The dashboard stepper shows a Holdout stage between Review and Revise",
+        "go test ./internal/specworkflow and relevant frontend/manual verification cover the updated flow"
+      ],
+      "depends_on": ["repair-holdout-generation-contract"],
+      "constraints": ["Do not leak holdout content into reviser prompts", "Keep legacy finalization fallback until old workspaces are migrated"],
+      "files_scope": [
+        "internal/specworkflow/agent_output.go",
+        "internal/specworkflow/prompts.go",
+        "internal/specworkflow/prompts_test.go",
+        "internal/specworkflow/finalize.go",
+        "static/app.js"
+      ],
+      "priority": "high",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "normalize-workflow-contracts",
+      "task_name": "Normalize shared workflow API and UI contracts",
+      "goal": "Workspace overrides, reset actions, startup config requirements, and gate payloads behave consistently across spec workflow, code review, and codedoc.",
+      "inputs": [
+        {"name": "api_requests", "type": "HTTP payloads", "constraints": "workspace_dir and reset actions differ by workflow type today", "source": "internal/api handlers and static/app.js"},
+        {"name": "server_config", "type": "YAML config", "constraints": "default startup must either be valid or fail clearly at boot", "source": "cmd/specworkflow/main.go and internal/specworkflow/config.go"}
+      ],
+      "outputs": [
+        {"name": "consistent_api_contract", "type": "server and UI behavior", "constraints": "supported fields are handled uniformly or rejected explicitly", "destination": "internal/api/*.go and static/app.js"},
+        {"name": "accurate_gate_payloads", "type": "codedoc gate response", "constraints": "final gate fields reflect real unresolved counts and drift warnings", "destination": "internal/api/codedoc_handlers.go"}
+      ],
+      "acceptance": [
+        "Spec workflow workspace overrides are applied before runner construction and source-doc copying",
+        "Code review workspace overrides are either fully supported end to end or rejected explicitly",
+        "Codedoc workspace_dir is either implemented server-side or removed from the UI payload",
+        "Terminal reset buttons call the correct endpoint for each workflow type",
+        "Starting the server without required spec skill templates fails early with a clear error or uses valid defaults",
+        "Codedoc final gate payload reports real unresolved counts and drift warning values",
+        "Unused codedoc gate comment wiring is either removed or transmitted and persisted"
+      ],
+      "depends_on": {"status": "N/A", "reason": "Cross-cutting workflow cleanup can proceed in parallel with holdout work"},
+      "constraints": ["Prefer explicit rejection over silent field dropping", "Do not preserve misleading UI affordances"],
+      "files_scope": [
+        "cmd/specworkflow/main.go",
+        "internal/api/workflow_handler.go",
+        "internal/api/codereview_handlers.go",
+        "internal/api/codedoc_handlers.go",
+        "internal/specworkflow/config.go",
+        "static/app.js",
+        "internal/api/*_test.go"
+      ],
+      "priority": "high",
+      "estimate": "large"
+    },
+    {
+      "task_id": "add-review-regression-coverage",
+      "task_name": "Add regression coverage for audited failure paths",
+      "goal": "Automated tests fail on the audited wiring regressions and pass only when the security, holdout, lifecycle, and UI contract issues are corrected.",
+      "inputs": [
+        {"name": "audit_findings", "type": "review findings", "constraints": "security, holdout, lifecycle, and workflow contract failures", "source": "2026-04-03 repo audit"},
+        {"name": "implementation_changes", "type": "code changes", "constraints": "produced by the remediation tasks", "source": "repo working tree"}
+      ],
+      "outputs": [
+        {"name": "regression_tests", "type": "Go tests and existing UI verification notes", "constraints": "cover all high-severity reviewed failures", "destination": "internal/api, internal/codedoc, internal/specworkflow test suites"}
+      ],
+      "acceptance": [
+        "A traversal attempt in codedoc start is covered by an automated test",
+        "Codedoc durable start and resume-after-restart gate handling are covered by automated tests",
+        "Holdout artifact validation and downstream consumption are covered by automated tests",
+        "Workflow contract tests cover reset endpoint selection and workspace override behavior where server-side logic exists",
+        "go test ./... passes"
+      ],
+      "depends_on": [
+        "durable-codedoc-start-and-resume",
+        "integrate-holdouts-through-workflow",
+        "normalize-workflow-contracts"
+      ],
+      "constraints": ["Prefer integration tests for handler/orchestrator boundaries where the bugs manifested", "Do not close remediation while go test ./... is red"],
+      "files_scope": [
+        "internal/api/codedoc_handlers_test.go",
+        "internal/api/codereview_handlers_test.go",
+        "internal/api/workflow_handler_test.go",
+        "internal/specworkflow/*_test.go",
+        "internal/codedoc/*_test.go"
+      ],
+      "priority": "high",
+      "estimate": "medium"
+    }
+  ]
+}
