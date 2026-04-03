@@ -134,17 +134,26 @@ var reviewerLensGroups = []string{"clarity", "consistency", "security", "correct
 // Dispatch
 // ---------------------------------------------------------------------------
 
+// SpecReviewerLensGroups returns the canonical lens groups for spec review workflows.
+func SpecReviewerLensGroups() []string {
+	return []string{"clarity", "consistency", "security", "correctness"}
+}
+
 // DispatchReviewers launches reviewer agents in parallel, collects their
-// results, and applies retry logic on failure. When codexRunner is non-nil,
-// 8 goroutines are launched (4 claude + 4 codex). When nil, 4 claude-only.
+// results, and applies retry logic on failure. lensGroups defines which
+// lens groups to dispatch (e.g. SpecReviewerLensGroups() for spec workflows
+// or codereview.CodeReviewLensGroups for code review workflows).
+//
+// When codexRunner is non-nil, 2*len(lensGroups) goroutines are launched.
+// When nil, len(lensGroups) claude-only goroutines.
 //
 // codexOutputPaths should be nil when codexRunner is nil.
 //
-// Failure tolerance scales with total reviewers: maxFailuresAllowed = total/2 - 1
-// (4 reviewers → 1 allowed failure, 8 reviewers → 3 allowed failures).
+// Failure tolerance scales with total reviewers: maxFailuresAllowed = total/2 - 1.
 func DispatchReviewers(
 	runner AgentRunner,
 	codexRunner AgentRunner,
+	lensGroups []string,
 	prompts map[string]string,
 	outputPaths map[string]string,
 	codexOutputPaths map[string]string,
@@ -164,7 +173,7 @@ func DispatchReviewers(
 	)
 
 	// Validate and launch claude reviewers.
-	for _, lens := range reviewerLensGroups {
+	for _, lens := range lensGroups {
 		prompt, ok := prompts[lens]
 		if !ok {
 			return nil, fmt.Errorf("missing prompt for lens group %q", lens)
@@ -197,7 +206,7 @@ func DispatchReviewers(
 
 	// Launch codex reviewers when available.
 	if codexRunner != nil && codexOutputPaths != nil {
-		for _, lens := range reviewerLensGroups {
+		for _, lens := range lensGroups {
 			prompt, ok := prompts[lens]
 			if !ok {
 				continue // already validated above for claude

@@ -199,7 +199,7 @@ func TestConvergence_Authority_ExcessDowngradesRejected(t *testing.T) {
 		{FindingID: "F-003", FromSeverity: SeverityMajor, ToSeverity: SeverityMinor, ReasonCode: "REVIEWER_ERROR", ReasonDetail: "reviewer was wrong"},
 	}
 
-	result := CheckAuthorityLimits(judge, 0, 0)
+	result := CheckAuthorityLimits(judge, 0, 0, 100)
 
 	if result.Valid {
 		t.Fatal("expected authority check to fail with >2 downgrades per round")
@@ -221,7 +221,7 @@ func TestConvergence_Authority_ExcessDismissalsRejected(t *testing.T) {
 		{FindingID: "F-004", NewStatus: "dismissed", Explanation: "not applicable"},
 	}
 
-	result := CheckAuthorityLimits(judge, 0, 0)
+	result := CheckAuthorityLimits(judge, 0, 0, 100)
 
 	if result.Valid {
 		t.Fatal("expected authority check to fail with >3 dismissals per round")
@@ -240,7 +240,7 @@ func TestConvergence_Authority_InvalidReasonCodeRejected(t *testing.T) {
 		{FindingID: "F-001", FromSeverity: SeverityCritical, ToSeverity: SeverityMajor, ReasonCode: "BECAUSE_I_SAID_SO", ReasonDetail: "invalid"},
 	}
 
-	result := CheckAuthorityLimits(judge, 0, 0)
+	result := CheckAuthorityLimits(judge, 0, 0, 100)
 
 	if result.Valid {
 		t.Fatal("expected authority check to fail with invalid reason_code")
@@ -261,25 +261,36 @@ func TestConvergence_Authority_InvalidReasonCodeRejected(t *testing.T) {
 	}
 }
 
-func TestConvergence_Authority_CumulativeExceedsThreshold(t *testing.T) {
+func TestConvergence_Authority_DismissalPercentageExceedsThreshold(t *testing.T) {
 	judge := minimalJudge(VerdictRevise)
-	judge.Downgrades = []Downgrade{
-		{FindingID: "F-001", FromSeverity: SeverityCritical, ToSeverity: SeverityMajor, ReasonCode: "DUPLICATE_OF", ReasonDetail: "dup"},
-	}
 	judge.IssueUpdates = []IssueUpdate{
-		{FindingID: "F-002", NewStatus: "dismissed", Explanation: "not relevant"},
+		{FindingID: "F-001", NewStatus: "dismissed", Explanation: "not relevant"},
 	}
 
-	// Prior cumulative: 3 downgrades + 1 dismissal = 4.
-	// This round: 1 downgrade + 1 dismissal = 2.
-	// Total: 6 > 5 threshold.
-	result := CheckAuthorityLimits(judge, 3, 1)
+	// Prior cumulative: 0 downgrades + 7 dismissals.
+	// This round: 1 dismissal.
+	// Total dismissals: 8 out of 10 raised = 80% -> escalate.
+	result := CheckAuthorityLimits(judge, 0, 7, 10)
 
 	if result.Valid {
-		t.Fatal("expected authority check to fail when cumulative >5")
+		t.Fatal("expected authority check to fail when dismissals reach 80%")
 	}
-	if !strings.Contains(result.Reason, "cumulative") && !strings.Contains(result.Reason, "escalation threshold") {
-		t.Errorf("expected reason about cumulative escalation, got: %s", result.Reason)
+	if !strings.Contains(result.Reason, "cumulative dismissals") && !strings.Contains(result.Reason, "80%") {
+		t.Errorf("expected reason about dismissal percentage, got: %s", result.Reason)
+	}
+}
+
+func TestConvergence_Authority_DismissalsBelowThreshold(t *testing.T) {
+	judge := minimalJudge(VerdictRevise)
+	judge.IssueUpdates = []IssueUpdate{
+		{FindingID: "F-001", NewStatus: "dismissed", Explanation: "not relevant"},
+	}
+
+	// Prior: 6 dismissals. This round: 1. Total: 7/10 = 70% -> no escalation.
+	result := CheckAuthorityLimits(judge, 0, 6, 10)
+
+	if !result.Valid {
+		t.Errorf("expected authority check to pass at 70%%, got reason: %s", result.Reason)
 	}
 }
 
@@ -354,27 +365,48 @@ func TestConvergence_ProcessVerdict_BlockPassesThrough(t *testing.T) {
 	}
 }
 
-func TestConvergence_ProcessVerdict_EscalationOnCumulativeBreach(t *testing.T) {
+func TestConvergence_ProcessVerdict_EscalationOnDismissalPercentage(t *testing.T) {
 	tracker := NewIssueTracker()
 	judge := minimalJudge(VerdictRevise)
-	judge.Downgrades = []Downgrade{
-		{FindingID: "F-001", FromSeverity: SeverityCritical, ToSeverity: SeverityMajor, ReasonCode: "DUPLICATE_OF", ReasonDetail: "dup"},
-	}
 	judge.IssueUpdates = []IssueUpdate{
+		{FindingID: "F-001", NewStatus: "dismissed", Explanation: "not relevant"},
 		{FindingID: "F-002", NewStatus: "dismissed", Explanation: "not relevant"},
 	}
 	revision := minimalRevision()
 	state := minimalState(3)
+	// Prior: 6 dismissals. This round: 2. Total: 8/10 = 80% -> escalate.
 	config := ConvergenceConfig{
 		MinRounds:            2,
-		CumulativeDowngrades: 3,
-		CumulativeDismissals: 1,
+		CumulativeDismissals: 6,
+		TotalRaised:          10,
 	}
 
 	result := ProcessVerdict(judge, tracker, revision, state, config)
 
 	if !result.ShouldEscalate {
-		t.Error("expected ShouldEscalate to be true when cumulative >5")
+		t.Error("expected ShouldEscalate to be true when dismissals reach 80%")
+	}
+}
+
+func TestConvergence_ProcessVerdict_NoEscalationBelowDismissalThreshold(t *testing.T) {
+	tracker := NewIssueTracker()
+	judge := minimalJudge(VerdictRevise)
+	judge.IssueUpdates = []IssueUpdate{
+		{FindingID: "F-001", NewStatus: "dismissed", Explanation: "not relevant"},
+	}
+	revision := minimalRevision()
+	state := minimalState(3)
+	// Prior: 6 dismissals. This round: 1. Total: 7/10 = 70% -> no escalation.
+	config := ConvergenceConfig{
+		MinRounds:            2,
+		CumulativeDismissals: 6,
+		TotalRaised:          10,
+	}
+
+	result := ProcessVerdict(judge, tracker, revision, state, config)
+
+	if result.ShouldEscalate {
+		t.Error("expected ShouldEscalate to be false at 70%")
 	}
 }
 

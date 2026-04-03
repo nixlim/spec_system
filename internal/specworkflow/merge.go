@@ -49,6 +49,22 @@ func principlesMatch(a, b *string) bool {
 	return strings.ToLower(strings.TrimSpace(*a)) == strings.ToLower(strings.TrimSpace(*b))
 }
 
+// DedupKeyFunc produces a string key for a finding used to determine
+// duplicates. Two findings with the same key are considered duplicates.
+type DedupKeyFunc func(f *Finding) string
+
+// SpecDedupKey is the default dedup key function for spec workflows.
+// It uses the tuple (affected_section, lens, constitution_principle).
+func SpecDedupKey(f *Finding) string {
+	section := normalizeSection(f.AffectedSection)
+	lens := strings.ToLower(strings.TrimSpace(f.Lens))
+	principle := ""
+	if f.ConstitutionPrinciple != nil {
+		principle = strings.ToLower(strings.TrimSpace(*f.ConstitutionPrinciple))
+	}
+	return section + "|" + lens + "|" + principle
+}
+
 // isDuplicate returns true if two findings are considered duplicates.
 // Two findings are duplicates if ALL THREE match:
 //
@@ -96,9 +112,19 @@ func assignGlobalIDs(findings []MergedFinding) {
 	}
 }
 
-// findDuplicate searches existing candidates for a duplicate of f.
+// findDuplicate searches existing candidates for a duplicate of f using
+// the provided key function. When keyFn is nil, falls back to isDuplicate.
 // Returns the index into candidates if found, or -1 if no duplicate exists.
-func findDuplicate(candidates []candidateFinding, f *Finding) int {
+func findDuplicate(candidates []candidateFinding, f *Finding, keyFn DedupKeyFunc) int {
+	if keyFn != nil {
+		key := keyFn(f)
+		for i := range candidates {
+			if keyFn(&candidates[i].finding) == key {
+				return i
+			}
+		}
+		return -1
+	}
 	for i := range candidates {
 		if isDuplicate(&candidates[i].finding, f) {
 			return i
@@ -111,15 +137,22 @@ func findDuplicate(candidates []candidateFinding, f *Finding) int {
 // produces a single deduplicated MergedFindings ledger. The algorithm is
 // entirely deterministic — no LLM calls are made.
 //
+// dedupKeyFn controls how duplicates are detected. When nil, the default
+// spec workflow dedup (affected_section, lens, constitution_principle) is used.
+//
+// promoteSeverity controls whether the higher severity is kept when merging
+// duplicates. Spec workflows set this to true; code review workflows set it
+// to false because severity is part of the dedup key.
+//
 // The merge proceeds in these steps:
 //  1. Parse and validate all reviewer outputs, tracking rejected findings.
 //  2. Collect all valid findings with source attribution.
-//  3. Deduplicate by (affected_section, lens, constitution_principle).
+//  3. Deduplicate using the provided key function.
 //  4. Assign global IDs in severity order (CRIT, MAJ, MIN, OBS).
 //  5. Sort alphabetically by affected_section within each severity group.
 //  6. Record each merge in the dedup_log.
 //  7. Build the MergedFindings struct with all metadata.
-func MergeReviewerOutputs(outputs []*ReviewerOutput, round int) (*MergedFindings, error) {
+func MergeReviewerOutputs(outputs []*ReviewerOutput, round int, dedupKeyFn DedupKeyFunc, promoteSeverity bool) (*MergedFindings, error) {
 	if len(outputs) == 0 {
 		return nil, fmt.Errorf("MergeReviewerOutputs: at least one ReviewerOutput is required")
 	}
@@ -139,14 +172,15 @@ func MergeReviewerOutputs(outputs []*ReviewerOutput, round int) (*MergedFindings
 
 		for _, f := range validFindings {
 			f := f // capture loop variable
-			idx := findDuplicate(candidates, &f)
+			idx := findDuplicate(candidates, &f, dedupKeyFn)
 
 			if idx >= 0 {
 				// Duplicate found — merge into existing candidate.
 				existing := &candidates[idx]
 
-				// Keep higher severity (lower numeric value = higher severity).
-				if f.Severity < existing.finding.Severity {
+				// Keep higher severity (lower numeric value = higher severity)
+				// only when promoteSeverity is enabled.
+				if promoteSeverity && f.Severity < existing.finding.Severity {
 					existing.finding.Severity = f.Severity
 				}
 

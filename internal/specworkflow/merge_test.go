@@ -88,7 +88,7 @@ func TestMerge_NoDuplicates(t *testing.T) {
 		}),
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 1)
+	result, err := MergeReviewerOutputs(outputs, 1, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestMerge_DuplicatesMergeHigherSeverity(t *testing.T) {
 		}),
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 1)
+	result, err := MergeReviewerOutputs(outputs, 1, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestMerge_RecommendationConcatenation(t *testing.T) {
 		}),
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 1)
+	result, err := MergeReviewerOutputs(outputs, 1, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestMerge_CaseInsensitiveSectionMatch(t *testing.T) {
 		}),
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 1)
+	result, err := MergeReviewerOutputs(outputs, 1, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestMerge_WhitespaceNormalization(t *testing.T) {
 		}),
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 1)
+	result, err := MergeReviewerOutputs(outputs, 1, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestMerge_NullConstitutionPrincipleMatchesAnything(t *testing.T) {
 		}),
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 1)
+	result, err := MergeReviewerOutputs(outputs, 1, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestMerge_SeverityOrdering(t *testing.T) {
 		}),
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 1)
+	result, err := MergeReviewerOutputs(outputs, 1, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -297,7 +297,7 @@ func TestMerge_AlphabeticalWithinSeverity(t *testing.T) {
 		}),
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 1)
+	result, err := MergeReviewerOutputs(outputs, 1, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestMerge_DedupLogRecordsMerges(t *testing.T) {
 		}),
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 1)
+	result, err := MergeReviewerOutputs(outputs, 1, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestMerge_RejectedFindingsCounted(t *testing.T) {
 		}),
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 1)
+	result, err := MergeReviewerOutputs(outputs, 1, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -411,11 +411,11 @@ func TestMerge_Determinism(t *testing.T) {
 		}
 	}
 
-	result1, err := MergeReviewerOutputs(buildOutputs(), 1)
+	result1, err := MergeReviewerOutputs(buildOutputs(), 1, nil, true)
 	if err != nil {
 		t.Fatalf("run 1 error: %v", err)
 	}
-	result2, err := MergeReviewerOutputs(buildOutputs(), 1)
+	result2, err := MergeReviewerOutputs(buildOutputs(), 1, nil, true)
 	if err != nil {
 		t.Fatalf("run 2 error: %v", err)
 	}
@@ -453,7 +453,7 @@ func TestMerge_SingleReviewer(t *testing.T) {
 		}),
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 1)
+	result, err := MergeReviewerOutputs(outputs, 1, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -482,7 +482,7 @@ func TestMerge_EmptyFindings(t *testing.T) {
 		makeReviewerOutput("reviewer-2", []Finding{}),
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 1)
+	result, err := MergeReviewerOutputs(outputs, 1, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -499,12 +499,12 @@ func TestMerge_EmptyFindings(t *testing.T) {
 }
 
 func TestMerge_NoOutputsReturnsError(t *testing.T) {
-	_, err := MergeReviewerOutputs(nil, 1)
+	_, err := MergeReviewerOutputs(nil, 1, nil, true)
 	if err == nil {
 		t.Error("expected error for nil outputs, got nil")
 	}
 
-	_, err = MergeReviewerOutputs([]*ReviewerOutput{}, 1)
+	_, err = MergeReviewerOutputs([]*ReviewerOutput{}, 1, nil, true)
 	if err == nil {
 		t.Error("expected error for empty outputs, got nil")
 	}
@@ -517,7 +517,7 @@ func TestMerge_RoundMetadata(t *testing.T) {
 		}),
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 3)
+	result, err := MergeReviewerOutputs(outputs, 3, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -547,7 +547,7 @@ func TestMerge_EmptyConstitutionPrincipleMatchesEmpty(t *testing.T) {
 		}),
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 1)
+	result, err := MergeReviewerOutputs(outputs, 1, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -574,7 +574,7 @@ func TestMerge_CrossProviderDuplicate(t *testing.T) {
 		}),
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 1)
+	result, err := MergeReviewerOutputs(outputs, 1, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -614,7 +614,7 @@ func TestMerge_SingleProviderFinding(t *testing.T) {
 		}),
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 1)
+	result, err := MergeReviewerOutputs(outputs, 1, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -641,7 +641,7 @@ func TestMerge_SameSectionDifferentLens(t *testing.T) {
 		}),
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 1)
+	result, err := MergeReviewerOutputs(outputs, 1, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -669,7 +669,7 @@ func TestMerge_EightInputs(t *testing.T) {
 		)
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 1)
+	result, err := MergeReviewerOutputs(outputs, 1, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -705,7 +705,7 @@ func TestMerge_DedupLogProviderAttribution(t *testing.T) {
 		}),
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 1)
+	result, err := MergeReviewerOutputs(outputs, 1, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1085,7 +1085,7 @@ func TestMerge_ThreeWayDuplicate(t *testing.T) {
 		}),
 	}
 
-	result, err := MergeReviewerOutputs(outputs, 1)
+	result, err := MergeReviewerOutputs(outputs, 1, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

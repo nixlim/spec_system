@@ -64,7 +64,14 @@ func (o *Orchestrator) handleDrafting(state *WorkflowStateJSON, specDir string) 
 	}
 
 	// Single-provider (Claude only) — current behavior.
-	return o.handleSingleDrafting(state, specDir, prompt)
+	// Use --json-schema to enforce structured output when the runner supports it.
+	origRunner := o.runner
+	if cr, ok := o.runner.(*ClaudeRunner); ok {
+		o.runner = cr.WithJSONSchema(string(DrafterOutputSchema()))
+	}
+	err = o.handleSingleDrafting(state, specDir, prompt)
+	o.runner = origRunner // restore
+	return err
 }
 
 // handleSingleDrafting is the original single-provider drafting path.
@@ -108,10 +115,16 @@ func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, pro
 	var wg sync.WaitGroup
 	var claudeResult, codexResult drafterResult
 
+	// Build a schema-bound Claude runner for structured output.
+	var drafterClaudeRunner AgentRunner = o.runner
+	if cr, ok := o.runner.(*ClaudeRunner); ok {
+		drafterClaudeRunner = cr.WithJSONSchema(string(DrafterOutputSchema()))
+	}
+
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		claudeRunner := taggedRunner(o.runner, "drafter-claude")
+		claudeRunner := taggedRunner(drafterClaudeRunner, "drafter-claude")
 		exitCode, stderr, cost, duration, runErr := claudeRunner.Run(prompt, claudeOutPath, timeout)
 		claudeResult = drafterResult{provider: "claude", outPath: claudeOutPath, cost: cost, duration: duration}
 		if runErr != nil {

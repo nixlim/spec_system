@@ -1,0 +1,14 @@
+{
+  "eval_id": 0,
+  "eval_name": "audit-myagentsgigs",
+  "configuration": "with_skill",
+  "expectations": [
+    {"text": "has-5-levels", "passed": true, "evidence": "Report has explicit sections for Level 1 through Level 5, each with its own heading and evaluation"},
+    {"text": "uses-git-evidence", "passed": true, "evidence": "References commit hash d5b74a0, dates 2026-03-13, commit counts (17 total, 1 touching schema)"},
+    {"text": "finds-schema-files", "passed": true, "evidence": "Schema Files Found table lists all 7 migration files and openapi.yaml with first committed dates"},
+    {"text": "per-level-scoring", "passed": true, "evidence": "Level 1: Pass, Level 2: Pass (with minor gaps), Level 3: Partial, Level 4: Not fully evaluated, Level 5: Not evaluated"},
+    {"text": "has-recommendations", "passed": true, "evidence": "Three specific recommendations: reconcile kyc_status enum, consolidate notification models, add admin role to SQL CHECK"},
+    {"text": "churn-analysis", "passed": true, "evidence": "Churn Analysis section with table showing schema commits vs code commits ratio of 0.33"},
+    {"text": "structured-report", "passed": true, "evidence": "Follows the exact template from the skill: project name, overall maturity, date, summary, schema files table, per-level sections, recommendations, churn analysis"}
+  ]
+}

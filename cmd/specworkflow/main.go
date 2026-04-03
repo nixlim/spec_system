@@ -21,11 +21,15 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/foundry-zero/adversarial-spec-system/internal/api"
+	"github.com/foundry-zero/adversarial-spec-system/internal/codedoc"
+	"github.com/foundry-zero/adversarial-spec-system/internal/codereview"
 	"github.com/foundry-zero/adversarial-spec-system/internal/specworkflow"
+	"gopkg.in/yaml.v3"
 )
 
 func main() {
@@ -37,7 +41,21 @@ func main() {
 
 	// Set up server log ring buffer so all log.Printf output is captured.
 	logBuffer := api.NewLogBuffer(500)
-	log.SetOutput(io.MultiWriter(os.Stderr, logBuffer))
+	logWriters := []io.Writer{os.Stderr, logBuffer}
+
+	// Open a persistent log file in the workspace directory so the full
+	// server log survives beyond the ring buffer's 500-line window.
+	absWS, _ := filepath.Abs(*workspace)
+	_ = os.MkdirAll(absWS, 0755)
+	logFilePath := filepath.Join(absWS, "server.log")
+	logFile, logFileErr := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if logFileErr != nil {
+		fmt.Fprintf(os.Stderr, "WARNING: could not open log file %s: %v\n", logFilePath, logFileErr)
+	} else {
+		logWriters = append(logWriters, logFile)
+		defer logFile.Close()
+	}
+	log.SetOutput(io.MultiWriter(logWriters...))
 
 	// Resolve workspace to absolute path.
 	absWorkspace, err := filepath.Abs(*workspace)
@@ -58,6 +76,8 @@ func main() {
 
 	// --- Load configuration ---
 	config := specworkflow.DefaultConfig()
+	crConfig := codereview.DefaultCodeReviewConfig()
+	cdConfig := codedoc.DefaultCodedocConfig()
 	if *configPath != "" {
 		data, err := os.ReadFile(*configPath)
 		if err != nil {
@@ -68,7 +88,34 @@ func main() {
 			log.Fatalf("failed to parse config: %v", err)
 		}
 		config = *parsed
+
+		// Parse code_review section from the same YAML file.
+		var wrapper struct {
+			CodeReview codereview.CodeReviewConfig `yaml:"code_review"`
+		}
+		wrapper.CodeReview = crConfig // start from defaults
+		if yamlErr := yaml.Unmarshal(data, &wrapper); yamlErr == nil {
+			if err := wrapper.CodeReview.Validate(); err != nil {
+				log.Fatalf("failed to validate code_review config: %v", err)
+			}
+			crConfig = wrapper.CodeReview
+		}
+
+		// Parse codedoc section from the same YAML file.
+		var cdWrapper struct {
+			Codedoc codedoc.CodedocConfig `yaml:"codedoc"`
+		}
+		cdWrapper.Codedoc = cdConfig // start from defaults
+		if yamlErr := yaml.Unmarshal(data, &cdWrapper); yamlErr == nil {
+			if err := cdWrapper.Codedoc.Validate(); err != nil {
+				log.Fatalf("failed to validate codedoc config: %v", err)
+			}
+			cdConfig = cdWrapper.Codedoc
+		}
 	}
+
+	log.Printf("[codedoc] config loaded (max_rounds=%d, mode=%s, cost_budget=$%.2f)",
+		cdConfig.MaxRounds, cdConfig.DefaultMode, cdConfig.MaxCostUSD)
 
 	// --- Create shared infrastructure ---
 	emitter := specworkflow.NewChannelEmitter(64)
@@ -122,7 +169,7 @@ func main() {
 	mux.HandleFunc("/api/workspace/uploads", api.HandleListUploads(uploadConfig))
 
 	// --- Workspace browser endpoints ---
-	mux.HandleFunc("/api/workspace/features/", api.HandleFeatureFiles(absWorkspace))
+	mux.HandleFunc("/api/workspace/features/", api.HandleFeatureFiles(absWorkspace, workflowManager))
 	mux.HandleFunc("/api/workspace/features", api.HandleListFeatures(absWorkspace, workflowManager))
 
 	// --- Workflow control endpoints (NEW) ---
@@ -142,11 +189,83 @@ func main() {
 	mux.HandleFunc("/api/workflow/restart", api.HandleRestartWorkflow(workflowManager))
 	mux.HandleFunc("/api/workflow/resume", api.HandleResumeWorkflow(workflowManager))
 	mux.HandleFunc("/api/workflow/rewind", api.HandleRewindWorkflow(workflowManager))
+	mux.HandleFunc("/api/workflow/replay", api.HandleReplayPhase(workflowManager))
 
 	// --- Workflow sub-routing for /api/workflow/{feature}/source-docs ---
 	// This catch-all for /api/workflow/ only fires for paths NOT matched by the
 	// more specific routes above (start, cancel, status, retry, etc).
 	mux.HandleFunc("/api/workflow/", handleWorkflowSubRouting(workflowManager))
+
+	// --- Code review endpoints ---
+	crManager := api.NewCodeReviewManager(absWorkspace, crConfig)
+	// Wire review runner and detect Codex CLI availability.
+	crReviewRunner := specworkflow.DefaultClaudeRunner(absWorkspace, *otelPort, "")
+	var crCodexRunner specworkflow.AgentRunner
+	if _, codexErr := exec.LookPath("codex"); codexErr == nil {
+		crCodexRunner = specworkflow.DefaultCodexRunner("", absWorkspace, specworkflow.ReviewerOutputSchema())
+		log.Printf("[codereview] codex CLI detected — dual-provider code review enabled")
+	}
+	crManager.SetRunners(crReviewRunner, crCodexRunner, nil)
+	crManager.SetEmitter(emitter)
+	crManager.SetOTELPort(*otelPort)
+	crAuditLogger, err := codereview.NewCRAuditLogger(absWorkspace)
+	if err != nil {
+		log.Printf("[codereview] WARNING: failed to open audit logger: %v", err)
+	} else {
+		defer crAuditLogger.Close()
+		crManager.SetAuditLogger(crAuditLogger)
+	}
+	workflowManager.SetCodeReviewManager(crManager)
+	mux.HandleFunc("/api/codereview/start", api.HandleCRStart(crManager))
+	mux.HandleFunc("/api/codereview/", func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		switch {
+		case strings.HasSuffix(path, "/gate"):
+			api.HandleCRGate(crManager).ServeHTTP(w, r)
+		case strings.HasSuffix(path, "/status"):
+			api.HandleCRStatus(crManager).ServeHTTP(w, r)
+		case strings.HasSuffix(path, "/cancel"):
+			api.HandleCRCancel(crManager).ServeHTTP(w, r)
+		case strings.HasSuffix(path, "/resume"):
+			api.HandleCRResume(crManager).ServeHTTP(w, r)
+		case strings.HasSuffix(path, "/reset"):
+			api.HandleCRReset(crManager).ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	// --- Codedoc workflow endpoints ---
+	cdManager := api.NewCodedocManager(absWorkspace, cdConfig)
+	cdReviewRunner := specworkflow.DefaultClaudeRunner(absWorkspace, *otelPort, "")
+	var cdCodexRunner specworkflow.AgentRunner
+	if _, codexErr := exec.LookPath("codex"); codexErr == nil {
+		cdCodexRunner = specworkflow.DefaultCodexRunner("", absWorkspace, nil)
+		log.Printf("[codedoc] codex CLI detected — dual-provider codedoc enabled")
+	}
+	cdManager.SetRunners(cdReviewRunner, cdCodexRunner, cdReviewRunner)
+	cdManager.SetEmitter(&api.CDEmitterAdapter{Emitter: emitter})
+	workflowManager.SetCodedocManager(cdManager)
+	mux.HandleFunc("/api/codedoc/start", api.HandleCDStart(cdManager))
+	mux.HandleFunc("/api/codedoc/", func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		switch {
+		case strings.HasSuffix(path, "/gate"):
+			api.HandleCDGate(cdManager).ServeHTTP(w, r)
+		case strings.HasSuffix(path, "/status"):
+			api.HandleCDStatus(cdManager).ServeHTTP(w, r)
+		case strings.HasSuffix(path, "/cancel"):
+			api.HandleCDCancel(cdManager).ServeHTTP(w, r)
+		case strings.HasSuffix(path, "/resume"):
+			api.HandleCDResume(cdManager).ServeHTTP(w, r)
+		case strings.HasSuffix(path, "/reset"):
+			api.HandleCDReset(cdManager).ServeHTTP(w, r)
+		case strings.HasSuffix(path, "/rewind"):
+			api.HandleCDRewind(cdManager).ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
 
 	// --- Metrics endpoint (persisted OTEL telemetry) ---
 	mux.HandleFunc("/api/metrics", api.HandleGetMetrics(metricsStore))
@@ -214,6 +333,7 @@ func main() {
 	fmt.Printf("Adversarial Spec System\n")
 	fmt.Printf("  Dashboard: http://localhost:%d\n", *port)
 	fmt.Printf("  Workspace: %s\n", absWorkspace)
+	fmt.Printf("  Log file:  %s\n", logFilePath)
 	fmt.Printf("  Static:    %s\n", staticDir)
 	if *configPath != "" {
 		fmt.Printf("  Config:    %s\n", *configPath)

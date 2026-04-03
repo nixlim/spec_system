@@ -30,6 +30,8 @@
 
   // Currently selected workflow (feature name) — drives all panel updates.
   var selectedFeature = null;
+  // Workflow type of the currently selected workflow ("spec" or "code_review").
+  var selectedWorkflowType = "spec";
   // Cached array of all workflow statuses from /api/workflow/status.
   var allWorkflowStatuses = [];
 
@@ -296,7 +298,18 @@
         return "state-badge-green";
       case "ESCALATED":
       case "ERROR":
+      case "CR_ESCALATED":
         return "state-badge-red";
+      case "CR_INIT":
+        return "state-badge-blue";
+      case "CR_HUMAN_GATE_SCOPE":
+      case "CR_HUMAN_GATE_FIXES":
+        return "state-badge-purple";
+      case "CR_REVIEWING":
+      case "CR_FIXING":
+        return "state-badge-orange";
+      case "CR_COMPLETE":
+        return "state-badge-green";
       default:
         return "state-badge-idle";
     }
@@ -325,21 +338,48 @@
     { state: "COMPLETE",         label: "Done",     gate: false }
   ];
 
+  var CR_PIPELINE_STAGES = [
+    { state: "CR_INIT",             label: "Init",    gate: false },
+    { state: "CR_HUMAN_GATE_SCOPE", label: "Scope",   gate: true  },
+    { state: "CR_REVIEWING",        label: "Review",  gate: false },
+    { state: "CR_FIXING",           label: "Fix",     gate: false },
+    { state: "CR_HUMAN_GATE_FIXES", label: "Fixes",   gate: true  },
+    { state: "CR_COMPLETE",         label: "Done",    gate: false }
+  ];
+
+  var CD_PIPELINE_STAGES = [
+    { state: "CD_INIT",              label: "Init",         gate: false },
+    { state: "CD_DISCOVERY",         label: "Discover",     gate: false },
+    { state: "CD_HUMAN_GATE_SCOPE",  label: "Scope",        gate: true  },
+    { state: "CD_DRAFTING",          label: "Draft",        gate: false },
+    { state: "CD_SANITISING",        label: "Sanitise",     gate: false },
+    { state: "CD_HUMAN_GATE_DRAFT",  label: "Review Draft", gate: true  },
+    { state: "CD_REVIEWING",         label: "Review",       gate: false },
+    { state: "CD_REVISING",          label: "Revise",       gate: false },
+    { state: "CD_JUDGING",           label: "Judge",        gate: false },
+    { state: "CD_HUMAN_GATE_FINAL",  label: "Final",        gate: true  },
+    { state: "CD_WRITING",           label: "Write",        gate: false },
+    { state: "CD_COMPLETE",          label: "Done",         gate: false }
+  ];
+
   /**
    * Renders or updates the workflow pipeline stepper.
    * @param {string} currentState - The current workflow state (e.g. "REVIEWING").
-   * @param {number} [round] - Current review round (shown on REVIEWING+ stages).
+   * @param {string} [workflowType] - "spec" or "code_review".
    */
-  function updateWorkflowPipeline(currentState) {
+  function updateWorkflowPipeline(currentState, workflowType) {
     var container = $("#workflow-pipeline");
     if (!container) return;
 
     var state = (currentState || "IDLE").toUpperCase();
+    var stages = PIPELINE_STAGES;
+    if (workflowType === "code_review") stages = CR_PIPELINE_STAGES;
+    else if (workflowType === "codedoc") stages = CD_PIPELINE_STAGES;
 
     // Find the index of the current state in the pipeline (-1 if not in happy path).
     var currentIdx = -1;
-    for (var i = 0; i < PIPELINE_STAGES.length; i++) {
-      if (PIPELINE_STAGES[i].state === state) {
+    for (var i = 0; i < stages.length; i++) {
+      if (stages[i].state === state) {
         currentIdx = i;
         break;
       }
@@ -347,13 +387,13 @@
 
     // For ERROR/ESCALATED, find the furthest stage reached
     // by looking at the pipeline and marking everything up to current as completed.
-    var isError = state === "ERROR";
-    var isEscalated = state === "ESCALATED";
+    var isError = state === "ERROR" || state === "CD_ERROR";
+    var isEscalated = state === "ESCALATED" || state === "CR_ESCALATED" || state === "CD_ESCALATED";
 
     // Build the pipeline HTML
     container.innerHTML = "";
-    for (var j = 0; j < PIPELINE_STAGES.length; j++) {
-      var stage = PIPELINE_STAGES[j];
+    for (var j = 0; j < stages.length; j++) {
+      var stage = stages[j];
 
       // Connector between steps (skip before first)
       if (j > 0) {
@@ -441,9 +481,38 @@
       case "FINALIZED":
         return "wsi-badge-active";
       case "COMPLETE":
+      case "CR_COMPLETE":
         return "wsi-badge-done";
       case "ESCALATED":
       case "ERROR":
+      case "CR_ESCALATED":
+        return "wsi-badge-error";
+      case "CR_INIT":
+        return "wsi-badge-active";
+      case "CR_HUMAN_GATE_SCOPE":
+      case "CR_HUMAN_GATE_FIXES":
+        return "wsi-badge-gate";
+      case "CR_REVIEWING":
+      case "CR_FIXING":
+        return "wsi-badge-review";
+      case "CD_INIT":
+      case "CD_DISCOVERY":
+      case "CD_DRAFTING":
+      case "CD_SANITISING":
+      case "CD_WRITING":
+        return "wsi-badge-active";
+      case "CD_HUMAN_GATE_SCOPE":
+      case "CD_HUMAN_GATE_DRAFT":
+      case "CD_HUMAN_GATE_FINAL":
+        return "wsi-badge-gate";
+      case "CD_REVIEWING":
+      case "CD_REVISING":
+      case "CD_JUDGING":
+        return "wsi-badge-review";
+      case "CD_COMPLETE":
+        return "wsi-badge-done";
+      case "CD_ESCALATED":
+      case "CD_ERROR":
         return "wsi-badge-error";
       default:
         return "wsi-badge-idle";
@@ -479,8 +548,12 @@
         "data-feature": featureName
       });
 
-      // Feature name
+      // Feature name + type badge
       var nameSpan = el("span", { className: "wsi-name", textContent: featureName });
+      var wfType = wf.workflow_type || "spec";
+      var typeLabel = wfType === "code_review" ? "CR" : wfType === "codedoc" ? "CD" : "SPEC";
+      var typeBadgeClass = "wsi-type-badge" + (wfType === "codedoc" ? " wsi-type-cd" : "");
+      nameSpan.appendChild(el("span", { className: typeBadgeClass, textContent: typeLabel }));
 
       // Notification badge — red dot for unselected workflows needing attention
       if (workflowBadges[featureName] && !isSelected) {
@@ -516,8 +589,40 @@
       }
       item.appendChild(metrics);
 
-      // View button
+      // Action buttons
       var actionsDiv = el("div", { className: "wsi-actions" });
+      var stateUpper = state.toUpperCase();
+      var isTerminalState = stateUpper === "COMPLETE" || stateUpper === "ESCALATED" || stateUpper === "ERROR" ||
+        stateUpper === "CR_COMPLETE" || stateUpper === "CR_ESCALATED" ||
+        stateUpper === "CD_COMPLETE" || stateUpper === "CD_ESCALATED" || stateUpper === "CD_ERROR";
+
+      if (isTerminalState) {
+        // Reset button — clears workspace so user can start fresh with same feature name
+        var resetBtn = el("button", { className: "btn btn-sm", textContent: "Reset", style: "background:#ffc107;color:#212529;border-color:#ffc107;" });
+        resetBtn.addEventListener("click", (function (fname) {
+          return function (e) {
+            e.stopPropagation();
+            if (!confirm("Reset workflow \"" + fname + "\"? This clears the workspace so you can re-run it with the same feature name.")) return;
+            resetBtn.disabled = true;
+            fetchJSON("/api/workflow/restart", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ feature_name: fname })
+            }).then(function () {
+              addActivityEntry("Workflow reset: " + fname + " — start a new workflow with the same feature name", "info");
+              if (selectedFeature === fname) selectedFeature = null;
+              refreshWorkflowStatusList();
+              loadFeatureList();
+            }).catch(function (err) {
+              alert("Reset failed: " + err.message);
+              resetBtn.disabled = false;
+            });
+          };
+        })(featureName));
+        actionsDiv.appendChild(resetBtn);
+      }
+
+      // View/Selected button
       var viewBtn = el("button", {
         className: "btn btn-sm" + (isSelected ? " btn-primary" : ""),
         textContent: isSelected ? "Selected" : "View"
@@ -558,6 +663,21 @@
         break;
       }
     }
+
+    // Track workflow type and update tab visibility
+    selectedWorkflowType = (match && match.workflow_type) || "spec";
+    var specOnlyTabs = ["spec", "issues", "convergence"];
+    $$(".nav-tab").forEach(function (btn) {
+      var tab = btn.dataset.tab;
+      if (specOnlyTabs.indexOf(tab) !== -1) {
+        if (selectedWorkflowType === "code_review" || selectedWorkflowType === "codedoc") {
+          btn.classList.add("tab-disabled");
+        } else {
+          btn.classList.remove("tab-disabled");
+        }
+      }
+    });
+
     if (match) {
       updateWorkflowStatus(match);
 
@@ -636,6 +756,27 @@
           showGate2Panel({ gate_type: "ambiguity_resolution", data: drafter, task_id: featureName });
         }
       }).catch(function () {});
+    } else if (state === "CR_HUMAN_GATE_SCOPE" || state === "CR_HUMAN_GATE_FIXES") {
+      fetchJSON("/api/codereview/" + encodeURIComponent(featureName) + "/status").then(function (crStatus) {
+        if (!crStatus) return;
+        if (state === "CR_HUMAN_GATE_SCOPE") {
+          showCRScopeGatePanel(featureName, crStatus);
+        } else {
+          showCRFixesGatePanel(featureName, crStatus);
+        }
+      }).catch(function () {});
+    } else if (state === "CD_HUMAN_GATE_SCOPE") {
+      fetchJSON("/api/codedoc/" + encodeURIComponent(featureName) + "/status").then(function (cdStatus) {
+        if (cdStatus) showCDScopeGatePanel(featureName, cdStatus);
+      }).catch(function () {});
+    } else if (state === "CD_HUMAN_GATE_DRAFT") {
+      fetchJSON("/api/codedoc/" + encodeURIComponent(featureName) + "/status").then(function (cdStatus) {
+        if (cdStatus) showCDDraftGatePanel(featureName, cdStatus);
+      }).catch(function () {});
+    } else if (state === "CD_HUMAN_GATE_FINAL") {
+      fetchJSON("/api/codedoc/" + encodeURIComponent(featureName) + "/status").then(function (cdStatus) {
+        if (cdStatus) showCDFinalGatePanel(featureName, cdStatus);
+      }).catch(function () {});
     }
   }
 
@@ -694,7 +835,7 @@
     var state = data.state || "IDLE";
     badge.textContent = state;
     badge.className = "state-badge " + getStateBadgeClass(state);
-    updateWorkflowPipeline(state);
+    updateWorkflowPipeline(state, selectedWorkflowType);
 
     // Track whether a workflow is active (non-idle) so pollWorkflowStatus
     // doesn't overwrite with stale "idle" responses during startup.
@@ -719,7 +860,7 @@
 
     // Start or stop the client-side timer based on workflow state.
     var upper = state.toUpperCase();
-    var shouldTick = upper !== "IDLE" && upper !== "COMPLETE" && upper !== "ESCALATED" && !data.paused;
+    var shouldTick = upper !== "IDLE" && upper !== "COMPLETE" && upper !== "ESCALATED" && upper !== "CR_COMPLETE" && upper !== "CR_ESCALATED" && !data.paused;
     if (shouldTick) {
       startWallClockTimer();
     } else {
@@ -767,7 +908,7 @@
     var state = data.to || "IDLE";
     badge.textContent = state;
     badge.className = "state-badge " + getStateBadgeClass(state);
-    updateWorkflowPipeline(state);
+    updateWorkflowPipeline(state, selectedWorkflowType);
 
     // Clear active agents on state transition — any agents from the
     // previous state are done.
@@ -1087,7 +1228,7 @@
       // If all workflows are idle or terminal, stop the workflow poller.
       var anyActive = statuses.some(function (s) {
         var st = (s.state || "").toUpperCase();
-        return st !== "IDLE" && st !== "COMPLETE" && st !== "FINALIZED" && st !== "ESCALATED";
+        return st !== "IDLE" && st !== "COMPLETE" && st !== "FINALIZED" && st !== "ESCALATED" && st !== "CR_COMPLETE" && st !== "CR_ESCALATED";
       });
       if (!anyActive) {
         stopWorkflowPoller();
@@ -1095,7 +1236,7 @@
       }
 
       // If gate state and gate panel not already showing, show it.
-      if (state.indexOf("HUMAN_GATE") !== -1 || state === "TASK_HUMAN_GATE") {
+      if (state.indexOf("HUMAN_GATE") !== -1 || state === "TASK_HUMAN_GATE" || state.indexOf("CR_HUMAN_GATE") !== -1) {
         var gatePanel = $(".gate-panel");
         if (!gatePanel) {
           var feature = displayStatus.feature_name;
@@ -1112,6 +1253,15 @@
             }).catch(function () {});
           } else if (state === "TASK_HUMAN_GATE" && feature) {
             showTaskGatePanel({ gate_type: "task_human_gate", data: {}, task_id: feature });
+          } else if ((state === "CR_HUMAN_GATE_SCOPE" || state === "CR_HUMAN_GATE_FIXES") && feature) {
+            fetchJSON("/api/codereview/" + encodeURIComponent(feature) + "/status").then(function (crStatus) {
+              if (!crStatus) return;
+              if (state === "CR_HUMAN_GATE_SCOPE") {
+                showCRScopeGatePanel(feature, crStatus);
+              } else {
+                showCRFixesGatePanel(feature, crStatus);
+              }
+            }).catch(function () {});
           }
         }
       }
@@ -1431,7 +1581,7 @@
       // unselected workflow.
       if (data.feature_name && data.feature_name !== selectedFeature) {
         var toState = (data.to || "").toUpperCase();
-        if (toState === "HUMAN_GATE_1" || toState === "HUMAN_GATE_2" || toState === "HUMAN_GATE_FINAL") {
+        if (toState === "HUMAN_GATE_1" || toState === "HUMAN_GATE_2" || toState === "HUMAN_GATE_FINAL" || toState === "CR_HUMAN_GATE_SCOPE" || toState === "CR_HUMAN_GATE_FIXES") {
           workflowBadges[data.feature_name] = true;
           renderWorkflowStatusList(allWorkflowStatuses);
         }
@@ -1595,6 +1745,19 @@
           meta.appendChild(el("span", { textContent: f.spec_versions + " spec versions" }));
         }
         info.appendChild(meta);
+
+        // Source documents list (expandable).
+        if (f.source_docs && f.source_docs.length > 0) {
+          var docsDetails = el("details", { className: "workflow-source-docs" });
+          docsDetails.appendChild(el("summary", { textContent: f.source_docs.length + " source docs" }));
+          var docsList = el("ul", { className: "workflow-source-docs-list" });
+          f.source_docs.forEach(function (doc) {
+            docsList.appendChild(el("li", { textContent: doc }));
+          });
+          docsDetails.appendChild(docsList);
+          info.appendChild(docsDetails);
+        }
+
         card.appendChild(info);
 
         // Actions section
@@ -1763,6 +1926,52 @@
             };
           })(f.feature_name, f.state));
           actions.appendChild(resumeBtn);
+        }
+
+        // Replay Merge button — re-runs merge/combine step using files on disk
+        var replayPhase = null;
+        var replayLabel = null;
+        if (stateUpper === "HUMAN_GATE_1" || (isTerminal && stateUpper !== "UNKNOWN")) {
+          replayPhase = "discovery_merge";
+          replayLabel = "Replay Discovery Merge";
+        } else if (stateUpper === "HUMAN_GATE_2") {
+          replayPhase = "drafting_combine";
+          replayLabel = "Replay Draft Combine";
+        } else if (stateUpper === "REVIEWING" || stateUpper === "REVISING" || stateUpper === "JUDGING" || stateUpper === "HUMAN_GATE_FINAL") {
+          replayPhase = "review_merge";
+          replayLabel = "Replay Review Merge";
+        } else if (stateUpper === "TASK_REVIEW" || stateUpper === "TASK_REVISION" || stateUpper === "TASK_HUMAN_GATE") {
+          replayPhase = "task_review_merge";
+          replayLabel = "Replay Task Review Merge";
+        }
+        if (replayPhase && !isActive) {
+          var replayBtn = el("button", {
+            className: "btn btn-sm",
+            textContent: replayLabel,
+            style: "background:#e2e3f1;color:#383d6e;border-color:#c5c7e0;"
+          });
+          replayBtn.addEventListener("click", (function (featureName, phase, label) {
+            return function () {
+              if (!confirm("Re-run " + label + " for \"" + featureName + "\" using existing files on disk?")) return;
+              replayBtn.disabled = true;
+              replayBtn.textContent = "Replaying...";
+              fetchJSON("/api/workflow/replay", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ feature_name: featureName, phase: phase })
+              }).then(function (data) {
+                addActivityEntry("Replay complete: " + (data.message || label) + " for " + featureName, "info");
+                loadFeatureList();
+                replayBtn.disabled = false;
+                replayBtn.textContent = label;
+              }).catch(function (err) {
+                alert("Replay failed: " + err.message);
+                replayBtn.disabled = false;
+                replayBtn.textContent = label;
+              });
+            };
+          })(f.feature_name, replayPhase, replayLabel));
+          actions.appendChild(replayBtn);
         }
 
         if (isActive) {
@@ -2005,6 +2214,41 @@
 
   function initGoalForm() {
     var form = $("#goal-form");
+    var activeWfType = "spec";
+
+    // Workflow type tab switching
+    $$(".workflow-type-tab").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        $$(".workflow-type-tab").forEach(function (b) { b.classList.remove("active"); });
+        btn.classList.add("active");
+        activeWfType = btn.dataset.wfType;
+
+        var specFields = $("#spec-fields");
+        var crFields = $("#cr-fields");
+        var cdFields = $("#cd-fields");
+
+        // Hide all type-specific fields first.
+        specFields.style.display = "none";
+        crFields.style.display = "none";
+        cdFields.style.display = "none";
+        $("#goal-title").removeAttribute("required");
+        $("#goal-description").removeAttribute("required");
+        $("#cr-code-path").removeAttribute("required");
+        $("#cd-code-path").removeAttribute("required");
+
+        if (activeWfType === "codereview") {
+          crFields.style.display = "block";
+          $("#cr-code-path").setAttribute("required", "required");
+        } else if (activeWfType === "codedoc") {
+          cdFields.style.display = "block";
+          $("#cd-code-path").setAttribute("required", "required");
+        } else {
+          specFields.style.display = "block";
+          $("#goal-title").setAttribute("required", "required");
+          $("#goal-description").setAttribute("required", "required");
+        }
+      });
+    });
 
     // Select all / deselect all for document picker
     $("#doc-select-all").addEventListener("click", function () {
@@ -2021,41 +2265,84 @@
 
     form.addEventListener("submit", function (e) {
       e.preventDefault();
-      var payload = {
-        title: $("#goal-title").value.trim(),
-        feature_name: $("#goal-feature-name").value.trim(),
-        description: $("#goal-description").value.trim()
-      };
 
-      // Collect selected source documents
-      var selectedDocs = [];
-      $$("#doc-picker input[type=checkbox]:checked").forEach(function (cb) {
-        selectedDocs.push(cb.value);
-      });
-      if (selectedDocs.length > 0) {
-        payload.source_doc_paths = selectedDocs;
-      }
-
+      var featureName = $("#goal-feature-name").value.trim();
+      var workspaceDir = $("#goal-workspace-dir").value.trim();
       var submitBtn = $("#goal-submit");
       submitBtn.disabled = true;
       submitBtn.textContent = "Starting...";
 
-      fetchJSON("/api/workflow/start", {
+      var url, payload;
+
+      if (activeWfType === "codereview") {
+        url = "/api/codereview/start";
+        payload = {
+          code_path: $("#cr-code-path").value.trim(),
+          feature_name: featureName,
+          spec_path: $("#cr-spec-path").value.trim() || undefined,
+          task_list_path: $("#cr-task-list-path").value.trim() || undefined
+        };
+        if (workspaceDir) payload.workspace_dir = workspaceDir;
+      } else if (activeWfType === "codedoc") {
+        url = "/api/codedoc/start";
+        payload = {
+          code_path: $("#cd-code-path").value.trim(),
+          feature_name: featureName,
+          mode: $("#cd-mode").value,
+          description: $("#cd-description").value.trim() || undefined
+        };
+        if (workspaceDir) payload.workspace_dir = workspaceDir;
+      } else {
+        url = "/api/workflow/start";
+        payload = {
+          title: $("#goal-title").value.trim(),
+          feature_name: featureName,
+          description: $("#goal-description").value.trim()
+        };
+        if (workspaceDir) payload.workspace_dir = workspaceDir;
+        var codePath = $("#goal-code-path").value.trim();
+        if (codePath) payload.code_path = codePath;
+
+        // Collect selected source documents
+        var selectedDocs = [];
+        $$("#doc-picker input[type=checkbox]:checked").forEach(function (cb) {
+          selectedDocs.push(cb.value);
+        });
+        if (selectedDocs.length > 0) {
+          payload.source_doc_paths = selectedDocs;
+        }
+      }
+
+      fetchJSON(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       }).then(function (data) {
+        var initState = activeWfType === "codereview" ? (data.state || "CR_INIT") :
+                        activeWfType === "codedoc" ? (data.state || "CD_INIT") : (data.state || "INIT");
         updateWorkflowStatus({
-          state: data.state || "INIT",
-          feature_name: data.feature_name || payload.feature_name,
+          state: initState,
+          feature_name: data.feature_name || featureName,
           round: data.round || 1,
           cost_usd: 0,
           wall_clock_seconds: 0,
           agent_invocations: 0
         });
-        addActivityEntry("Workflow started: " + (data.feature_name || payload.feature_name), "info");
+        var typeLabel = activeWfType === "codereview" ? "Code review" :
+                        activeWfType === "codedoc" ? "Code doc" : "Workflow";
+        addActivityEntry(typeLabel + " started: " + (data.feature_name || featureName), "info");
+        // Auto-select the newly started workflow so events route to the detail panel.
+        selectWorkflow(data.feature_name || featureName);
         startWorkflowPoller();
         form.reset();
+        // Restore the active tab visual state after reset
+        $$(".workflow-type-tab").forEach(function (b) { b.classList.remove("active"); });
+        $$(".workflow-type-tab").forEach(function (b) {
+          if (b.dataset.wfType === "spec") b.classList.add("active");
+        });
+        activeWfType = "spec";
+        $("#spec-fields").style.display = "block";
+        $("#cr-fields").style.display = "none";
         // Collapse the new workflow section and refresh the list
         var details = $("#new-workflow-section");
         if (details) details.open = false;
@@ -2063,7 +2350,7 @@
       }).catch(function (err) {
         var msg = err.message || "";
         if (msg.indexOf("409") !== -1) {
-          alert("A workflow is already in progress for this feature. Delete the workspace/specs/" + payload.feature_name + "/workflow-state.json file to start fresh, or wait for the current workflow to finish.");
+          alert("A workflow is already in progress for this feature.");
         } else {
           alert("Failed to start workflow: " + msg);
         }
@@ -2562,10 +2849,29 @@
   // -----------------------------------------------------------------------
 
   function onGateRequest(data) {
+    var feature = data.feature_name || selectedFeature;
     if (data.gate_type === "requirements_confirmation") {
-      showGate1Panel(data);
+      // Fetch full discovery data from API instead of using sparse event payload.
+      Promise.all([
+        fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/discovery").catch(function () { return null; }),
+        fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/files/gate1-corrections.json").catch(function () { return null; })
+      ]).then(function (results) {
+        if (results[0]) {
+          showGate1Panel({ gate_type: "requirements_confirmation", data: results[0], task_id: feature }, results[1]);
+        } else {
+          showGate1Panel(data);
+        }
+      });
     } else if (data.gate_type === "ambiguity_resolution") {
-      showGate2Panel(data);
+      fetchJSON("/api/workspace/features/" + encodeURIComponent(feature) + "/files/drafter-output.json").then(function (drafter) {
+        if (drafter) {
+          showGate2Panel({ gate_type: "ambiguity_resolution", data: drafter, task_id: feature });
+        } else {
+          showGate2Panel(data);
+        }
+      }).catch(function () {
+        showGate2Panel(data);
+      });
     } else if (data.gate_type === "task_human_gate") {
       showTaskGatePanel(data);
     }
@@ -2903,6 +3209,249 @@
       }).catch(function (err) {
         alert("Gate 1 cancel failed: " + err.message);
       });
+    });
+  }
+
+  // --- Code Review Gate: Scope Confirmation ---
+
+  function showCRScopeGatePanel(featureName, data) {
+    var container = $("#gate-panels");
+    clearChildren(container);
+
+    var panel = el("div", { className: "gate-panel" });
+    var header = '<h3><span class="gate-badge">CR Gate</span> Scope Confirmation</h3>';
+    var content = "";
+
+    content += buildGateSection("Feature", featureName);
+    content += buildGateSection("State", data.state || "-");
+    if (data.code_path) content += buildGateSection("Code Path", data.code_path);
+    if (data.spec_path) content += buildGateSection("Spec Path", data.spec_path);
+    if (data.round != null) content += buildGateSection("Round", String(data.round));
+
+    content += '<div class="gate-section">' +
+      '<div class="gate-section-label">Comment (optional)</div>' +
+      '<textarea id="cr-gate-comment" class="gate-textarea" rows="3" placeholder="Add a comment..."></textarea>' +
+      '</div>';
+
+    content += '<div class="gate-actions">' +
+      '<button id="cr-scope-confirm" class="btn btn-success">Confirm</button>' +
+      '<button id="cr-scope-cancel" class="btn btn-danger">Cancel</button>' +
+      '</div>';
+
+    panel.innerHTML = header + content;
+    container.appendChild(panel);
+
+    $("#cr-scope-confirm").addEventListener("click", function () {
+      submitCRGate(featureName, "confirm", $("#cr-gate-comment").value.trim());
+    });
+    $("#cr-scope-cancel").addEventListener("click", function () {
+      submitCRGate(featureName, "cancel", $("#cr-gate-comment").value.trim());
+    });
+  }
+
+  // --- Code Review Gate: Fixes Review ---
+
+  function showCRFixesGatePanel(featureName, data) {
+    var container = $("#gate-panels");
+    clearChildren(container);
+
+    var panel = el("div", { className: "gate-panel" });
+    var header = '<h3><span class="gate-badge">CR Gate</span> Fixes Review</h3>';
+    var content = "";
+
+    content += buildGateSection("Feature", featureName);
+    content += buildGateSection("State", data.state || "-");
+    if (data.round != null) content += buildGateSection("Round", String(data.round));
+
+    if (data.findings_summary) {
+      var summary = data.findings_summary;
+      var summaryHtml = "<ul>";
+      if (summary.total != null) summaryHtml += "<li>Total findings: " + summary.total + "</li>";
+      if (summary.critical != null) summaryHtml += "<li>Critical: " + summary.critical + "</li>";
+      if (summary.major != null) summaryHtml += "<li>Major: " + summary.major + "</li>";
+      if (summary.minor != null) summaryHtml += "<li>Minor: " + summary.minor + "</li>";
+      if (summary.fixed != null) summaryHtml += "<li>Fixed: " + summary.fixed + "</li>";
+      summaryHtml += "</ul>";
+      content += buildGateSectionHtml("Findings Summary", summaryHtml);
+    }
+
+    content += '<div class="gate-section">' +
+      '<div class="gate-section-label">Comment (optional)</div>' +
+      '<textarea id="cr-gate-comment" class="gate-textarea" rows="3" placeholder="Add a comment..."></textarea>' +
+      '</div>';
+
+    content += '<div class="gate-actions">' +
+      '<button id="cr-fixes-accept" class="btn btn-success">Accept</button>' +
+      '<button id="cr-fixes-rereview" class="btn btn-primary">Re-review</button>' +
+      '<button id="cr-fixes-escalate" class="btn btn-danger">Escalate</button>' +
+      '</div>';
+
+    panel.innerHTML = header + content;
+    container.appendChild(panel);
+
+    $("#cr-fixes-accept").addEventListener("click", function () {
+      submitCRGate(featureName, "accept", $("#cr-gate-comment").value.trim());
+    });
+    $("#cr-fixes-rereview").addEventListener("click", function () {
+      submitCRGate(featureName, "re-review", $("#cr-gate-comment").value.trim());
+    });
+    $("#cr-fixes-escalate").addEventListener("click", function () {
+      submitCRGate(featureName, "escalate", $("#cr-gate-comment").value.trim());
+    });
+  }
+
+  function submitCRGate(featureName, action, comment) {
+    var payload = { action: action };
+    if (comment) payload.comment = comment;
+
+    fetchJSON("/api/codereview/" + encodeURIComponent(featureName) + "/gate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }).then(function (resp) {
+      addActivityEntry("CR gate " + action + ": " + featureName, "info");
+      clearChildren($("#gate-panels"));
+      refreshWorkflowStatusList();
+    }).catch(function (err) {
+      alert("Gate action failed: " + (err.message || err));
+    });
+  }
+
+  // --- Codedoc Gate: Scope Confirmation ---
+
+  function showCDScopeGatePanel(featureName, data) {
+    var container = $("#gate-panels");
+    clearChildren(container);
+
+    var panel = el("div", { className: "gate-panel" });
+    var header = '<h3><span class="gate-badge cd-gate-badge">CD Gate</span> Scope Confirmation</h3>';
+    var content = "";
+
+    content += buildGateSection("Feature", featureName);
+    content += buildGateSection("State", data.state || "-");
+    content += buildGateSection("Mode", data.mode || "full");
+    if (data.round != null) content += buildGateSection("Round", String(data.round));
+
+    content += '<div class="gate-section">' +
+      '<div class="gate-section-label">Comment (optional)</div>' +
+      '<textarea id="cd-gate-comment" class="gate-textarea" rows="3" placeholder="Add a comment..."></textarea>' +
+      '</div>';
+
+    content += '<div class="gate-actions">' +
+      '<button id="cd-scope-confirm" class="btn btn-success">Confirm</button>' +
+      '<button id="cd-scope-correct" class="btn btn-primary">Correct</button>' +
+      '<button id="cd-scope-cancel" class="btn btn-danger">Cancel</button>' +
+      '</div>';
+
+    panel.innerHTML = header + content;
+    container.appendChild(panel);
+
+    $("#cd-scope-confirm").addEventListener("click", function () {
+      submitCDGate(featureName, "confirm");
+    });
+    $("#cd-scope-correct").addEventListener("click", function () {
+      submitCDGate(featureName, "correct");
+    });
+    $("#cd-scope-cancel").addEventListener("click", function () {
+      submitCDGate(featureName, "cancel");
+    });
+  }
+
+  // --- Codedoc Gate: Draft Review ---
+
+  function showCDDraftGatePanel(featureName, data) {
+    var container = $("#gate-panels");
+    clearChildren(container);
+
+    var panel = el("div", { className: "gate-panel" });
+    var header = '<h3><span class="gate-badge cd-gate-badge">CD Gate</span> Draft Review</h3>';
+    var content = "";
+
+    content += buildGateSection("Feature", featureName);
+    content += buildGateSection("State", data.state || "-");
+    content += buildGateSection("Mode", data.mode || "full");
+    if (data.round != null) content += buildGateSection("Round", String(data.round));
+
+    content += '<div class="gate-section">' +
+      '<div class="gate-section-label">Comment (optional)</div>' +
+      '<textarea id="cd-gate-comment" class="gate-textarea" rows="3" placeholder="Add a comment..."></textarea>' +
+      '</div>';
+
+    content += '<div class="gate-actions">' +
+      '<button id="cd-draft-approve" class="btn btn-success">Approve</button>' +
+      '<button id="cd-draft-redraft" class="btn btn-primary">Redraft</button>' +
+      '<button id="cd-draft-cancel" class="btn btn-danger">Cancel</button>' +
+      '</div>';
+
+    panel.innerHTML = header + content;
+    container.appendChild(panel);
+
+    $("#cd-draft-approve").addEventListener("click", function () {
+      submitCDGate(featureName, "approve");
+    });
+    $("#cd-draft-redraft").addEventListener("click", function () {
+      submitCDGate(featureName, "redraft");
+    });
+    $("#cd-draft-cancel").addEventListener("click", function () {
+      submitCDGate(featureName, "cancel");
+    });
+  }
+
+  // --- Codedoc Gate: Final Review ---
+
+  function showCDFinalGatePanel(featureName, data) {
+    var container = $("#gate-panels");
+    clearChildren(container);
+
+    var panel = el("div", { className: "gate-panel" });
+    var header = '<h3><span class="gate-badge cd-gate-badge">CD Gate</span> Final Review</h3>';
+    var content = "";
+
+    content += buildGateSection("Feature", featureName);
+    content += buildGateSection("State", data.state || "-");
+    if (data.round != null) content += buildGateSection("Round", String(data.round));
+    if (data.had_critical_findings) {
+      content += buildGateSectionHtml("Findings", '<span class="text-danger">Unresolved CRITICAL/MAJOR findings present</span>');
+    }
+
+    content += '<div class="gate-section">' +
+      '<div class="gate-section-label">Comment (optional)</div>' +
+      '<textarea id="cd-gate-comment" class="gate-textarea" rows="3" placeholder="Add a comment..."></textarea>' +
+      '</div>';
+
+    content += '<div class="gate-actions">' +
+      '<button id="cd-final-accept" class="btn btn-success">Accept</button>' +
+      '<button id="cd-final-review" class="btn btn-primary">Request Review</button>' +
+      '<button id="cd-final-reject" class="btn btn-danger">Reject</button>' +
+      '</div>';
+
+    panel.innerHTML = header + content;
+    container.appendChild(panel);
+
+    $("#cd-final-accept").addEventListener("click", function () {
+      submitCDGate(featureName, "accept");
+    });
+    $("#cd-final-review").addEventListener("click", function () {
+      submitCDGate(featureName, "request_review");
+    });
+    $("#cd-final-reject").addEventListener("click", function () {
+      submitCDGate(featureName, "reject");
+    });
+  }
+
+  function submitCDGate(featureName, action) {
+    var payload = { action: action };
+
+    fetchJSON("/api/codedoc/" + encodeURIComponent(featureName) + "/gate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }).then(function (resp) {
+      addActivityEntry("CD gate " + action + ": " + featureName, "info");
+      clearChildren($("#gate-panels"));
+      refreshWorkflowStatusList();
+    }).catch(function (err) {
+      alert("Gate action failed: " + (err.message || err));
     });
   }
 
@@ -3569,6 +4118,17 @@
               showGate2Panel({ gate_type: "ambiguity_resolution", data: drafter, task_id: feature });
             }
           }).catch(function () {});
+        } else if (state === "CR_HUMAN_GATE_SCOPE" || state === "CR_HUMAN_GATE_FIXES") {
+          (function (f, s) {
+            fetchJSON("/api/codereview/" + encodeURIComponent(f) + "/status").then(function (crStatus) {
+              if (!crStatus) return;
+              if (s === "CR_HUMAN_GATE_SCOPE") {
+                showCRScopeGatePanel(f, crStatus);
+              } else {
+                showCRFixesGatePanel(f, crStatus);
+              }
+            }).catch(function () {});
+          })(feature, state);
         }
       });
     }).catch(function () {});

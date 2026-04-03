@@ -1,0 +1,515 @@
+{
+  "version": "0.1.0",
+  "tasks": [
+    {
+      "task_id": "cd-config-and-types",
+      "task_name": "Define CodedocConfig struct and codedoc domain types",
+      "goal": "CodedocConfig is parseable from YAML with all fields from Section 12 (max_rounds, min_rounds, max_cost_usd, max_wall_clock_minutes, max_retries, max_gate_corrections, max_gate_draft_redrafts, staleness_threshold, agent_timeout_seconds, discovery_timeout_seconds, reviewer_timeout_seconds, enable_codex_codedoc_discovery, enable_codex_codedoc_drafting, enable_codex_reviewers, codex_model, default_mode, backup_before_write, docs_output_dir, drift_warning_threshold, write_lock_timeout_seconds), defaults are applied, validation rejects invalid values per Section 12, and all codedoc domain types (DiscoveryOutput, DrafterOutput, CodeAuditFinding, SanitisationReport, ManifestFile, severity constants) are defined with JSON tags.",
+      "inputs": [
+        {"name": "yaml_config", "type": "string", "constraints": "valid YAML under codedoc key", "source": "Server config file (config.yaml)"}
+      ],
+      "outputs": [
+        {"name": "config_struct", "type": "CodedocConfig", "constraints": "all numeric fields validated per Section 12 rules, min_rounds <= max_rounds, thresholds in range", "destination": "internal/codedoc/config.go"},
+        {"name": "domain_types", "type": "Go source", "constraints": "DiscoveryOutput, DrafterOutput, CodeAuditFinding, AuditSummary, SanitisationReport, ManifestFile, severity constants defined", "destination": "internal/codedoc/types.go"}
+      ],
+      "acceptance": [
+        "DefaultCodedocConfig() returns max_rounds=3, min_rounds=1, max_cost_usd=50.0, max_wall_clock_minutes=90, max_retries=2, max_gate_corrections=3, max_gate_draft_redrafts=2, staleness_threshold=2, agent_timeout_seconds=600, discovery_timeout_seconds=1200, reviewer_timeout_seconds=300, default_mode=full, backup_before_write=true, docs_output_dir=docs, drift_warning_threshold=0.20, write_lock_timeout_seconds=300",
+        "Parsing YAML with max_rounds: 5 produces MaxRounds=5",
+        "ValidateConfig returns error for max_rounds=0 containing 'must be >= 1'",
+        "ValidateConfig returns error for min_rounds > max_rounds containing 'must be <= max_rounds'",
+        "ValidateConfig returns error for drift_warning_threshold=1.5 containing 'must be >= 0.0 and <= 1.0'",
+        "ValidateConfig returns error for agent_timeout_seconds=0 containing 'must be > 0'",
+        "SeverityCritical, SeverityMajor, SeverityMinor, SeverityObservation constants equal 'critical', 'major', 'minor', 'observation'",
+        "CodeAuditFinding struct has fields ID, Type, Severity, FilePath, LineNumber, Symbol, Description, Evidence with json tags",
+        "ManifestFile struct has fields SchemaVersion, WorkflowFeature, GeneratedAt, Modules, FilesDocumented with json tags",
+        "go test ./internal/codedoc/ -run TestConfig passes",
+        "go test ./internal/codedoc/ -run TestTypes passes"
+      ],
+      "depends_on": {"status": "N/A", "reason": "First task, new package with no dependencies on other new code"},
+      "constraints": ["New package internal/codedoc separate from specworkflow and codereview", "Use yaml struct tags consistent with existing config patterns in config.yaml"],
+      "files_scope": ["internal/codedoc/config.go", "internal/codedoc/config_test.go", "internal/codedoc/types.go", "internal/codedoc/types_test.go"],
+      "priority": "critical",
+      "estimate": "small"
+    },
+    {
+      "task_id": "cd-output-schemas",
+      "task_name": "Define JSON output schemas for discovery, drafter, reviewer, and judge agents",
+      "goal": "Go structs and JSON schema definitions exist for the discovery output (Section 9), drafter output (Section 10), reviewer output (Section 11), and judge output, each with validation functions that check required fields and enum values.",
+      "inputs": [
+        {"name": "schema_definitions", "type": "JSON schema specs", "constraints": "Sections 9-11 of the spec", "source": "Spec document"}
+      ],
+      "outputs": [
+        {"name": "schema_structs", "type": "Go source", "constraints": "structs match JSON schemas from spec Sections 9-11 exactly", "destination": "internal/codedoc/schemas.go"},
+        {"name": "validation_funcs", "type": "Go source", "constraints": "ValidateDiscoveryOutput, ValidateDrafterOutput, ValidateReviewerOutput functions", "destination": "internal/codedoc/schemas.go"}
+      ],
+      "acceptance": [
+        "DiscoveryOutput struct marshals to JSON matching Section 9 schema with all fields (schema_version, agent, mode, completion_status, tools_used, languages, frameworks, modules, entry_points, dependency_graph, existing_docs, test_coverage_overview, suggested_scope, incremental_changes, merge_log)",
+        "DrafterOutput struct marshals to JSON matching Section 10 schema with all fields (as_implemented_report, architecture_diagrams, code_audit, doc_updates, structural_summary)",
+        "ReviewerOutput struct marshals to JSON matching Section 11 schema with findings array containing id, description, severity, status, impact, recommendation, lens, affected_section, affected_file",
+        "ValidateDiscoveryOutput returns error for missing schema_version field",
+        "ValidateDiscoveryOutput returns error for invalid completion_status.status value",
+        "ValidateDrafterOutput returns error for missing as_implemented_report",
+        "ValidateReviewerOutput returns error for finding with empty severity",
+        "go test ./internal/codedoc/ -run TestSchemas passes"
+      ],
+      "depends_on": ["cd-config-and-types"],
+      "constraints": ["Struct field types must match the JSON schemas exactly", "Reuse severity constants from types.go"],
+      "files_scope": ["internal/codedoc/schemas.go", "internal/codedoc/schemas_test.go"],
+      "priority": "critical",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "cd-state-machine",
+      "task_name": "Implement codedoc state machine with transitions and guards",
+      "goal": "A StateMachine instance for codedoc enforces the transition table from Section 2 (CD_INIT through CD_COMPLETE/CD_ESCALATED/CD_ERROR) with MaxRoundsGuard, CostGuard, WallClockGuard, and StalenessGuard blocking transitions when limits are exceeded, and universal CD_ERROR transitions from any non-terminal state.",
+      "inputs": [
+        {"name": "config", "type": "CodedocConfig", "constraints": "validated config", "source": "internal/codedoc/config.go"}
+      ],
+      "outputs": [
+        {"name": "state_machine", "type": "Go source", "constraints": "all CD_ states defined, transition table from Section 2 enforced, guards implemented", "destination": "internal/codedoc/statemachine.go"}
+      ],
+      "acceptance": [
+        "States CD_INIT, CD_DISCOVERY, CD_HUMAN_GATE_SCOPE, CD_DRAFTING, CD_SANITISING, CD_HUMAN_GATE_DRAFT, CD_REVIEWING, CD_REVISING, CD_JUDGING, CD_HUMAN_GATE_FINAL, CD_WRITING, CD_COMPLETE, CD_ESCALATED, CD_ERROR are defined as string constants",
+        "Transition CD_INIT -> CD_DISCOVERY succeeds",
+        "Transition CD_DISCOVERY -> CD_HUMAN_GATE_SCOPE succeeds",
+        "Transition CD_HUMAN_GATE_SCOPE -> CD_DRAFTING succeeds",
+        "Transition CD_HUMAN_GATE_SCOPE -> CD_DISCOVERY succeeds (scope re-run)",
+        "Transition CD_SANITISING -> CD_DRAFTING succeeds (unredacted secrets)",
+        "Transition CD_JUDGING -> CD_REVIEWING succeeds (REVISE verdict)",
+        "Transition CD_JUDGING -> CD_WRITING succeeds (PASS verdict)",
+        "Transition CD_JUDGING -> CD_HUMAN_GATE_FINAL succeeds (unresolved CRIT/MAJOR)",
+        "Transition CD_INIT -> CD_COMPLETE returns error containing 'invalid transition'",
+        "Transition CD_ERROR -> CD_ERROR returns error (blocked)",
+        "Any non-terminal state -> CD_ERROR succeeds",
+        "MaxRoundsGuard blocks CD_REVIEWING when round > max_rounds",
+        "CostGuard blocks when cumulative cost > max_cost_usd",
+        "WallClockGuard blocks when elapsed > max_wall_clock_minutes",
+        "go test ./internal/codedoc/ -run TestStateMachine passes"
+      ],
+      "depends_on": ["cd-config-and-types"],
+      "constraints": ["Replicate StateMachine pattern from specworkflow/statemachine.go but with codedoc states and transitions"],
+      "files_scope": ["internal/codedoc/statemachine.go", "internal/codedoc/statemachine_test.go"],
+      "priority": "critical",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "cd-discovery-orchestration",
+      "task_name": "Implement discovery phase with dual-provider support and merge agent",
+      "goal": "The discovery phase analyses a codebase path, produces a DiscoveryOutput conforming to Section 9 schema, supports dual-provider execution (Claude + Codex in parallel) with LLM-based merge agent per Section 3a, falls back to Claude-only on Codex or merge failure, and reports completion_status as complete or partial with reason.",
+      "inputs": [
+        {"name": "code_path", "type": "string", "constraints": "valid filesystem path to a directory", "source": "Workflow start request"},
+        {"name": "config", "type": "CodedocConfig", "constraints": "validated config", "source": "internal/codedoc/config.go"},
+        {"name": "mode", "type": "string", "constraints": "full or incremental", "source": "Workflow start request"}
+      ],
+      "outputs": [
+        {"name": "discovery_output", "type": "DiscoveryOutput", "constraints": "conforms to Section 9 schema, validated", "destination": "workspace/codedoc/{feature}/discovery-output.json"}
+      ],
+      "acceptance": [
+        "Single-provider discovery produces a valid DiscoveryOutput with modules, entry_points, dependency_graph, existing_docs, languages, and suggested_scope populated",
+        "When enable_codex_codedoc_discovery=true and Codex available, both providers run concurrently and the merge agent produces a merged output with merge_log",
+        "When Codex fails but Claude succeeds, the workflow continues with Claude-only output and logs a warning",
+        "When both providers fail, the function returns an error that causes escalation",
+        "When merge agent fails, Claude-only output is used with a warning logged",
+        "Discovery respects discovery_timeout_seconds and reports completion_status=partial with reason when timed out",
+        "Per-provider outputs are saved as discovery-output-claude-v{N}.json and discovery-output-codex-v{N}.json",
+        "Merged output is saved as discovery-output-merged-v{N}.json",
+        "go test ./internal/codedoc/ -run TestDiscovery passes"
+      ],
+      "depends_on": ["cd-output-schemas", "cd-state-machine"],
+      "constraints": ["Reuse AgentRunner interface from specworkflow/claude_runner.go", "Follow the dual-dispatch pattern from specworkflow/orchestrator_discovery.go"],
+      "files_scope": ["internal/codedoc/orchestrator_discovery.go", "internal/codedoc/orchestrator_discovery_test.go", "internal/codedoc/prompts_discovery.go"],
+      "priority": "critical",
+      "estimate": "large"
+    },
+    {
+      "task_id": "cd-drafting-orchestration",
+      "task_name": "Implement drafting phase with dual-provider combine agent",
+      "goal": "The drafting phase produces all documentation artefacts (as-implemented report, Mermaid architecture diagrams, code audit JSON and report, doc update list) conforming to Section 10 schema, supports dual-provider execution with LLM-based combine agent per Section 3b, validates Mermaid syntax after generation and after combine, and falls back to Claude-only on failure.",
+      "inputs": [
+        {"name": "discovery_output", "type": "DiscoveryOutput", "constraints": "validated discovery output", "source": "workspace/codedoc/{feature}/discovery-output.json"},
+        {"name": "scope_corrections", "type": "optional<ScopeCorrections>", "constraints": "may be nil if no corrections", "source": "Human gate scope output"},
+        {"name": "config", "type": "CodedocConfig", "constraints": "validated config", "source": "internal/codedoc/config.go"}
+      ],
+      "outputs": [
+        {"name": "drafter_output", "type": "DrafterOutput", "constraints": "conforms to Section 10 schema, all mermaid_valid fields accurate", "destination": "workspace/codedoc/{feature}/drafter-output.json"},
+        {"name": "draft_files", "type": "list<file>", "constraints": "as-implemented-report.md, architecture/*.md, audit/code-audit.json, audit/code-audit-report.md", "destination": "workspace/codedoc/{feature}/draft-v{N}/"}
+      ],
+      "acceptance": [
+        "Single-provider drafting produces a valid DrafterOutput with as_implemented_report, architecture_diagrams (at least 3: module-dependencies, call-flows, data-flows), code_audit, and doc_updates",
+        "When enable_codex_codedoc_drafting=true and Codex available, both providers run concurrently and the combine agent merges outputs",
+        "Mermaid syntax is validated on each diagram; mermaid_valid field reflects actual validation result",
+        "When dual-provider combine produces an invalid Mermaid diagram, it is replaced with the base provider's diagram",
+        "When Codex or combine agent fails, Claude-only output is used with a warning",
+        "Draft artefact files are written to workspace/codedoc/{feature}/draft-v{N}/ directory",
+        "structural_summary fields (report_sections, diagram_count, audit_finding_count, doc_updates, modules_documented) are accurate counts",
+        "go test ./internal/codedoc/ -run TestDrafting passes"
+      ],
+      "depends_on": ["cd-discovery-orchestration"],
+      "constraints": ["Follow dual-dispatch pattern from specworkflow", "Mermaid validation must not execute arbitrary code"],
+      "files_scope": ["internal/codedoc/orchestrator_drafting.go", "internal/codedoc/orchestrator_drafting_test.go", "internal/codedoc/prompts_drafting.go", "internal/codedoc/mermaid_validator.go", "internal/codedoc/mermaid_validator_test.go"],
+      "priority": "critical",
+      "estimate": "large"
+    },
+    {
+      "task_id": "cd-secret-sanitisation",
+      "task_name": "Implement secret sanitisation scanner for documentation output",
+      "goal": "The sanitisation phase scans all documentation output files for secret patterns (API keys, tokens, connection strings, passwords, private keys, PII) per Section 3d, redacts detected secrets with [REDACTED: category] placeholders, produces a sanitisation report, and transitions back to drafting when un-redactable secrets are found.",
+      "inputs": [
+        {"name": "draft_files", "type": "list<file>", "constraints": "markdown, JSON, and Mermaid files from drafting phase", "source": "workspace/codedoc/{feature}/draft-v{N}/"}
+      ],
+      "outputs": [
+        {"name": "sanitised_files", "type": "list<file>", "constraints": "same files with secrets replaced by [REDACTED: category]", "destination": "workspace/codedoc/{feature}/draft-v{N}/ (in-place)"},
+        {"name": "sanitisation_report", "type": "SanitisationReport", "constraints": "lists each redaction with file_path, line_number, pattern_category", "destination": "workspace/codedoc/{feature}/sanitisation-report-v{N}.json"}
+      ],
+      "acceptance": [
+        "Detects AKIA prefix API keys and redacts to [REDACTED: api_key]",
+        "Detects sk- prefix keys and redacts to [REDACTED: api_key]",
+        "Detects ghp_ and glpat- prefix tokens and redacts to [REDACTED: token]",
+        "Detects postgres://, mongodb://, redis://, mysql:// connection strings with credentials and redacts to [REDACTED: connection_string]",
+        "Detects password= and secret: key-value patterns and redacts to [REDACTED: password]",
+        "Detects PEM private key headers and redacts to [REDACTED: private_key]",
+        "Detects JWT strings (eyJ prefix) and redacts to [REDACTED: token]",
+        "Returns needs_redraft=true when secrets are woven into prose and cannot be safely redacted",
+        "Sanitisation report contains accurate file_path, line_number, and pattern_category for each redaction",
+        "When no secrets are detected, report has empty redactions array and needs_redraft=false",
+        "go test ./internal/codedoc/ -run TestSanitisation passes"
+      ],
+      "depends_on": ["cd-config-and-types"],
+      "constraints": ["Regex-based detection per Section 3d patterns", "Must not modify files outside the draft directory"],
+      "files_scope": ["internal/codedoc/sanitiser.go", "internal/codedoc/sanitiser_test.go"],
+      "priority": "high",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "cd-review-dispatch",
+      "task_name": "Implement review dispatch with 4 groups and 9 lenses for codedoc",
+      "goal": "The review dispatch sends documentation to 4 parallel reviewer groups (Accuracy: ACC+CUR, Completeness: CMP+CLA, Architecture: ARC+STR, Audit+Security: AUD+CON+SEC) using the same parallel dispatch and failure tolerance pattern as specworkflow/review_dispatch.go, merges findings with codedoc-specific dedup key, and supports dual-provider reviewers.",
+      "inputs": [
+        {"name": "drafter_output", "type": "DrafterOutput", "constraints": "validated drafter output", "source": "workspace/codedoc/{feature}/drafter-output.json"},
+        {"name": "draft_files", "type": "list<file>", "constraints": "documentation artefact files", "source": "workspace/codedoc/{feature}/draft-v{N}/"},
+        {"name": "config", "type": "CodedocConfig", "constraints": "validated config", "source": "internal/codedoc/config.go"}
+      ],
+      "outputs": [
+        {"name": "merged_findings", "type": "list<ReviewFinding>", "constraints": "deduplicated, each with severity, status, lens code", "destination": "workspace/codedoc/{feature}/merged-findings-round-{N}.json"},
+        {"name": "per_group_outputs", "type": "list<ReviewerOutput>", "constraints": "one per group (a,b,c,d)", "destination": "workspace/codedoc/{feature}/review-{a,b,c,d}-round-{N}.json"}
+      ],
+      "acceptance": [
+        "4 reviewer groups are dispatched in parallel",
+        "Group 1 applies ACC and CUR lenses, Group 2 applies CMP and CLA lenses, Group 3 applies ARC and STR lenses, Group 4 applies AUD, CON, and SEC lenses",
+        "When one reviewer group fails, other groups still complete and findings are merged from successful groups",
+        "Findings are deduplicated by (lens, affected_file, affected_section) tuple",
+        "When enable_codex_reviewers=true, Codex reviewers run in parallel with Claude reviewers and findings are merged",
+        "Each finding has severity classified per the rubric: CRITICAL, MAJOR, MINOR, OBSERVATION",
+        "Each finding has status=open when newly created",
+        "ARC findings on diagrams include corrected Mermaid snippet in recommendation field",
+        "Per-group outputs are saved to review-{a,b,c,d}-round-{N}.json",
+        "go test ./internal/codedoc/ -run TestReviewDispatch passes"
+      ],
+      "depends_on": ["cd-output-schemas", "cd-state-machine"],
+      "constraints": ["Adapt review_dispatch.go pattern from specworkflow", "Use same MergeReviewerOutputs function pattern with codedoc-specific DedupKeyFunc"],
+      "files_scope": ["internal/codedoc/review_dispatch.go", "internal/codedoc/review_dispatch_test.go", "internal/codedoc/prompts_review.go"],
+      "priority": "critical",
+      "estimate": "large"
+    },
+    {
+      "task_id": "cd-convergence-and-judge",
+      "task_name": "Implement convergence evaluation and judge agent for codedoc",
+      "goal": "The judge evaluates review findings and renders a verdict: PASS (route to CD_WRITING when no unresolved CRITICAL/MAJOR), PASS_WITH_GATE (route to CD_HUMAN_GATE_FINAL when unresolved CRITICAL/MAJOR remain), or REVISE (route to CD_REVIEWING), with staleness detection halting after consecutive stale rounds.",
+      "inputs": [
+        {"name": "merged_findings", "type": "list<ReviewFinding>", "constraints": "from current round", "source": "workspace/codedoc/{feature}/merged-findings-round-{N}.json"},
+        {"name": "round_history", "type": "list<RoundStats>", "constraints": "open CRIT+MAJ counts per round", "source": "Orchestrator state"}
+      ],
+      "outputs": [
+        {"name": "verdict", "type": "string", "constraints": "PASS, PASS_WITH_GATE, or REVISE", "destination": "Return value"},
+        {"name": "next_state", "type": "string", "constraints": "valid CD_ state", "destination": "Return value"},
+        {"name": "judge_output", "type": "JudgeOutput", "constraints": "verdict, reasoning, finding summary", "destination": "workspace/codedoc/{feature}/judge-round-{N}.json"}
+      ],
+      "acceptance": [
+        "Zero open findings returns PASS verdict and CD_WRITING next state",
+        "All findings resolved or MINOR/OBSERVATION returns PASS verdict and CD_WRITING next state",
+        "Open CRITICAL findings return PASS_WITH_GATE verdict and CD_HUMAN_GATE_FINAL next state when min_rounds met",
+        "Open MAJOR findings return PASS_WITH_GATE verdict and CD_HUMAN_GATE_FINAL next state when min_rounds met",
+        "Open CRITICAL or MAJOR findings before min_rounds return REVISE verdict and CD_REVIEWING next state",
+        "DetectStaleness returns true after staleness_threshold consecutive rounds without CRIT+MAJ decrease",
+        "When staleness detected, verdict is PASS_WITH_GATE to escalate to human",
+        "Judge output JSON includes verdict, reasoning, and per-severity finding counts",
+        "go test ./internal/codedoc/ -run TestConvergence passes"
+      ],
+      "depends_on": ["cd-config-and-types", "cd-output-schemas"],
+      "constraints": ["Adapt convergence pattern from codereview/convergence.go", "Severity-based verdict following Section 3 rubric"],
+      "files_scope": ["internal/codedoc/convergence.go", "internal/codedoc/convergence_test.go"],
+      "priority": "critical",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "cd-revision-agent",
+      "task_name": "Implement revision agent that addresses review findings",
+      "goal": "The revision agent receives open review findings and the current draft documentation, produces updated documentation that addresses CRITICAL and MAJOR findings, marks addressed findings as resolved, and outputs a revision report.",
+      "inputs": [
+        {"name": "merged_findings", "type": "list<ReviewFinding>", "constraints": "open findings from review round", "source": "workspace/codedoc/{feature}/merged-findings-round-{N}.json"},
+        {"name": "draft_files", "type": "list<file>", "constraints": "current documentation artefacts", "source": "workspace/codedoc/{feature}/draft-v{N}/"}
+      ],
+      "outputs": [
+        {"name": "revised_files", "type": "list<file>", "constraints": "updated documentation artefacts", "destination": "workspace/codedoc/{feature}/draft-v{N+1}/"},
+        {"name": "revision_output", "type": "RevisionOutput", "constraints": "list of addressed findings with updated status", "destination": "workspace/codedoc/{feature}/revision-round-{N}.json"}
+      ],
+      "acceptance": [
+        "CRITICAL findings are addressed first, then MAJOR findings",
+        "Each addressed finding has status changed from open to resolved in the revision output",
+        "Findings marked wontfix include a rationale string",
+        "Revised documentation files are written to a new draft version directory",
+        "Mermaid diagrams in revised docs are re-validated after revision",
+        "The revision output includes a count of addressed, wontfix, and remaining open findings",
+        "go test ./internal/codedoc/ -run TestRevision passes"
+      ],
+      "depends_on": ["cd-output-schemas", "cd-review-dispatch"],
+      "constraints": ["Use AgentRunner interface for LLM invocation", "Must not introduce new issues while fixing existing ones"],
+      "files_scope": ["internal/codedoc/orchestrator_revision.go", "internal/codedoc/orchestrator_revision_test.go", "internal/codedoc/prompts_revision.go"],
+      "priority": "high",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "cd-writing-phase",
+      "task_name": "Implement writing phase with staging directory, atomic move, backup, and lock",
+      "goal": "The writing phase writes approved documentation to the target repo's docs/ directory using the staging-then-move pattern from Section 3c, creates timestamped backups before overwriting, acquires an exclusive docs/ write lock with stale lock detection, detects codebase drift by comparing file hashes against discovery output, and preserves manual marker sections in existing files.",
+      "inputs": [
+        {"name": "approved_files", "type": "list<file>", "constraints": "final documentation artefacts", "source": "workspace/codedoc/{feature}/draft-v{N}/"},
+        {"name": "discovery_output", "type": "DiscoveryOutput", "constraints": "for hash-based drift detection", "source": "workspace/codedoc/{feature}/discovery-output.json"},
+        {"name": "code_path", "type": "string", "constraints": "target repository root", "source": "Workflow state"},
+        {"name": "config", "type": "CodedocConfig", "constraints": "validated config", "source": "internal/codedoc/config.go"}
+      ],
+      "outputs": [
+        {"name": "written_files", "type": "list<string>", "constraints": "paths of files written to docs/", "destination": "Target repo docs/ directory"},
+        {"name": "manifest", "type": "ManifestFile", "constraints": "conforming to Section 19a schema", "destination": "Target repo docs/.codedoc-manifest.json"}
+      ],
+      "acceptance": [
+        "Files are first written to docs/.codedoc-staging/ before being moved to final location",
+        "All expected files in staging are validated as present and non-empty before move",
+        "For each file that would be overwritten, a backup is created at {filename}.bak.{YYYYMMDD-HHMMSS}",
+        "Files are moved from staging to final location using os.Rename",
+        "Staging directory is removed after successful write",
+        "Lock file docs/.codedoc-write.lock is created with workflow feature name and PID",
+        "When lock is held by another live process, writing retries with exponential backoff up to write_lock_timeout_seconds",
+        "When lock file exists but PID is dead, stale lock is broken and re-acquired",
+        "Lock is released on success and on error",
+        "Drift detection compares current file hashes against discovery output content_hash fields",
+        "When drift exceeds drift_warning_threshold, a drift warning is returned",
+        "Manual marker sections (<!-- manual --> / <!-- /manual -->) in existing files are preserved at structural positions",
+        "When a section containing a manual block is removed, the block is appended to end with warning comment",
+        ".codedoc-manifest.json is written atomically (write to .tmp then os.Rename)",
+        "go test ./internal/codedoc/ -run TestWriting passes"
+      ],
+      "depends_on": ["cd-config-and-types", "cd-output-schemas"],
+      "constraints": ["Must not modify source code files", "Must not write files outside docs/ directory", "Lock must be released in all code paths including panics"],
+      "files_scope": ["internal/codedoc/writer.go", "internal/codedoc/writer_test.go", "internal/codedoc/manual_markers.go", "internal/codedoc/manual_markers_test.go"],
+      "priority": "high",
+      "estimate": "large"
+    },
+    {
+      "task_id": "cd-human-gates",
+      "task_name": "Implement three human gate handlers for scope, draft, and final approval",
+      "goal": "Three human gate states (CD_HUMAN_GATE_SCOPE, CD_HUMAN_GATE_DRAFT, CD_HUMAN_GATE_FINAL) pause the workflow, present relevant payloads to the user via API, and process approve/correct/cancel decisions with the correct state transitions and correction limits.",
+      "inputs": [
+        {"name": "gate_type", "type": "string", "constraints": "scope, draft, or final", "source": "Orchestrator state machine"},
+        {"name": "gate_payload", "type": "GatePayload", "constraints": "content varies by gate type per US-7", "source": "Workflow artefacts"}
+      ],
+      "outputs": [
+        {"name": "gate_decision", "type": "GateDecision", "constraints": "approve, correct, or cancel", "destination": "Orchestrator"},
+        {"name": "corrections", "type": "optional<Corrections>", "constraints": "scope adjustments or re-draft feedback", "destination": "workspace/codedoc/{feature}/gate-*-corrections*.json"}
+      ],
+      "acceptance": [
+        "SCOPE gate displays: module inventory, completion status, dependency overview, existing doc inventory, suggested scope, and merge conflicts from dual-provider",
+        "SCOPE gate accept advances to CD_DRAFTING",
+        "SCOPE gate correct stores scope adjustments and re-enters CD_DISCOVERY up to max_gate_corrections times",
+        "SCOPE gate cancel transitions to CD_ESCALATED",
+        "DRAFT gate displays: generated file list, summary statistics, redaction log from sanitisation",
+        "DRAFT gate accept advances to CD_REVIEWING",
+        "DRAFT gate re-draft passes user comment to drafter and re-enters CD_DRAFTING up to max_gate_draft_redrafts times",
+        "DRAFT gate forces approve-or-cancel after max_gate_draft_redrafts exhausted",
+        "FINAL gate displays remaining unresolved CRITICAL/MAJOR findings",
+        "FINAL gate accept advances to CD_WRITING",
+        "FINAL gate reject transitions to CD_ESCALATED",
+        "FINAL gate request-review re-enters CD_REVIEWING",
+        "go test ./internal/codedoc/ -run TestGates passes"
+      ],
+      "depends_on": ["cd-state-machine"],
+      "constraints": ["Follow gate handler pattern from specworkflow/orchestrator.go", "Gate corrections are versioned in workspace"],
+      "files_scope": ["internal/codedoc/gates.go", "internal/codedoc/gates_test.go"],
+      "priority": "critical",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "cd-orchestrator",
+      "task_name": "Implement main orchestrator that drives the full codedoc workflow lifecycle",
+      "goal": "The CodedocOrchestrator drives the workflow through all states (CD_INIT to CD_COMPLETE), coordinates discovery, drafting, sanitisation, review loop, revision, judging, and writing phases, persists workflow state for crash recovery, supports resume from CD_ERROR via artefact detection per Section 2, and emits WebSocket events for dashboard updates.",
+      "inputs": [
+        {"name": "start_request", "type": "StartRequest", "constraints": "feature_name, code_path, mode, description", "source": "API handler"},
+        {"name": "config", "type": "CodedocConfig", "constraints": "validated config", "source": "internal/codedoc/config.go"}
+      ],
+      "outputs": [
+        {"name": "workflow_state", "type": "WorkflowState", "constraints": "persisted to workspace/codedoc/{feature}/workflow-state.json", "destination": "Workspace filesystem"},
+        {"name": "websocket_events", "type": "list<Event>", "constraints": "state transitions and progress updates", "destination": "WebSocket hub"}
+      ],
+      "acceptance": [
+        "Full workflow (single-provider) progresses through CD_INIT -> CD_DISCOVERY -> CD_HUMAN_GATE_SCOPE -> CD_DRAFTING -> CD_SANITISING -> CD_HUMAN_GATE_DRAFT -> CD_REVIEWING -> CD_REVISING -> CD_JUDGING -> CD_WRITING -> CD_COMPLETE",
+        "Workflow state is persisted to workflow-state.json after each state transition",
+        "Resume from CD_ERROR with no discovery output restarts at CD_DISCOVERY",
+        "Resume from CD_ERROR with discovery output but no drafter output restarts at CD_HUMAN_GATE_SCOPE",
+        "Resume from CD_ERROR with drafter output but no review outputs restarts at CD_HUMAN_GATE_DRAFT",
+        "Resume from CD_ERROR with review outputs restarts at CD_REVIEWING",
+        "Resume from CD_ERROR with staging directory restarts at CD_HUMAN_GATE_FINAL",
+        "Circuit breaker fires CD_ESCALATED when cost exceeds max_cost_usd",
+        "Circuit breaker fires CD_ESCALATED when time exceeds max_wall_clock_minutes",
+        "Circuit breaker fires CD_ESCALATED when rounds exceed max_rounds",
+        "WebSocket events are emitted for each state transition",
+        "go test ./internal/codedoc/ -run TestOrchestrator passes"
+      ],
+      "depends_on": ["cd-discovery-orchestration", "cd-drafting-orchestration", "cd-secret-sanitisation", "cd-review-dispatch", "cd-convergence-and-judge", "cd-revision-agent", "cd-writing-phase", "cd-human-gates"],
+      "constraints": ["Follow orchestrator pattern from specworkflow/orchestrator.go", "Structured logging to workflow-log.jsonl"],
+      "files_scope": ["internal/codedoc/orchestrator.go", "internal/codedoc/orchestrator_test.go"],
+      "priority": "critical",
+      "estimate": "large"
+    },
+    {
+      "task_id": "cd-api-endpoints",
+      "task_name": "Implement API handlers for codedoc workflow endpoints",
+      "goal": "HTTP handlers exist for all 7 codedoc API endpoints from Section 13 (start, status, gate, cancel, resume, reset, rewind), registered on the server router, accepting and returning JSON per the specified contracts.",
+      "inputs": [
+        {"name": "http_request", "type": "HTTP request", "constraints": "valid JSON body per Section 13", "source": "HTTP client"},
+        {"name": "orchestrator", "type": "CodedocOrchestrator", "constraints": "initialized orchestrator", "source": "Server startup"}
+      ],
+      "outputs": [
+        {"name": "http_response", "type": "HTTP response", "constraints": "JSON with appropriate status codes", "destination": "HTTP client"}
+      ],
+      "acceptance": [
+        "POST /api/codedoc/start with valid body (feature_name, code_path, mode) returns 202 and starts workflow",
+        "POST /api/codedoc/start with missing code_path returns 400 with error message",
+        "GET /api/codedoc/{feature}/status returns 200 with current workflow state",
+        "GET /api/codedoc/{feature}/status for non-existent feature returns 404",
+        "POST /api/codedoc/{feature}/gate with approve decision returns 200 and advances workflow",
+        "POST /api/codedoc/{feature}/cancel returns 200 and transitions to CD_ESCALATED",
+        "POST /api/codedoc/{feature}/resume returns 200 and resumes from CD_ERROR",
+        "POST /api/codedoc/{feature}/resume when not in CD_ERROR returns 409 with error",
+        "POST /api/codedoc/{feature}/reset returns 200 and deletes feature workspace",
+        "POST /api/codedoc/{feature}/rewind with target state returns 200",
+        "go test ./internal/api/ -run TestCodedocHandlers passes"
+      ],
+      "depends_on": ["cd-orchestrator"],
+      "constraints": ["Register on existing server router alongside spec and codereview endpoints", "Follow handler patterns from internal/api/workflow_handler.go"],
+      "files_scope": ["internal/api/codedoc_handlers.go", "internal/api/codedoc_handlers_test.go"],
+      "priority": "high",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "cd-incremental-mode",
+      "task_name": "Implement incremental mode with manifest-based delta computation",
+      "goal": "When mode=incremental and a valid .codedoc-manifest.json exists, discovery compares current codebase state against manifest hashes to identify added, modified, and removed modules, drafting regenerates only changed module documentation, and architecture diagrams are fully regenerated when the dependency graph changes.",
+      "inputs": [
+        {"name": "manifest", "type": "ManifestFile", "constraints": "valid .codedoc-manifest.json from previous run", "source": "Target repo docs/.codedoc-manifest.json"},
+        {"name": "code_path", "type": "string", "constraints": "valid filesystem path", "source": "Workflow start request"}
+      ],
+      "outputs": [
+        {"name": "incremental_changes", "type": "IncrementalChanges", "constraints": "added_modules, modified_modules, removed_modules, recommendation", "destination": "DiscoveryOutput.incremental_changes field"}
+      ],
+      "acceptance": [
+        "When .codedoc-manifest.json exists and is valid, incremental discovery produces incremental_changes with lists of added, modified, and removed modules",
+        "When .codedoc-manifest.json does not exist, incremental mode falls back to full mode with a logged warning",
+        "When .codedoc-manifest.json is unparseable, incremental mode falls back to full mode with a logged warning containing the parse error",
+        "When fewer than 20% of modules changed, recommendation is 'incremental'",
+        "When 20% or more modules changed, recommendation is 'full'",
+        "Incremental drafting only regenerates documentation for changed modules",
+        "Architecture diagrams are regenerated in full when any dependency graph edge changes",
+        "Updated manifest is written with only changed module entries updated",
+        "go test ./internal/codedoc/ -run TestIncremental passes"
+      ],
+      "depends_on": ["cd-discovery-orchestration", "cd-writing-phase"],
+      "constraints": ["Must handle corrupt manifests gracefully", "Hash comparison uses SHA-256"],
+      "files_scope": ["internal/codedoc/incremental.go", "internal/codedoc/incremental_test.go"],
+      "priority": "medium",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "cd-dashboard-integration",
+      "task_name": "Add codedoc workflow to dashboard with pipeline stages and CD badge",
+      "goal": "The dashboard displays codedoc workflows alongside spec and code review workflows with a CD type badge, correct pipeline stages (Section 14), current state highlighting, and gate action buttons at human gate states.",
+      "inputs": [
+        {"name": "workflow_events", "type": "WebSocket events", "constraints": "codedoc state transitions and progress", "source": "CodedocOrchestrator via WebSocket hub"}
+      ],
+      "outputs": [
+        {"name": "dashboard_ui", "type": "HTML/JS/CSS", "constraints": "codedoc workflows visible in workflow list and detail views", "destination": "static/app.js, static/index.html, static/style.css"}
+      ],
+      "acceptance": [
+        "Codedoc workflows appear in the workflow list with a CD type badge",
+        "CD badge is visually distinct from SPEC and CR badges",
+        "Pipeline visualisation shows all 12 stages from Section 14 (Init, Discover, Scope, Draft, Sanitise, Review Draft, Review, Revise, Judge, Final, Write, Done)",
+        "Current state is highlighted in the pipeline visualisation",
+        "Gate states show approve/correct/cancel buttons appropriate to each gate type",
+        "SCOPE gate displays module inventory, completion status, and merge conflicts",
+        "DRAFT gate displays file list, summary statistics, and redaction log",
+        "FINAL gate displays remaining unresolved findings",
+        "WebSocket events for codedoc workflows update the dashboard in real time"
+      ],
+      "depends_on": ["cd-api-endpoints"],
+      "constraints": ["Follow existing dashboard patterns in static/app.js", "Must not break existing SPEC and CR workflow display"],
+      "files_scope": ["static/app.js", "static/index.html", "static/style.css"],
+      "priority": "high",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "cd-prompts",
+      "task_name": "Write all LLM prompts for codedoc agents",
+      "goal": "Prompt templates exist for all codedoc agents: discovery (single + merge), drafting (single + combine), sanitisation, review (4 groups with 9 lenses), revision, and judge, each with structured JSON output instructions and the severity classification rubric from Section 3.",
+      "inputs": [
+        {"name": "spec_sections", "type": "text", "constraints": "Sections 3, 3a, 3b, 3d, 9, 10, 11 of the spec", "source": "Spec document"}
+      ],
+      "outputs": [
+        {"name": "prompt_templates", "type": "Go source", "constraints": "string constants or template functions for each agent prompt", "destination": "internal/codedoc/prompts*.go"}
+      ],
+      "acceptance": [
+        "Discovery prompt instructs agent to produce JSON conforming to Section 9 schema",
+        "Discovery merge prompt encodes all 7 merge rules from Section 3a",
+        "Drafter prompt instructs agent to produce all 4 artefact types: report, diagrams, audit, doc updates",
+        "Drafter combine prompt encodes all 4 combine rules from Section 3b",
+        "Sanitisation prompt lists all pattern categories from Section 3d",
+        "Reviewer prompts for each group specify the correct lenses (Group 1: ACC+CUR, Group 2: CMP+CLA, Group 3: ARC+STR, Group 4: AUD+CON+SEC)",
+        "All reviewer prompts include the severity classification rubric from Section 3",
+        "ARC reviewer prompt explicitly requires corrected Mermaid snippets in findings",
+        "Revision prompt instructs agent to address CRITICAL findings first, then MAJOR",
+        "Judge prompt instructs agent to evaluate convergence and render PASS/REVISE/BLOCK verdict",
+        "All prompts request structured JSON output with specified schema fields"
+      ],
+      "depends_on": ["cd-output-schemas"],
+      "constraints": ["Prompts must request JSON output format", "Severity rubric must be included verbatim in reviewer prompts"],
+      "files_scope": ["internal/codedoc/prompts_discovery.go", "internal/codedoc/prompts_drafting.go", "internal/codedoc/prompts_review.go", "internal/codedoc/prompts_revision.go", "internal/codedoc/prompts_judge.go", "internal/codedoc/prompts_sanitisation.go"],
+      "priority": "high",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "cd-config-integration",
+      "task_name": "Integrate codedoc config into server startup and config.yaml",
+      "goal": "The codedoc configuration block is added to config.yaml with defaults, parsed at server startup alongside existing specworkflow and codereview configs, validated before the server accepts requests, and the CodedocOrchestrator is initialised and registered with the server.",
+      "inputs": [
+        {"name": "config_yaml", "type": "YAML file", "constraints": "existing config.yaml with specworkflow and codereview blocks", "source": "config.yaml"},
+        {"name": "codedoc_config", "type": "CodedocConfig", "constraints": "validated config struct", "source": "internal/codedoc/config.go"}
+      ],
+      "outputs": [
+        {"name": "updated_config_yaml", "type": "YAML file", "constraints": "codedoc block added with defaults", "destination": "config.yaml"},
+        {"name": "server_init", "type": "Go source", "constraints": "codedoc orchestrator initialised at startup", "destination": "cmd/specworkflow/main.go"}
+      ],
+      "acceptance": [
+        "config.yaml contains a codedoc: block with all fields from Section 12",
+        "Server parses the codedoc config block at startup",
+        "Missing codedoc block uses defaults from DefaultCodedocConfig()",
+        "Invalid codedoc config values cause server startup to fail with descriptive error",
+        "CodedocOrchestrator is created and codedoc API handlers are registered on the router",
+        "go build ./cmd/specworkflow/ succeeds",
+        "go test ./cmd/specworkflow/ passes"
+      ],
+      "depends_on": ["cd-orchestrator", "cd-api-endpoints"],
+      "constraints": ["Must not break existing specworkflow and codereview startup", "Config validation runs before accepting HTTP requests"],
+      "files_scope": ["config.yaml", "cmd/specworkflow/main.go", "internal/codedoc/config.go"],
+      "priority": "high",
+      "estimate": "small"
+    }
+  ]
+}

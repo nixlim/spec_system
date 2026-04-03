@@ -1,26 +1,164 @@
 # Adversarial Spec System configuration
-# See internal/specworkflow/config.go for all available fields.
+# See internal/specworkflow/config.go and internal/codereview/config.go for details.
 
-# Skill directory paths (required for workflow execution)
+# ===========================================================================
+# Spec Workflow Configuration
+# ===========================================================================
+
+# Maximum number of review/revise iterations allowed.
+max_rounds: 5
+
+# Minimum number of review/revise iterations required before accepting a spec.
+min_rounds: 2
+
+# Upper bound on total findings before the workflow escalates.
+max_total_findings: 500
+
+# Consecutive rounds with no new findings before the review is considered stale.
+staleness_threshold: 3
+
+# Maximum wall-clock time budget in minutes.
+max_wall_clock_minutes: 6000
+
+# Maximum estimated cost in USD for the entire workflow.
+max_cost_usd: 5000.0
+
+# Maximum number of Gate 1 (post-discovery) correction rounds.
+max_gate_corrections: 5
+
+# Maximum number of Gate 2 (post-draft) redraft rounds.
+max_gate2_redrafts: 1
+
+# Maximum retry attempts for transient agent failures.
+max_retries: 3
+
+# Per-agent timeout in seconds for dual-provider agent invocations
+# (discovery, drafting, taskify).
+agent_timeout_seconds: 900
+
+# Maximum retry attempts for taskify when output fails schema/DAG validation.
+taskify_max_retries: 3
+
+# Maximum task review/revision rounds before findings pass to human gate.
+task_review_max_rounds: 3
+
+# --- Dual-Provider Settings ---
+
+# Enable Codex CLI agents alongside Claude for review and holdout generation.
+enable_codex_reviewers: true
+
+# Enable Codex CLI alongside Claude for the discovery phase.
+enable_codex_discovery: true
+
+# Enable Codex CLI alongside Claude for the drafting phase.
+enable_codex_drafting: true
+
+# Model for codex agents (reviewers, holdout, discovery, drafting — passed as -m flag).
+codex_model: "gpt-5.4"
+
+# Timeout for all reviewer agents in seconds (both Claude and Codex).
+reviewer_timeout_seconds: 900
+
+# Timeout for holdout generation agents in seconds.
+holdout_timeout_seconds: 900
+
+# --- Skill Paths ---
+
 skill_paths:
   plan_spec: "/Users/nixlim/.claude/skills/plan-spec"
   grill_spec: "/Users/nixlim/.claude/skills/grill-spec"
 
-# Dual-provider review: set to false to use claude-only reviewers and holdout agents
-enable_codex_reviewers: true
-# Model for codex agents (reviewers + holdout, passed as -m flag)
-codex_model: "gpt-5.4"
-# Timeout for all reviewer agents in seconds (both claude and codex)
-reviewer_timeout_seconds: 900
-# Timeout for holdout generation agents in seconds
-holdout_timeout_seconds: 900
+# ===========================================================================
+# Code Review Workflow Configuration
+# ===========================================================================
 
-# Workflow limits (defaults shown — uncomment to override)
-max_rounds: 5
-min_rounds: 2
-max_total_findings: 500
-staleness_threshold: 3
-max_wall_clock_minutes: 6000
-max_cost_usd: 5000.0
-max_gate_corrections: 5
-max_retries: 3
+code_review:
+  # Maximum number of re-review rounds after the initial review (0 = no re-reviews).
+  max_rounds: 3
+
+  # Cumulative cost budget in USD. Workflow escalates when exceeded.
+  max_cost_usd: 500.0
+
+  # Maximum wall-clock time in minutes.
+  max_wall_clock_minutes: 120
+
+  # Timeout for the fix agent subprocess in seconds.
+  # After this duration: SIGTERM, wait 5s, SIGKILL.
+  fixer_timeout_seconds: 600
+
+  # How fix branches are created. Valid values: "branch_per_round", "direct_commit".
+  commit_mode: "branch_per_round"
+
+  # Consecutive rounds with no improvement before staleness is triggered.
+  staleness_threshold: 2
+
+  # Maximum retries for reviewer agent failures.
+  max_retries: 2
+
+  # Timeout for each reviewer agent subprocess in seconds.
+  reviewer_timeout_seconds: 300
+
+# ===========================================================================
+# Code Documentation Workflow Configuration
+# ===========================================================================
+
+codedoc:
+  # Maximum review/revise iterations.
+  max_rounds: 3
+
+  # Minimum iterations before acceptance.
+  min_rounds: 1
+
+  # Cost budget in USD.
+  max_cost_usd: 50.0
+
+  # Time budget in minutes.
+  max_wall_clock_minutes: 90
+
+  # Agent retry attempts (validation+retry).
+  max_retries: 2
+
+  # Max corrections at scope gate.
+  max_gate_corrections: 3
+
+  # Max re-drafts at draft gate.
+  max_gate_draft_redrafts: 2
+
+  # Consecutive stale rounds before halt.
+  staleness_threshold: 2
+
+  # Per-agent timeout (drafting, review, etc.) in seconds.
+  agent_timeout_seconds: 600
+
+  # Discovery-specific timeout (large codebases need more) in seconds.
+  discovery_timeout_seconds: 1200
+
+  # Per-reviewer timeout in seconds.
+  reviewer_timeout_seconds: 300
+
+  # Dual-provider for discovery.
+  enable_codex_codedoc_discovery: false
+
+  # Dual-provider for drafting.
+  enable_codex_codedoc_drafting: false
+
+  # Dual-provider for review.
+  enable_codex_reviewers: true
+
+  # Codex model.
+  codex_model: "gpt-5.4"
+
+  # Default mode: full or incremental.
+  default_mode: "full"
+
+  # Create timestamped .bak files before overwriting.
+  backup_before_write: true
+
+  # Output directory relative to code path.
+  docs_output_dir: "docs"
+
+  # Fraction of files changed to trigger drift warning (0.0-1.0).
+  drift_warning_threshold: 0.20
+
+  # Max wait for docs/ write lock before escalating in seconds.
+  write_lock_timeout_seconds: 300

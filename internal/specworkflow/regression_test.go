@@ -207,3 +207,218 @@ func TestRegression_ConfigBackwardCompat(t *testing.T) {
 		t.Errorf("TaskReviewMaxRounds default = %d, want >= 1", cfg.TaskReviewMaxRounds)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Regression: DispatchReviewers with spec 4-group lens set
+// ---------------------------------------------------------------------------
+
+type regressionDispatchRunner struct {
+	handler func(prompt, outputPath string, timeoutSeconds int) (int, string, float64, int64, error)
+}
+
+func (m *regressionDispatchRunner) Run(prompt, outputPath string, timeoutSeconds int) (int, string, float64, int64, error) {
+	return m.handler(prompt, outputPath, timeoutSeconds)
+}
+
+// regressionLensFromPath extracts the lens name from an output path.
+func regressionLensFromPath(path string) string {
+	base := filepath.Base(path)
+	// Format: review-{lens}-{provider}-round-{N}.json
+	if len(base) > 7 && base[:7] == "review-" {
+		rest := base[7:]
+		for _, provider := range []string{"-claude-", "-codex-"} {
+			for i := 0; i <= len(rest)-len(provider); i++ {
+				if rest[i:i+len(provider)] == provider {
+					return rest[:i]
+				}
+			}
+		}
+	}
+	return "unknown"
+}
+
+// TestRegression_SpecDispatchReviewersWith4Groups verifies that DispatchReviewers
+// with the spec workflow's 4 lens groups still dispatches correctly.
+func TestRegression_SpecDispatchReviewersWith4Groups(t *testing.T) {
+	dir := t.TempDir()
+
+	runner := &regressionDispatchRunner{
+		handler: func(prompt, outputPath string, timeoutSeconds int) (int, string, float64, int64, error) {
+			lens := regressionLensFromPath(outputPath)
+			output := ReviewerOutput{
+				SchemaVersion:      "1.0",
+				Agent:              "reviewer-" + lens + "-claude",
+				Round:              1,
+				MarkdownReportFile: "report-" + lens + ".md",
+				LensesApplied:      []string{lens},
+				Findings: []Finding{
+					{
+						ID:                    "F-" + lens,
+						Description:           "Test finding for " + lens,
+						Severity:              SeverityMajor,
+						Impact:                "Test impact",
+						Recommendation:        "Fix it",
+						Lens:                  lens,
+						AffectedSection:       "Section A",
+						ConstitutionPrinciple: strPtr("Principle 1"),
+					},
+				},
+			}
+			data, _ := json.Marshal(output)
+			os.WriteFile(outputPath, data, 0644)
+			return 0, "", 0.01, 100, nil
+		},
+	}
+
+	lensGroups := SpecReviewerLensGroups()
+	if len(lensGroups) != 4 {
+		t.Fatalf("SpecReviewerLensGroups: expected 4, got %d", len(lensGroups))
+	}
+
+	prompts := make(map[string]string)
+	outputPaths := make(map[string]string)
+	for _, lens := range lensGroups {
+		prompts[lens] = "Review with lens: " + lens
+		outputPaths[lens] = filepath.Join(dir, "review-"+lens+"-claude-round-1.json")
+	}
+
+	config := ReviewDispatchConfig{
+		MaxRetries:     2,
+		TimeoutSeconds: 300,
+	}
+
+	result, err := DispatchReviewers(
+		runner, nil, lensGroups,
+		prompts, outputPaths, nil,
+		config, func(d time.Duration) {}, nil,
+	)
+	if err != nil {
+		t.Fatalf("DispatchReviewers: %v", err)
+	}
+
+	if len(result.Results) != 4 {
+		t.Errorf("expected 4 results, got %d", len(result.Results))
+	}
+	if result.TotalCostUSD < 0.03 {
+		t.Errorf("expected cost >= $0.03, got $%.4f", result.TotalCostUSD)
+	}
+
+	// Verify all 4 lens groups produced output.
+	seenLenses := map[string]bool{}
+	for _, r := range result.Results {
+		if r.Output != nil {
+			for _, l := range r.Output.LensesApplied {
+				seenLenses[l] = true
+			}
+		}
+	}
+	for _, lens := range lensGroups {
+		if !seenLenses[lens] {
+			t.Errorf("missing output for lens %s", lens)
+		}
+	}
+}
+
+// TestRegression_SpecMergeWithSeverityPromotion verifies that
+// MergeReviewerOutputs with SpecDedupKey and promoteSeverity=true produces
+// the expected merge behavior.
+func TestRegression_SpecMergeWithSeverityPromotion(t *testing.T) {
+	output1 := &ReviewerOutput{
+		SchemaVersion:      "1.0",
+		Agent:              "reviewer-clarity-claude",
+		Round:              1,
+		MarkdownReportFile: "report-clarity-claude.md",
+		LensesApplied:      []string{"clarity"},
+		Findings: []Finding{
+			{
+				ID:                    "F-001",
+				Description:           "Unclear section",
+				Severity:              SeverityMinor,
+				Impact:                "Confusion",
+				Recommendation:        "Rewrite",
+				Lens:                  "clarity",
+				AffectedSection:       "Section A",
+				ConstitutionPrinciple: strPtr("Principle 1"),
+			},
+		},
+	}
+	output2 := &ReviewerOutput{
+		SchemaVersion:      "1.0",
+		Agent:              "reviewer-clarity-codex",
+		Round:              1,
+		MarkdownReportFile: "report-clarity-codex.md",
+		LensesApplied:      []string{"clarity"},
+		Findings: []Finding{
+			{
+				ID:                    "F-002",
+				Description:           "Same unclear section, more severe",
+				Severity:              SeverityCritical,
+				Impact:                "Major confusion",
+				Recommendation:        "Complete rewrite",
+				Lens:                  "clarity",
+				AffectedSection:       "Section A",
+				ConstitutionPrinciple: strPtr("Principle 1"),
+			},
+		},
+	}
+
+	merged, err := MergeReviewerOutputs(
+		[]*ReviewerOutput{output1, output2}, 1,
+		SpecDedupKey, true,
+	)
+	if err != nil {
+		t.Fatalf("MergeReviewerOutputs: %v", err)
+	}
+
+	if len(merged.Findings) != 1 {
+		t.Fatalf("expected 1 merged finding, got %d", len(merged.Findings))
+	}
+
+	// Severity should be promoted to CRITICAL.
+	if merged.Findings[0].Severity != SeverityCritical {
+		t.Errorf("expected CRITICAL (promoted), got %s", merged.Findings[0].Severity)
+	}
+
+	if len(merged.Findings[0].RaisedBy) != 2 {
+		t.Errorf("expected 2 sources (raised_by), got %d", len(merged.Findings[0].RaisedBy))
+	}
+}
+
+// TestRegression_SpecMergeWithoutPromotion verifies that merge without
+// severity promotion keeps the original severity.
+func TestRegression_SpecMergeWithoutPromotion(t *testing.T) {
+	output := &ReviewerOutput{
+		SchemaVersion:      "1.0",
+		Agent:              "reviewer-security-claude",
+		Round:              1,
+		MarkdownReportFile: "report-security.md",
+		LensesApplied:      []string{"security"},
+		Findings: []Finding{
+			{
+				ID:                    "S-001",
+				Description:           "SQL injection",
+				Severity:              SeverityMajor,
+				Impact:                "Data leak",
+				Recommendation:        "Use params",
+				Lens:                  "security",
+				AffectedSection:       "api/handler.go",
+				ConstitutionPrinciple: strPtr("Security"),
+			},
+		},
+	}
+
+	merged, err := MergeReviewerOutputs(
+		[]*ReviewerOutput{output}, 1,
+		SpecDedupKey, false,
+	)
+	if err != nil {
+		t.Fatalf("MergeReviewerOutputs: %v", err)
+	}
+
+	if len(merged.Findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(merged.Findings))
+	}
+	if merged.Findings[0].Severity != SeverityMajor {
+		t.Errorf("expected MAJOR, got %s", merged.Findings[0].Severity)
+	}
+}

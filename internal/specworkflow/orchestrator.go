@@ -30,6 +30,9 @@ type GoalInput struct {
 	Description string
 	// SourceDocPaths lists filesystem paths to source documents.
 	SourceDocPaths []string
+	// CodePath is an optional path to the target code repository. When set,
+	// the discovery agent will explore the codebase to inform its analysis.
+	CodePath string
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +106,7 @@ type Orchestrator struct {
 	running         bool
 	workspaceDir    string
 	featureName     string
+	codePath        string
 
 	// Gate channel for human gate responses.
 	gateCh chan GateResponse
@@ -392,9 +396,7 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 			lookPathDraft = exec.LookPath
 		}
 		if _, err := lookPathDraft("codex"); err == nil {
-			// Drafting uses no structured output schema — the drafter prompt
-			// specifies the expected JSON format inline.
-			codexDraftingRunner = DefaultCodexRunner(cfg.Config.CodexModel, cfg.WorkspaceDir, nil)
+			codexDraftingRunner = DefaultCodexRunner(cfg.Config.CodexModel, cfg.WorkspaceDir, DrafterOutputSchema())
 			log.Printf("[orchestrator] codex CLI detected — dual-provider drafting enabled")
 		} else {
 			log.Printf("[orchestrator] Codex unavailable, falling back to Claude-only drafting")

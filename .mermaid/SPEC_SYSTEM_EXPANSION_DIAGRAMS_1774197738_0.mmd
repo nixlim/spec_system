@@ -1,0 +1,61 @@
+flowchart LR
+    subgraph "Inputs"
+        UserDocs["Technical Docs<br/>(MVP plan, PRDs, vision)"]
+        HumanFeedback["Human Feedback<br/>(gate responses, revision requests)"]
+    end
+
+    subgraph "Stage 2: Epics"
+        direction TB
+        ED1["Claude Drafter<br/>→ epic-draft-claude-v{N}.md"]
+        ED2["Codex Drafter<br/>→ epic-draft-codex-v{N}.md"]
+        ER["Claude Reviser<br/>→ epic-combined-v{N}.md"]
+        ERV1["Claude Reviewer<br/>→ epic-review-claude-v{N}.json"]
+        ERV2["Codex Reviewer<br/>→ epic-review-codex-v{N}.json"]
+        EMF["Merged Findings<br/>→ epic-findings-v{N}.json"]
+        EJ["Claude Judge<br/>→ epic-judge-v{N}.json"]
+    end
+
+    subgraph "Stage 3: Specs"
+        direction TB
+        SW["Per-Epic Spec Workflow<br/>(existing system)"]
+        SOut["Spec Outputs<br/>→ specs/{epic}/spec-v{N}.md<br/>→ specs/{epic}/review-*-round-{N}.json<br/>→ specs/{epic}/merged-findings-round-{N}.json<br/>→ specs/{epic}/revision-round-{N}.json<br/>→ specs/{epic}/judge-round-{N}.json"]
+        CSR1["Claude Cross-Reviewer<br/>→ cross-review-claude-v{N}.json"]
+        CSR2["Codex Cross-Reviewer<br/>→ cross-review-codex-v{N}.json"]
+        CSMF["Cross-Spec Findings<br/>→ cross-findings-v{N}.json"]
+        CSJ["Cross-Spec Judge<br/>→ cross-judge-v{N}.json"]
+    end
+
+    subgraph "Stage 4: Tasks"
+        direction TB
+        TK["Claude Taskify<br/>→ {epic}.task.json"]
+        TR1["Claude Reviewer<br/>→ task-review-claude-v{N}.json"]
+        TR2["Codex Reviewer<br/>→ task-review-codex-v{N}.json"]
+        TMF["Task Findings<br/>→ task-findings-v{N}.json"]
+        TJ["Task Judge<br/>→ task-judge-v{N}.json"]
+    end
+
+    subgraph "Outputs"
+        Beads["Beads Issues<br/>(dependency graph)"]
+        FinalSpecs["Final Spec Suite<br/>(cross-validated)"]
+        TaskJSON["Task Graphs<br/>(.task.json per epic)"]
+    end
+
+    UserDocs --> ED1 & ED2
+    ED1 & ED2 --> ER
+    ER --> ERV1 & ERV2
+    ERV1 & ERV2 --> EMF
+    EMF --> ER
+    EMF --> EJ
+    HumanFeedback --> ER & SW
+
+    EJ --> SW
+    SW --> SOut
+    SOut --> CSR1 & CSR2
+    CSR1 & CSR2 --> CSMF --> CSJ
+
+    CSJ --> TK
+    TK --> TR1 & TR2
+    TR1 & TR2 --> TMF --> TJ
+    TJ --> Beads
+    TK --> TaskJSON
+    SOut --> FinalSpecs

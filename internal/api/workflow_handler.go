@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/foundry-zero/adversarial-spec-system/internal/codedoc"
+	"github.com/foundry-zero/adversarial-spec-system/internal/codereview"
 	"github.com/foundry-zero/adversarial-spec-system/internal/specworkflow"
 )
 
@@ -35,15 +37,18 @@ func isTerminalWorkflowState(s specworkflow.WorkflowState) bool {
 // and WebSocketHub, and provides HTTP handler factories for the workflow
 // control endpoints. All map operations are protected by a sync.RWMutex.
 type WorkflowManager struct {
-	orchestrators map[string]*specworkflow.Orchestrator
-	emitter       *specworkflow.ChannelEmitter
-	hub           *WebSocketHub
-	workspaceDir  string
-	config        specworkflow.SpecWorkflowConfig
-	otelPort      int
-	metricsStore  *MetricsStore
-	otelReceiver  *OTELReceiver
-	mu            sync.RWMutex
+	orchestrators      map[string]*specworkflow.Orchestrator
+	workspaceOverrides map[string]string // featureName -> overridden workspace dir
+	emitter            *specworkflow.ChannelEmitter
+	hub                *WebSocketHub
+	workspaceDir       string
+	config             specworkflow.SpecWorkflowConfig
+	otelPort           int
+	metricsStore       *MetricsStore
+	otelReceiver       *OTELReceiver
+	crManager          *CodeReviewManager
+	cdManager          *CodedocManager
+	mu                 sync.RWMutex
 }
 
 // NewWorkflowManager creates a WorkflowManager with the given dependencies.
@@ -54,12 +59,25 @@ func NewWorkflowManager(
 	config specworkflow.SpecWorkflowConfig,
 ) *WorkflowManager {
 	return &WorkflowManager{
-		orchestrators: make(map[string]*specworkflow.Orchestrator),
-		emitter:       emitter,
-		hub:           hub,
-		workspaceDir:  workspaceDir,
-		config:        config,
+		orchestrators:      make(map[string]*specworkflow.Orchestrator),
+		workspaceOverrides: make(map[string]string),
+		emitter:            emitter,
+		hub:                hub,
+		workspaceDir:       workspaceDir,
+		config:             config,
 	}
+}
+
+// GetWorkspaceForFeature returns the effective workspace directory for a
+// feature, checking per-workflow overrides first, then falling back to
+// the manager's default workspace.
+func (m *WorkflowManager) GetWorkspaceForFeature(featureName string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if ws, ok := m.workspaceOverrides[featureName]; ok {
+		return ws
+	}
+	return m.workspaceDir
 }
 
 // SetOTELPort configures the OTEL port used for child process telemetry.
@@ -84,6 +102,22 @@ func (m *WorkflowManager) SetOTELReceiver(recv *OTELReceiver) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.otelReceiver = recv
+}
+
+// SetCodeReviewManager configures the code review manager reference so the
+// unified status endpoint can include code review workflows.
+func (m *WorkflowManager) SetCodeReviewManager(crm *CodeReviewManager) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.crManager = crm
+}
+
+// SetCodedocManager configures the codedoc manager reference so the
+// unified status endpoint can include codedoc workflows.
+func (m *WorkflowManager) SetCodedocManager(cdm *CodedocManager) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cdManager = cdm
 }
 
 // GetCurrentFeatureName returns the feature name of a currently running
@@ -358,6 +392,8 @@ type startWorkflowRequest struct {
 	Description    string   `json:"description"`
 	FeatureName    string   `json:"feature_name"`
 	SourceDocPaths []string `json:"source_doc_paths"`
+	CodePath       string   `json:"code_path,omitempty"`
+	WorkspaceDir   string   `json:"workspace_dir,omitempty"`
 }
 
 // assignSourceDocsRequest is the JSON body for POST /api/workflow/{feature}/source-docs.
@@ -459,12 +495,25 @@ func HandleStartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			sourcePaths = copied
 		}
 
+		// Determine workspace directory (per-workflow override or manager default).
+		wsDir := manager.workspaceDir
+		if req.WorkspaceDir != "" {
+			info, statErr := os.Stat(req.WorkspaceDir)
+			if statErr != nil || !info.IsDir() {
+				manager.mu.Unlock()
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("workspace_dir is not a valid directory: %s", req.WorkspaceDir))
+				return
+			}
+			wsDir = req.WorkspaceDir
+			manager.workspaceOverrides[req.FeatureName] = wsDir
+		}
+
 		// Create orchestrator config.
 		// Wrap the shared emitter so events from this workflow carry its
 		// feature name — enabling client-side filtering when multiple
 		// workflows run concurrently.
 		orchConfig := specworkflow.OrchestratorConfig{
-			WorkspaceDir:   manager.workspaceDir,
+			WorkspaceDir:   wsDir,
 			FeatureName:    req.FeatureName,
 			SourceDocPaths: sourcePaths,
 			Config:         manager.config,
@@ -496,6 +545,7 @@ func HandleStartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			Title:          req.Title,
 			Description:    req.Description,
 			SourceDocPaths: sourcePaths,
+			CodePath:       req.CodePath,
 		}
 
 		go func() {
@@ -931,6 +981,66 @@ func handleAllWorkflowStatuses(w http.ResponseWriter, manager *WorkflowManager) 
 		result = append(result, obj)
 	}
 
+	// Gather code review workflows if a CR manager is wired.
+	manager.mu.RLock()
+	crMgr := manager.crManager
+	manager.mu.RUnlock()
+
+	if crMgr != nil {
+		// Disk-based CR states.
+		crDiskStates := findAllCRDiskStates(manager.workspaceDir)
+		// Override with live orchestrator state.
+		for name, orch := range crMgr.GetAllOrchestrators() {
+			if orch == nil {
+				continue
+			}
+			if sm := orch.StateMachine(); sm != nil {
+				crDiskStates[name] = sm.State()
+			}
+		}
+
+		var crNames []string
+		for name := range crDiskStates {
+			crNames = append(crNames, name)
+		}
+		sort.Strings(crNames)
+
+		for _, name := range crNames {
+			state := crDiskStates[name]
+			paused := !state.State.IsTerminal() && !crMgr.IsFeatureRunning(name)
+			obj := buildCRUnifiedStatusObject(state, paused)
+			result = append(result, obj)
+		}
+	}
+
+	// Gather codedoc workflows if a CD manager is wired.
+	manager.mu.RLock()
+	cdMgr := manager.cdManager
+	manager.mu.RUnlock()
+
+	if cdMgr != nil {
+		cdDiskStates := findAllCDDiskStates(manager.workspaceDir)
+		for name, orch := range cdMgr.GetAllOrchestrators() {
+			if orch == nil {
+				continue
+			}
+			cdDiskStates[name] = orch.State()
+		}
+
+		var cdNames []string
+		for name := range cdDiskStates {
+			cdNames = append(cdNames, name)
+		}
+		sort.Strings(cdNames)
+
+		for _, name := range cdNames {
+			state := cdDiskStates[name]
+			paused := !state.State.IsTerminal() && !state.State.IsGate() && cdMgr.getOrchestrator(name) == nil
+			obj := buildCDUnifiedStatusObject(state, paused)
+			result = append(result, obj)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -972,6 +1082,7 @@ func buildStatusObject(manager *WorkflowManager, state *specworkflow.WorkflowSta
 		"agent_invocations":  state.AgentInvocations,
 		"message":            msg,
 		"is_running":         isRunning,
+		"workflow_type":      "spec",
 	}
 	if paused {
 		obj["paused"] = true
@@ -1590,6 +1701,7 @@ type featureInfo struct {
 	IsPaused     bool     `json:"is_paused"`
 	IsRunning    bool     `json:"is_running"`
 	Files        []string `json:"files"`
+	SourceDocs   []string `json:"source_docs"`
 }
 
 // HandleListFeatures returns an HTTP handler for GET /api/workspace/features.
@@ -1655,6 +1767,16 @@ func HandleListFeatures(workspaceDir string, manager ...*WorkflowManager) http.H
 				}
 			}
 
+			// Scan source-docs subdirectory.
+			sourceDocsDir := filepath.Join(featureDir, "source-docs")
+			if sdEntries, sdErr := os.ReadDir(sourceDocsDir); sdErr == nil {
+				for _, sd := range sdEntries {
+					if !sd.IsDir() {
+						fi.SourceDocs = append(fi.SourceDocs, sd.Name())
+					}
+				}
+			}
+
 			// Scan files in the feature directory.
 			fileEntries, _ := os.ReadDir(featureDir)
 			for _, f := range fileEntries {
@@ -1708,7 +1830,13 @@ func HandleListFeatures(workspaceDir string, manager ...*WorkflowManager) http.H
 //   - /api/workspace/features/{name}/discovery → discovery-output.json
 //   - /api/workspace/features/{name}/state → workflow-state.json
 //   - /api/workspace/features/{name}/files/{filename} → any file in the spec dir
-func HandleFeatureFiles(workspaceDir string) http.HandlerFunc {
+func HandleFeatureFiles(workspaceDir string, manager ...*WorkflowManager) http.HandlerFunc {
+	// If a manager is provided, use it to resolve per-feature workspace overrides.
+	var mgr *WorkflowManager
+	if len(manager) > 0 {
+		mgr = manager[0]
+	}
+	_ = mgr // used below
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1739,7 +1867,12 @@ func HandleFeatureFiles(workspaceDir string) http.HandlerFunc {
 			return
 		}
 
-		specDir := filepath.Join(workspaceDir, "specs", featureName)
+		// Resolve effective workspace (per-feature override or global default).
+		effectiveWS := workspaceDir
+		if mgr != nil {
+			effectiveWS = mgr.GetWorkspaceForFeature(featureName)
+		}
+		specDir := filepath.Join(effectiveWS, "specs", featureName)
 
 		switch {
 		case subPath == "discovery":
@@ -1780,6 +1913,121 @@ func serveJSONFile(w http.ResponseWriter, filePath string) {
 	} else {
 		// Not valid JSON — return as a content wrapper.
 		writeJSON(w, http.StatusOK, map[string]string{"content": string(data)})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// HandleReplayPhase
+// ---------------------------------------------------------------------------
+
+// HandleReplayPhase re-runs a specific sub-phase of a workflow using existing
+// output files on disk, without re-dispatching agents. This is useful when
+// a merge/combine step fails or produces a fixable output — the user can fix
+// the input file on disk and replay just the merge step.
+func HandleReplayPhase(manager *WorkflowManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			FeatureName string `json:"feature_name"`
+			Phase       string `json:"phase"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+			return
+		}
+		if req.FeatureName == "" {
+			writeError(w, http.StatusBadRequest, "feature_name is required")
+			return
+		}
+		if err := ValidateFeatureName(req.FeatureName); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid feature_name: %v", err))
+			return
+		}
+		if req.Phase == "" {
+			writeError(w, http.StatusBadRequest, "phase is required")
+			return
+		}
+
+		// Validate phase name.
+		validPhases := map[string]bool{
+			"discovery_merge":    true,
+			"drafting_combine":   true,
+			"review_merge":       true,
+			"task_review_merge":  true,
+		}
+		if !validPhases[req.Phase] {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid phase %q: must be one of discovery_merge, drafting_combine, review_merge, task_review_merge", req.Phase))
+			return
+		}
+
+		// Check the feature is not currently running.
+		if manager.IsFeatureRunning(req.FeatureName) {
+			writeError(w, http.StatusConflict, "workflow is currently running — pause or wait for a gate before replaying")
+			return
+		}
+
+		// Load workflow state from disk.
+		workspace := manager.GetWorkspaceForFeature(req.FeatureName)
+		specDir := filepath.Join(workspace, "specs", req.FeatureName)
+		state, err := specworkflow.LoadState(specDir)
+		if err != nil {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("no workflow state found for %q", req.FeatureName))
+			return
+		}
+
+		// Determine the round/version for the replay.
+		var message string
+		var replayErr error
+
+		switch req.Phase {
+		case "discovery_merge":
+			round := state.Gate1CorrectionCount + 1
+			// Discovery merge requires an agent runner.
+			runner := specworkflow.DefaultClaudeRunner(workspace, manager.otelPort, req.FeatureName)
+			timeout := manager.config.AgentTimeoutSeconds
+			if timeout == 0 {
+				timeout = 120
+			}
+			message, replayErr = specworkflow.ReplayDiscoveryMerge(runner, specDir, round, timeout)
+
+		case "drafting_combine":
+			version := state.Gate2RedraftCount + 1
+			runner := specworkflow.DefaultClaudeRunner(workspace, manager.otelPort, req.FeatureName)
+			timeout := manager.config.AgentTimeoutSeconds
+			if timeout == 0 {
+				timeout = 120
+			}
+			message, replayErr = specworkflow.ReplayDraftingCombine(runner, specDir, version, timeout)
+
+		case "review_merge":
+			round := state.Round
+			message, replayErr = specworkflow.ReplayReviewMerge(specDir, round)
+
+		case "task_review_merge":
+			round := state.TaskReviewRound
+			if round == 0 {
+				round = 1
+			}
+			message, replayErr = specworkflow.ReplayTaskReviewMerge(specDir, round)
+		}
+
+		if replayErr != nil {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("replay failed: %v", replayErr))
+			return
+		}
+
+		log.Printf("[replay] %s phase=%s feature=%s: %s", r.URL.Path, req.Phase, req.FeatureName, message)
+
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":       "replayed",
+			"phase":        req.Phase,
+			"feature_name": req.FeatureName,
+			"message":      message,
+		})
 	}
 }
 
@@ -2207,4 +2455,134 @@ func findAllDiskStates(workspaceDir string) map[string]*specworkflow.WorkflowSta
 		result[name] = state
 	}
 	return result
+}
+
+// findAllCRDiskStates scans the code-reviews/ directory for persisted code
+// review workflow states and returns them keyed by feature name.
+func findAllCRDiskStates(workspaceDir string) map[string]*codereview.CodeReviewStateJSON {
+	crDir := filepath.Join(workspaceDir, "code-reviews")
+	entries, err := os.ReadDir(crDir)
+	if err != nil {
+		return make(map[string]*codereview.CodeReviewStateJSON)
+	}
+
+	result := make(map[string]*codereview.CodeReviewStateJSON)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		state, err := codereview.LoadCRState(filepath.Join(crDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		name := e.Name()
+		if state.FeatureName != "" {
+			name = state.FeatureName
+		}
+		result[name] = state
+	}
+	return result
+}
+
+// buildCRUnifiedStatusObject maps a code review state into the same shape as
+// the spec workflow status objects, with workflow_type set to "code_review".
+func buildCRUnifiedStatusObject(state *codereview.CodeReviewStateJSON, paused bool) map[string]interface{} {
+	var wallClockSec float64
+	if startTime, parseErr := time.Parse(time.RFC3339, state.StartedAt); parseErr == nil {
+		if paused || state.State.IsTerminal() {
+			if endTime, endErr := time.Parse(time.RFC3339, state.UpdatedAt); endErr == nil {
+				wallClockSec = endTime.Sub(startTime).Seconds()
+			} else {
+				wallClockSec = time.Since(startTime).Seconds()
+			}
+		} else {
+			wallClockSec = time.Since(startTime).Seconds()
+		}
+	}
+
+	msg := state.State.String()
+	if paused {
+		msg += " (server restarted — workflow paused)"
+	}
+
+	obj := map[string]interface{}{
+		"state":              state.State.String(),
+		"round":              state.Round,
+		"feature_name":       state.FeatureName,
+		"cost_usd":           state.CumulativeCostUSD,
+		"wall_clock_seconds": wallClockSec,
+		"agent_invocations":  state.AgentInvocations,
+		"message":            msg,
+		"is_running":         !paused && !state.State.IsTerminal(),
+		"workflow_type":      "code_review",
+	}
+	if paused {
+		obj["paused"] = true
+	}
+	return obj
+}
+
+// findAllCDDiskStates scans the workspace/codedoc/ directory for persisted
+// codedoc workflow states.
+func findAllCDDiskStates(workspaceDir string) map[string]*codedoc.CDStateJSON {
+	cdDir := filepath.Join(workspaceDir, "codedoc")
+	entries, err := os.ReadDir(cdDir)
+	if err != nil {
+		return make(map[string]*codedoc.CDStateJSON)
+	}
+
+	result := make(map[string]*codedoc.CDStateJSON)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		state, err := codedoc.LoadCDState(filepath.Join(cdDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		name := e.Name()
+		if state.FeatureName != "" {
+			name = state.FeatureName
+		}
+		result[name] = state
+	}
+	return result
+}
+
+// buildCDUnifiedStatusObject maps a codedoc state into the same shape as
+// the spec workflow status objects, with workflow_type set to "codedoc".
+func buildCDUnifiedStatusObject(state *codedoc.CDStateJSON, paused bool) map[string]interface{} {
+	var wallClockSec float64
+	if startTime, parseErr := time.Parse(time.RFC3339, state.StartedAt); parseErr == nil {
+		if paused || state.State.IsTerminal() {
+			if endTime, endErr := time.Parse(time.RFC3339, state.UpdatedAt); endErr == nil {
+				wallClockSec = endTime.Sub(startTime).Seconds()
+			} else {
+				wallClockSec = time.Since(startTime).Seconds()
+			}
+		} else {
+			wallClockSec = time.Since(startTime).Seconds()
+		}
+	}
+
+	msg := state.State.String()
+	if paused {
+		msg += " (server restarted — workflow paused)"
+	}
+
+	obj := map[string]interface{}{
+		"state":              state.State.String(),
+		"round":              state.Round,
+		"feature_name":       state.FeatureName,
+		"cost_usd":           state.CumulativeCostUSD,
+		"wall_clock_seconds": wallClockSec,
+		"agent_invocations":  state.AgentInvocations,
+		"message":            msg,
+		"is_running":         !paused && !state.State.IsTerminal() && !state.State.IsGate(),
+		"workflow_type":      "codedoc",
+	}
+	if paused {
+		obj["paused"] = true
+	}
+	return obj
 }

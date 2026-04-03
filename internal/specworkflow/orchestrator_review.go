@@ -69,7 +69,7 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 		TimeoutSeconds: o.config.ReviewerTimeoutSeconds,
 	}
 	round := state.Round
-	result, err := DispatchReviewers(o.runner, o.codexRunner, prompts, outputPaths, codexOutputPaths, dispatchCfg, func(d time.Duration) {},
+	result, err := DispatchReviewers(o.runner, o.codexRunner, SpecReviewerLensGroups(), prompts, outputPaths, codexOutputPaths, dispatchCfg, func(d time.Duration) {},
 		func(r ReviewerResult) {
 			success := r.Error == nil
 			if success {
@@ -105,7 +105,7 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 	}
 
 	// Merge findings.
-	merged, err := MergeReviewerOutputs(reviewerOutputs, state.Round)
+	merged, err := MergeReviewerOutputs(reviewerOutputs, state.Round, SpecDedupKey, true)
 	if err != nil {
 		return fmt.Errorf("merge reviewer outputs: %w", err)
 	}
@@ -297,20 +297,52 @@ func (o *Orchestrator) handleRevising(state *WorkflowStateJSON, specDir string) 
 	}
 
 	outPath := filepath.Join(specDir, fmt.Sprintf("revision-round-%d.json", state.Round))
-	cost, duration, err := o.dispatchAgent("reviser", prompt, outPath)
-	if err != nil {
-		return o.handleAgentError("reviser", err, cost, duration)
+
+	maxAttempts := o.config.MaxRetries
+	if maxAttempts < 2 {
+		maxAttempts = 2
 	}
 
-	// Parse and apply revision.
-	data, err := os.ReadFile(outPath)
-	if err != nil {
-		return fmt.Errorf("read revision output: %w", err)
-	}
+	var lastValidationErrors []string
 	var revision RevisionOutput
-	if err := json.Unmarshal(data, &revision); err != nil {
-		return fmt.Errorf("parse revision output: %w", err)
+	var data []byte
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		currentPrompt := AppendValidationErrorsToPrompt(prompt, lastValidationErrors)
+
+		cost, duration, dispatchErr := o.dispatchAgent("reviser", currentPrompt, outPath)
+		if dispatchErr != nil {
+			if attempt < maxAttempts {
+				log.Printf("[orchestrator] reviser dispatch failed on attempt %d/%d: %v", attempt, maxAttempts, dispatchErr)
+				lastValidationErrors = []string{fmt.Sprintf("agent dispatch failed: %v", dispatchErr)}
+				continue
+			}
+			return o.handleAgentError("reviser", dispatchErr, cost, duration)
+		}
+
+		rawData, readErr := os.ReadFile(outPath)
+		if readErr != nil {
+			if attempt < maxAttempts {
+				lastValidationErrors = []string{fmt.Sprintf("output file not created: %v", readErr)}
+				continue
+			}
+			return fmt.Errorf("read revision output: %w", readErr)
+		}
+
+		if parseErr := json.Unmarshal(rawData, &revision); parseErr != nil {
+			if attempt < maxAttempts {
+				log.Printf("[orchestrator] reviser JSON parse failed on attempt %d/%d: %v", attempt, maxAttempts, parseErr)
+				lastValidationErrors = []string{fmt.Sprintf("invalid JSON: %v", parseErr)}
+				o.emitter.Emit(NewAgentErrorEvent("reviser", "validation_failure", parseErr.Error(), attempt, maxAttempts))
+				continue
+			}
+			return fmt.Errorf("parse revision output: %w", parseErr)
+		}
+
+		data = rawData
+		break
 	}
+	_ = data // used for side effects above
 
 	// Apply revision changes to tracker.
 	if warnings, err := o.tracker.ApplyRevisionChanges(&revision, state.Round); err != nil {
@@ -348,19 +380,48 @@ func (o *Orchestrator) handleJudging(state *WorkflowStateJSON, specDir string) e
 	}
 
 	outPath := filepath.Join(specDir, fmt.Sprintf("judge-round-%d.json", state.Round))
-	cost, duration, err := o.dispatchAgent("judge", prompt, outPath)
-	if err != nil {
-		return o.handleAgentError("judge", err, cost, duration)
+
+	maxAttempts := o.config.MaxRetries
+	if maxAttempts < 2 {
+		maxAttempts = 2
 	}
 
-	// Parse judge output.
-	data, err := os.ReadFile(outPath)
-	if err != nil {
-		return fmt.Errorf("read judge output: %w", err)
-	}
+	var lastValidationErrors []string
 	var judge JudgeOutput
-	if err := json.Unmarshal(data, &judge); err != nil {
-		return fmt.Errorf("parse judge output: %w", err)
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		currentPrompt := AppendValidationErrorsToPrompt(prompt, lastValidationErrors)
+
+		cost, duration, dispatchErr := o.dispatchAgent("judge", currentPrompt, outPath)
+		if dispatchErr != nil {
+			if attempt < maxAttempts {
+				log.Printf("[orchestrator] judge dispatch failed on attempt %d/%d: %v", attempt, maxAttempts, dispatchErr)
+				lastValidationErrors = []string{fmt.Sprintf("agent dispatch failed: %v", dispatchErr)}
+				continue
+			}
+			return o.handleAgentError("judge", dispatchErr, cost, duration)
+		}
+
+		data, readErr := os.ReadFile(outPath)
+		if readErr != nil {
+			if attempt < maxAttempts {
+				lastValidationErrors = []string{fmt.Sprintf("output file not created: %v", readErr)}
+				continue
+			}
+			return fmt.Errorf("read judge output: %w", readErr)
+		}
+
+		if parseErr := json.Unmarshal(data, &judge); parseErr != nil {
+			if attempt < maxAttempts {
+				log.Printf("[orchestrator] judge JSON parse failed on attempt %d/%d: %v", attempt, maxAttempts, parseErr)
+				lastValidationErrors = []string{fmt.Sprintf("invalid JSON: %v", parseErr)}
+				o.emitter.Emit(NewAgentErrorEvent("judge", "validation_failure", parseErr.Error(), attempt, maxAttempts))
+				continue
+			}
+			return fmt.Errorf("parse judge output: %w", parseErr)
+		}
+
+		break
 	}
 
 	// Apply judge updates to tracker.
@@ -416,6 +477,7 @@ func (o *Orchestrator) handleJudging(state *WorkflowStateJSON, specDir string) e
 		MinRounds:            o.config.MinRounds,
 		CumulativeDowngrades: o.cumulativeDowngrades,
 		CumulativeDismissals: o.cumulativeDismissals,
+		TotalRaised:          state.FindingsSummary.Raised,
 	}
 	verdictResult := ProcessVerdict(&judge, o.tracker, revisionForConvergence, state, convergenceCfg)
 
@@ -472,6 +534,7 @@ func (o *Orchestrator) handleJudging(state *WorkflowStateJSON, specDir string) e
 
 	// Check authority-based escalation.
 	if verdictResult.ShouldEscalate {
+		log.Printf("escalating from JUDGING: authority limits exceeded: %s", verdictResult.AuthorityCheck.Reason)
 		o.escalateFrom(StateJudging)
 		return nil
 	}

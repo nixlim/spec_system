@@ -21,23 +21,173 @@ type discoveryResult struct {
 	err      error
 }
 
+// DiscoveryResumeData describes existing discovery artefacts found on disk
+// when the orchestrator enters the DISCOVERY state. It is emitted as gate
+// data so the UI can present resume options to the user.
+type DiscoveryResumeData struct {
+	// HasMergedOutput is true when a canonical discovery-output.json exists
+	// and contains valid JSON.
+	HasMergedOutput bool `json:"has_merged_output"`
+	// HasClaudeOutput is true when a per-provider Claude output exists.
+	HasClaudeOutput bool `json:"has_claude_output"`
+	// HasCodexOutput is true when a per-provider Codex output exists.
+	HasCodexOutput bool `json:"has_codex_output"`
+	// CanReplayMerge is true when both per-provider outputs exist (merge
+	// can be replayed without re-dispatching agents).
+	CanReplayMerge bool `json:"can_replay_merge"`
+	// Round is the discovery round these artefacts belong to.
+	Round int `json:"round"`
+	// MergedPreview is a summary of the merged output (actor count, etc.)
+	// so the user can decide without reading the full file.
+	MergedPreview *DiscoveryOutputSummary `json:"merged_preview,omitempty"`
+}
+
+// DiscoveryOutputSummary is a lightweight summary of a DiscoveryOutput
+// for display in gate UIs without transmitting the full output.
+type DiscoveryOutputSummary struct {
+	ActorCount        int `json:"actor_count"`
+	PriorityCount     int `json:"priority_count"`
+	OpenQuestionCount int `json:"open_question_count"`
+	ConstraintCount   int `json:"constraint_count"`
+}
+
+// checkDiscoveryArtefacts probes the spec directory for existing discovery
+// outputs from a previous run. Returns nil when no artefacts are found.
+func checkDiscoveryArtefacts(specDir string, round int) *DiscoveryResumeData {
+	data := &DiscoveryResumeData{Round: round}
+
+	// Check canonical merged output.
+	canonicalPath := filepath.Join(specDir, "discovery-output.json")
+	if raw, err := os.ReadFile(canonicalPath); err == nil {
+		var out DiscoveryOutput
+		if json.Unmarshal(raw, &out) == nil && out.SchemaVersion != "" {
+			data.HasMergedOutput = true
+			data.MergedPreview = &DiscoveryOutputSummary{
+				ActorCount:        len(out.Actors),
+				PriorityCount:     len(out.Priorities),
+				OpenQuestionCount: len(out.OpenQuestions),
+				ConstraintCount:   len(out.Constraints),
+			}
+		}
+	}
+
+	// Check per-provider outputs (try current round, then round 1 fallback).
+	for _, r := range []int{round, 1} {
+		claudePath := filepath.Join(specDir, VersionedFilename("discovery-output", "claude", r, ".json"))
+		codexPath := filepath.Join(specDir, VersionedFilename("discovery-output", "codex", r, ".json"))
+		if _, err := os.Stat(claudePath); err == nil {
+			data.HasClaudeOutput = true
+		}
+		if _, err := os.Stat(codexPath); err == nil {
+			data.HasCodexOutput = true
+		}
+		if data.HasClaudeOutput || data.HasCodexOutput {
+			break
+		}
+	}
+
+	data.CanReplayMerge = data.HasClaudeOutput && data.HasCodexOutput
+
+	// Nothing found — return nil to signal no artefacts.
+	if !data.HasMergedOutput && !data.HasClaudeOutput && !data.HasCodexOutput {
+		return nil
+	}
+
+	return data
+}
+
 // handleDiscovery builds the discovery prompt, dispatches discovery agent(s),
-// validates output(s), and transitions to HUMAN_GATE_1. When
-// EnableCodexDiscovery is true and a codex discovery runner is available, both
-// Claude and Codex run in parallel with AgentTimeoutSeconds timeout. Outputs
-// are merged via MergeDiscoveryOutputs. On single-provider failure, the
-// survivor is used. On both failures, the workflow escalates.
+// validates output(s), and transitions to HUMAN_GATE_1. When existing
+// artefacts are found from a previous run (e.g. after rewind), the user is
+// offered a choice: restart from scratch, replay the merge step, or skip
+// straight to the human gate with the existing merged output.
+//
+// When EnableCodexDiscovery is true and a codex discovery runner is available,
+// both Claude and Codex run in parallel with AgentTimeoutSeconds timeout.
+// Outputs are merged via MergeDiscoveryOutputs. On single-provider failure,
+// the survivor is used. On both failures, the workflow escalates.
 func (o *Orchestrator) handleDiscovery(goal GoalInput, state *WorkflowStateJSON, specDir string) error {
+	discoveryRound := state.Gate1CorrectionCount + 1
+
+	// Smart restart: check for existing discovery artefacts before dispatching.
+	// Skip the resume gate when this is a correction re-entry (user just provided
+	// corrections at HUMAN_GATE_1 and we're re-running with their feedback).
+	// Gate1CorrectionCount > 0 means we've been through at least one correction
+	// loop in this workflow run — artefacts are expected and should be overwritten.
+	isCorrectingLoop := state.Gate1CorrectionCount > 0
+	resumeData := checkDiscoveryArtefacts(specDir, discoveryRound)
+	if resumeData != nil && !isCorrectingLoop {
+		log.Printf("[orchestrator] existing discovery artefacts found: merged=%v, claude=%v, codex=%v, can_replay_merge=%v",
+			resumeData.HasMergedOutput, resumeData.HasClaudeOutput, resumeData.HasCodexOutput, resumeData.CanReplayMerge)
+
+		// Emit a discovery_resume gate so the user can choose how to proceed.
+		o.emitter.Emit(NewGateRequestEvent("discovery_resume", state.FeatureName, resumeData))
+
+		// Wait for the user's choice.
+		resp := <-o.gateCh
+		log.Printf("[orchestrator] discovery resume response: action=%s", resp.Action)
+
+		switch resp.Action {
+		case "skip_to_gate":
+			// Jump directly to HUMAN_GATE_1 with existing merged output.
+			if resumeData.HasMergedOutput {
+				log.Printf("[orchestrator] skipping discovery — using existing merged output")
+				o.emitter.Emit(NewGateResponseEvent("discovery_resume", "skip_to_gate",
+					"Using existing discovery output — skipping to human gate"))
+				o.logTransition(StateDiscovery, StateHumanGate1)
+				if err := o.sm.Transition(StateHumanGate1); err != nil {
+					return fmt.Errorf("transition DISCOVERY -> HUMAN_GATE_1 (skip): %w", err)
+				}
+				return nil
+			}
+			// No merged output — fall through to replay merge if possible.
+			log.Printf("[orchestrator] skip_to_gate requested but no merged output — trying replay_merge")
+			fallthrough
+
+		case "replay_merge":
+			// Replay the merge step using existing per-provider outputs.
+			if resumeData.CanReplayMerge {
+				log.Printf("[orchestrator] replaying discovery merge from existing per-provider outputs")
+				o.emitter.Emit(NewGateResponseEvent("discovery_resume", "replay_merge",
+					"Replaying merge from existing Claude and Codex outputs"))
+				msg, replayErr := ReplayDiscoveryMerge(o.runner, specDir, discoveryRound, o.config.AgentTimeoutSeconds)
+				if replayErr != nil {
+					log.Printf("[orchestrator] replay merge failed: %v — falling through to fresh dispatch", replayErr)
+					// Fall through to fresh dispatch below.
+				} else {
+					log.Printf("[orchestrator] replay merge succeeded: %s", msg)
+					o.logTransition(StateDiscovery, StateHumanGate1)
+					if err := o.sm.Transition(StateHumanGate1); err != nil {
+						return fmt.Errorf("transition DISCOVERY -> HUMAN_GATE_1 (replay): %w", err)
+					}
+					return nil
+				}
+			} else {
+				log.Printf("[orchestrator] replay_merge requested but per-provider outputs not available — running fresh")
+			}
+			// Fall through to fresh dispatch.
+			fallthrough
+
+		case "restart_fresh":
+			// User chose to re-run discovery from scratch. Continue below.
+			log.Printf("[orchestrator] user chose fresh discovery restart")
+			o.emitter.Emit(NewGateResponseEvent("discovery_resume", "restart_fresh",
+				"Re-running discovery from scratch"))
+
+		default:
+			// Unknown action — treat as restart_fresh to be safe.
+			log.Printf("[orchestrator] unknown discovery resume action %q — defaulting to fresh restart", resp.Action)
+		}
+	}
+
 	// Load the full correction history from numbered files
 	// (gate1-corrections-1.json, gate1-corrections-2.json, ...).
 	discoveryCtx := loadCorrectionHistory(specDir)
 
-	prompt, err := o.promptBuilder.BuildDiscoveryPrompt(goal.SourceDocPaths, discoveryCtx...)
+	prompt, err := o.promptBuilder.BuildDiscoveryPrompt(goal.SourceDocPaths, goal.CodePath, &goal, discoveryCtx...)
 	if err != nil {
 		return fmt.Errorf("build discovery prompt: %w", err)
 	}
-
-	discoveryRound := state.Gate1CorrectionCount + 1
 
 	// Dual-provider path: dispatch both Claude and Codex in parallel.
 	if o.config.EnableCodexDiscovery && o.codexDiscoveryRunner != nil {
@@ -48,18 +198,58 @@ func (o *Orchestrator) handleDiscovery(goal GoalInput, state *WorkflowStateJSON,
 	return o.handleSingleDiscovery(prompt, state, specDir, discoveryRound)
 }
 
-// handleSingleDiscovery is the original single-provider discovery path.
+// handleSingleDiscovery is the single-provider discovery path with
+// validation+retry. If the agent produces invalid JSON, the prompt is
+// augmented with validation errors and the agent is re-dispatched.
 func (o *Orchestrator) handleSingleDiscovery(prompt string, state *WorkflowStateJSON, specDir string, discoveryRound int) error {
 	outPath := filepath.Join(specDir, "discovery-output.json")
-	cost, duration, err := o.dispatchAgent("discovery", prompt, outPath)
-	if err != nil {
-		return o.handleAgentError("discovery", err, cost, duration)
+
+	maxAttempts := o.config.MaxRetries
+	if maxAttempts < 2 {
+		maxAttempts = 2
 	}
 
-	discovery, data, err := parseAndValidateDiscoveryOutput(outPath)
-	if err != nil {
-		return err
+	// Use --json-schema to enforce structured output when the runner supports it.
+	origRunner := o.runner
+	if cr, ok := o.runner.(*ClaudeRunner); ok {
+		o.runner = cr.WithJSONSchema(string(DiscoveryOutputSchema()))
 	}
+
+	var lastValidationErrors []string
+	var discovery *DiscoveryOutput
+	var data []byte
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		currentPrompt := AppendValidationErrorsToPrompt(prompt, lastValidationErrors)
+
+		cost, duration, err := o.dispatchAgent("discovery", currentPrompt, outPath)
+		if err != nil {
+			if attempt < maxAttempts {
+				log.Printf("[orchestrator] discovery dispatch failed on attempt %d/%d: %v", attempt, maxAttempts, err)
+				lastValidationErrors = []string{fmt.Sprintf("agent dispatch failed: %v", err)}
+				continue
+			}
+			o.runner = origRunner
+			return o.handleAgentError("discovery", err, cost, duration)
+		}
+
+		d, rawData, parseErr := parseAndValidateDiscoveryOutput(outPath)
+		if parseErr != nil {
+			if attempt < maxAttempts {
+				log.Printf("[orchestrator] discovery validation failed on attempt %d/%d: %v", attempt, maxAttempts, parseErr)
+				lastValidationErrors = []string{parseErr.Error()}
+				o.emitter.Emit(NewAgentErrorEvent("discovery", "validation_failure", parseErr.Error(), attempt, maxAttempts))
+				continue
+			}
+			o.runner = origRunner
+			return parseErr
+		}
+
+		discovery = d
+		data = rawData
+		break
+	}
+	o.runner = origRunner // restore
 
 	log.Printf("[orchestrator] discovery output valid: %d actors, %d priorities, %d open questions",
 		len(discovery.Actors), len(discovery.Priorities), len(discovery.OpenQuestions))
@@ -94,12 +284,18 @@ func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJS
 	resultsCh := make(chan discoveryResult, 2)
 	var wg sync.WaitGroup
 
+	// Build a schema-bound Claude runner for structured output.
+	var discoveryClaudeRunner AgentRunner = o.runner
+	if cr, ok := o.runner.(*ClaudeRunner); ok {
+		discoveryClaudeRunner = cr.WithJSONSchema(string(DiscoveryOutputSchema()))
+	}
+
 	// Claude discovery agent.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		o.logger.LogAgentDispatch("discovery-claude", "discovery-claude", state.Round)
-		exitCode, stderr, cost, duration, runErr := o.runner.Run(prompt, claudeOutPath, timeout)
+		exitCode, stderr, cost, duration, runErr := discoveryClaudeRunner.Run(prompt, claudeOutPath, timeout)
 		var dispatchErr error
 		if runErr != nil {
 			dispatchErr = runErr
@@ -200,20 +396,26 @@ func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJS
 	var finalData []byte
 
 	if claudeOutput != nil && codexOutput != nil {
-		// Both succeeded -> merge.
-		finalOutput = MergeDiscoveryOutputs(claudeOutput, codexOutput)
-		mergedData, err := json.MarshalIndent(finalOutput, "", "  ")
-		if err != nil {
-			return fmt.Errorf("marshal merged discovery output: %w", err)
-		}
-		finalData = mergedData
-
+		// Both succeeded -> intelligent agent-based merge.
 		mergedPath := filepath.Join(specDir, VersionedMergedFilename("discovery-output", discoveryRound, ".json"))
-		if err := os.WriteFile(mergedPath, mergedData, 0o644); err != nil {
-			log.Printf("[orchestrator] warning: failed to write merged discovery output: %v", err)
+		mergedData, mergeErr := o.mergeDiscoveryWithAgent(claudeData, codexData, mergedPath, state)
+		if mergeErr != nil {
+			// Fall back to mechanical merge on agent failure.
+			log.Printf("[orchestrator] agent-based merge failed (%v), falling back to mechanical merge", mergeErr)
+			finalOutput = MergeDiscoveryOutputs(claudeOutput, codexOutput)
+			fb, _ := json.MarshalIndent(finalOutput, "", "  ")
+			finalData = fb
+		} else {
+			finalData = mergedData
+			var fo DiscoveryOutput
+			if jsonErr := json.Unmarshal(mergedData, &fo); jsonErr == nil {
+				finalOutput = &fo
+			}
 		}
-		log.Printf("[orchestrator] dual-provider discovery merged: %d actors, %d priorities, %d open questions",
-			len(finalOutput.Actors), len(finalOutput.Priorities), len(finalOutput.OpenQuestions))
+		if finalOutput != nil {
+			log.Printf("[orchestrator] dual-provider discovery merged: %d actors, %d priorities, %d open questions",
+				len(finalOutput.Actors), len(finalOutput.Priorities), len(finalOutput.OpenQuestions))
+		}
 	} else if claudeOutput != nil {
 		// Only Claude succeeded.
 		finalOutput = claudeOutput
@@ -253,6 +455,104 @@ func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJS
 		return fmt.Errorf("transition DISCOVERY -> HUMAN_GATE_1: %w", err)
 	}
 	return nil
+}
+
+// buildDiscoveryMergePrompt constructs the base prompt for the discovery merge
+// agent. It is shared between mergeDiscoveryWithAgent and ReplayDiscoveryMerge.
+func buildDiscoveryMergePrompt(claudeData, codexData []byte) string {
+	var b strings.Builder
+	b.WriteString("# Discovery Merge Agent\n\n")
+	b.WriteString("You are given two discovery analysis outputs from different AI providers (Claude and Codex) ")
+	b.WriteString("that analysed the same source documents describing a software system.\n\n")
+	b.WriteString("Your task: produce a SINGLE merged discovery output that combines the best elements from both, ")
+	b.WriteString("resolving conflicts and eliminating redundancy. The result should be more complete and accurate ")
+	b.WriteString("than either individual output.\n\n")
+
+	b.WriteString("## Merge Rules\n\n")
+	b.WriteString("- **problem_statement**: Synthesise into one clear statement. Do not concatenate — write a new unified version.\n")
+	b.WriteString("- **actors**: Union of both lists. Deduplicate by name (case-insensitive). Prefer the richer description.\n")
+	b.WriteString("- **scope**: Union in_scope and out_of_scope. Deduplicate similar items.\n")
+	b.WriteString("- **constraints**: Union and deduplicate.\n")
+	b.WriteString("- **integration_points**: Union by system name. Merge descriptions if both mention the same system.\n")
+	b.WriteString("- **priorities**: Union by item. If both providers assigned different priorities, prefer the higher (more urgent).\n")
+	b.WriteString("- **assumptions**: Union and deduplicate. Keep the richer question_for_user.\n")
+	b.WriteString("- **open_questions**: Union and deduplicate.\n")
+	b.WriteString("- **schema_version**: Use \"1.0\"\n")
+	b.WriteString("- **agent**: Set to \"merged\"\n\n")
+
+	b.WriteString("## Claude's Discovery Output\n\n```json\n")
+	b.Write(claudeData)
+	b.WriteString("\n```\n\n")
+
+	b.WriteString("## Codex's Discovery Output\n\n```json\n")
+	b.Write(codexData)
+	b.WriteString("\n```\n\n")
+
+	b.WriteString("## Output\n\n")
+	b.WriteString("Produce the merged JSON object as your response. The JSON must conform to the DiscoveryOutput schema.\n")
+	b.WriteString("Output ONLY the raw JSON object — no commentary, no markdown code fences, no explanation.\n")
+
+	return b.String()
+}
+
+// mergeDiscoveryWithAgent dispatches a Claude agent to intelligently merge
+// two discovery outputs into a single comprehensive result, with validation
+// and retry on failure. Uses the taskval pattern: dispatch → validate →
+// feed errors back → retry.
+func (o *Orchestrator) mergeDiscoveryWithAgent(claudeData, codexData []byte, outputPath string, state *WorkflowStateJSON) ([]byte, error) {
+	log.Printf("[orchestrator] dispatching merge agent for dual-provider discovery")
+
+	o.SetAgentStatus("discovery-merge", "running")
+	o.emitter.Emit(NewAgentDispatchEvent("discovery-merge", state.Round))
+
+	basePrompt := buildDiscoveryMergePrompt(claudeData, codexData)
+
+	// Use ForJSONOnly: disable tools and enforce --json-schema. The merge agent
+	// receives all data inline and only needs to produce JSON — no file access needed.
+	var mergeRunner AgentRunner = o.runner
+	if cr, ok := o.runner.(*ClaudeRunner); ok {
+		mergeRunner = cr.ForJSONOnly(string(DiscoveryOutputSchema()))
+	}
+
+	maxAttempts := o.config.MaxRetries
+	if maxAttempts < 2 {
+		maxAttempts = 2 // at least one retry for merge
+	}
+
+	result, err := RunWithValidation(ValidateAndRetryConfig{
+		AgentName:      "discovery-merge",
+		MaxAttempts:    maxAttempts,
+		OutputPath:     outputPath,
+		TimeoutSeconds: o.config.AgentTimeoutSeconds,
+		Validator:      DiscoveryOutputValidator(),
+		Runner:         mergeRunner,
+		BuildPrompt: func(validationErrors []string) string {
+			return AppendValidationErrorsToPrompt(basePrompt, validationErrors)
+		},
+	})
+	if err != nil {
+		o.SetAgentStatus("discovery-merge", "failed")
+		return nil, fmt.Errorf("merge validation loop error: %w", err)
+	}
+
+	state.AgentInvocations += result.Attempts
+	state.CumulativeCostUSD += result.TotalCost
+	o.emitter.Emit(NewAgentCompleteEvent("discovery-merge", state.Round, result.Data != nil, result.TotalDuration, result.TotalCost))
+
+	if result.Data == nil {
+		o.SetAgentStatus("discovery-merge", "failed")
+		return nil, fmt.Errorf("merge agent failed after %d attempts: %s",
+			result.Attempts, strings.Join(result.LastErrors, "; "))
+	}
+
+	o.SetAgentStatus("discovery-merge", "done")
+
+	var out DiscoveryOutput
+	_ = json.Unmarshal(result.Data, &out)
+	log.Printf("[orchestrator] discovery merge agent produced: %d actors, %d priorities, %d open questions",
+		len(out.Actors), len(out.Priorities), len(out.OpenQuestions))
+
+	return result.Data, nil
 }
 
 // parseAndValidateDiscoveryOutput reads, parses, and validates a discovery

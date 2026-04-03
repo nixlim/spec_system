@@ -75,7 +75,7 @@ type DiscoveryContext struct {
 	PreviousOutput *DiscoveryOutput
 }
 
-func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string, ctx ...DiscoveryContext) (string, error) {
+func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string, codePath string, goal *GoalInput, ctx ...DiscoveryContext) (string, error) {
 	specTemplate, err := pb.skills.GetSkillContent(SpecTemplate)
 	if err != nil {
 		return "", fmt.Errorf("loading spec template for discovery: %w", err)
@@ -86,9 +86,36 @@ func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string, ctx ...Di
 	// System preamble.
 	b.WriteString("# Discovery Agent\n\n")
 	b.WriteString("You are the Discovery agent in the adversarial spec review workflow.\n")
-	b.WriteString("Your task is Phase 1: analyse the provided source documents to extract ")
-	b.WriteString("actors, problem statement, scope, constraints, integration points, ")
-	b.WriteString("priorities, assumptions, and open questions.\n\n")
+	b.WriteString("Your task is Phase 1: read the provided source documents that describe a SOFTWARE SYSTEM ")
+	b.WriteString("being built, and extract the following information ABOUT THAT SOFTWARE SYSTEM:\n")
+	b.WriteString("- actors (the users, services, and external systems in the software being described)\n")
+	b.WriteString("- problem_statement (what problem the software system solves)\n")
+	b.WriteString("- scope (what the software system does and does not do)\n")
+	b.WriteString("- constraints (technical and business constraints on the software system)\n")
+	b.WriteString("- integration_points (external systems the software integrates with)\n")
+	b.WriteString("- priorities (prioritised features/capabilities of the software)\n")
+	b.WriteString("- assumptions (assumptions about the software system's design)\n")
+	b.WriteString("- open_questions (unresolved questions about the software system's requirements)\n\n")
+	b.WriteString("IMPORTANT: Your output must describe the SOFTWARE SYSTEM from the source documents, ")
+	b.WriteString("NOT your own task or activity. Do NOT describe what you did — describe what the system does.\n\n")
+
+	// Feature focus — when the user specifies a title/description, the discovery
+	// should focus on that specific feature, not the entire system.
+	if goal != nil && (goal.Title != "" || goal.Description != "") {
+		b.WriteString("## Feature Focus\n\n")
+		b.WriteString("You are writing a specification for a SPECIFIC FEATURE, not the entire system.\n")
+		b.WriteString("The source documents may describe a larger system — use them as CONTEXT, but focus your ")
+		b.WriteString("discovery output on the specific feature described below.\n\n")
+		if goal.Title != "" {
+			fmt.Fprintf(&b, "**Feature Title**: %s\n", goal.Title)
+		}
+		if goal.Description != "" {
+			fmt.Fprintf(&b, "**Feature Description**: %s\n", goal.Description)
+		}
+		b.WriteString("\nYour actors, scope, constraints, integration points, priorities, assumptions, and open questions ")
+		b.WriteString("should be scoped to THIS FEATURE. Include system-wide context only where it directly affects ")
+		b.WriteString("this feature's design and implementation.\n\n")
+	}
 
 	// Embed plan-spec Phase 1 instructions (spec template contains structure guidance).
 	b.WriteString("## Plan-Spec Phase 1 Instructions\n\n")
@@ -109,6 +136,25 @@ func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string, ctx ...Di
 		fmt.Fprintf(&b, "- **%s**: `%s`\n", name, p)
 	}
 	b.WriteString("\nRead ALL of these files before producing your output.\n\n")
+
+	// Codebase context — when a code repository is specified, the agent should
+	// explore it to understand existing architecture, patterns, and boundaries.
+	if codePath != "" {
+		b.WriteString("## Codebase Context\n\n")
+		fmt.Fprintf(&b, "The target code repository is located at: `%s`\n\n", codePath)
+		b.WriteString("Explore the codebase to understand the existing system BEFORE producing your output. ")
+		b.WriteString("Spend no more than 15 tool calls on exploration — focus on high-signal files:\n\n")
+		b.WriteString("1. Start with top-level files: README, go.mod/package.json, Makefile, config files\n")
+		b.WriteString("2. List the source directory structure (use Glob with patterns like `src/**` or `internal/**`)\n")
+		b.WriteString("3. Read key interface/type definition files relevant to the feature being specified\n")
+		b.WriteString("4. Check for existing tests related to the feature area\n\n")
+		b.WriteString("Incorporate your codebase understanding into your discovery analysis — ")
+		b.WriteString("the existing code provides critical context for identifying actors, ")
+		b.WriteString("scope boundaries, constraints, and integration points that may not ")
+		b.WriteString("be fully described in the source documents.\n\n")
+		b.WriteString("IMPORTANT: Codebase exploration is supplementary context. Your PRIMARY deliverable ")
+		b.WriteString("is still the structured JSON output file described in the Output Requirements section below.\n\n")
+	}
 
 	// Human corrections and answers from previous rounds (if any).
 	// Multiple rounds are shown in chronological order so the agent sees
@@ -202,17 +248,19 @@ func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string, ctx ...Di
 	b.WriteString("- assumptions (array of Assumption): assumption, confidence (high|medium|low), question_for_user (optional)\n")
 	b.WriteString("- open_questions (array of string)\n\n")
 
-	// Output instructions — be extremely explicit about format.
+	// Output instructions — tell the agent to write the JSON file directly.
 	outPath := filepath.Join(pb.specDir(), "discovery-output.json")
 	b.WriteString("## CRITICAL: Output Requirements\n\n")
-	b.WriteString("You MUST write a SINGLE valid JSON object to the following file path using the Write tool.\n")
-	b.WriteString("Do NOT write markdown, text, or any non-JSON content to this file.\n")
-	b.WriteString("Do NOT include markdown code fences (```) in the file.\n")
-	b.WriteString("The file content must start with { and end with }.\n")
-	b.WriteString("The JSON must conform EXACTLY to the DiscoveryOutput schema described above.\n\n")
-	fmt.Fprintf(&b, "Output file path: %s\n\n", outPath)
-	b.WriteString("After writing the JSON file, provide a brief text summary of your findings.\n")
-	b.WriteString("The JSON file is what matters — the summary is just for human readability.\n")
+	b.WriteString("After reading all source documents (and codebase if provided), you MUST write a SINGLE ")
+	b.WriteString("valid JSON object to the file path below using the Write tool.\n\n")
+	fmt.Fprintf(&b, "**Output file path**: `%s`\n\n", outPath)
+	b.WriteString("Rules:\n")
+	b.WriteString("- The file content MUST start with `{` and end with `}` — pure JSON, nothing else\n")
+	b.WriteString("- Do NOT write markdown, commentary, or any non-JSON content to this file\n")
+	b.WriteString("- Do NOT wrap the JSON in markdown code fences (```)\n")
+	b.WriteString("- The JSON MUST conform EXACTLY to the DiscoveryOutput schema described above\n")
+	b.WriteString("- Write the JSON file FIRST, then provide a brief text summary after\n")
+	b.WriteString("- If you are running low on turns, SKIP the summary — the JSON file is what matters\n")
 
 	return b.String(), nil
 }
@@ -297,10 +345,14 @@ func (pb *PromptBuilder) BuildDrafterPrompt(confirmedReqsPath string, userAnswer
 	// Output paths.
 	specPath := filepath.Join(pb.specDir(), "spec-v0.md")
 	holdoutPath := filepath.Join(pb.specDir(), pb.featureName+"-holdouts.md")
+	outputJSONPath := filepath.Join(pb.specDir(), "drafter-output.json")
 	b.WriteString("## Output Files\n\n")
-	fmt.Fprintf(&b, "Write the specification to: %s\n", specPath)
-	fmt.Fprintf(&b, "Write the holdout test data to: %s\n", holdoutPath)
-	fmt.Fprintf(&b, "Write the JSON output to: %s\n", filepath.Join(pb.specDir(), "drafter-output.json"))
+	fmt.Fprintf(&b, "1. Write the specification to: %s (use the Write tool)\n", specPath)
+	fmt.Fprintf(&b, "2. Write the holdout test data to: %s (use the Write tool)\n", holdoutPath)
+	fmt.Fprintf(&b, "3. DrafterOutput JSON: %s — produce the JSON as your final text response ", outputJSONPath)
+	b.WriteString("OR write it via the Write tool. ")
+	b.WriteString("Your final text response should be the DrafterOutput JSON object. ")
+	b.WriteString("The system will validate it against the schema.\n")
 
 	return b.String(), nil
 }

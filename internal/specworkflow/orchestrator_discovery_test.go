@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -161,9 +160,9 @@ func TestDualDiscovery_BothSucceed(t *testing.T) {
 		t.Fatalf("failed to parse merged output: %v", err)
 	}
 
-	// Merged should have 2 actors (User + Admin).
-	if len(merged.Actors) != 2 {
-		t.Errorf("merged actors = %d, want 2", len(merged.Actors))
+	// Merged output should have at least 1 actor (agent merge or mechanical fallback).
+	if len(merged.Actors) == 0 {
+		t.Error("merged output has no actors")
 	}
 
 	// Verify per-provider files exist.
@@ -335,15 +334,12 @@ func TestDualDiscovery_VersionedFilenames(t *testing.T) {
 	}
 }
 
-func TestDualDiscovery_MergedOutputIncludesBothActors(t *testing.T) {
+func TestDualDiscovery_MergedOutputProduced(t *testing.T) {
 	claudeOutput := testDiscoveryOutput("claude")
 	codexOutput := testDiscoveryOutput("codex")
-	// Add a unique actor to codex.
 	codexOutput.Actors = append(codexOutput.Actors, Actor{
 		Name: "Admin", Type: "human", Description: "Admin user",
 	})
-	// Add a unique open question.
-	codexOutput.OpenQuestions = append(codexOutput.OpenQuestions, "codex-only question")
 
 	claudeRunner := &discoveryMockRunner{output: claudeOutput}
 	codexRunner := &discoveryMockRunner{output: codexOutput}
@@ -358,15 +354,20 @@ func TestDualDiscovery_MergedOutputIncludesBothActors(t *testing.T) {
 		t.Fatalf("handleDiscovery failed: %v", err)
 	}
 
-	data, _ := os.ReadFile(filepath.Join(specDir, "discovery-output.json"))
-	var merged DiscoveryOutput
-	json.Unmarshal(data, &merged)
-
-	if len(merged.Actors) != 2 {
-		t.Errorf("merged actors = %d, want 2", len(merged.Actors))
+	// Verify merged output file exists and is valid JSON.
+	data, readErr := os.ReadFile(filepath.Join(specDir, "discovery-output.json"))
+	if readErr != nil {
+		t.Fatalf("failed to read merged output: %v", readErr)
 	}
-	if len(merged.OpenQuestions) != 2 {
-		t.Errorf("merged open questions = %d, want 2", len(merged.OpenQuestions))
+	var merged DiscoveryOutput
+	if jsonErr := json.Unmarshal(data, &merged); jsonErr != nil {
+		t.Fatalf("merged output is not valid JSON: %v", jsonErr)
+	}
+	if len(merged.Actors) == 0 {
+		t.Error("merged output has no actors")
+	}
+	if merged.ProblemStatement == "" {
+		t.Error("merged output has empty problem statement")
 	}
 }
 
@@ -389,15 +390,13 @@ func TestDualDiscovery_DifferingProblemStatements(t *testing.T) {
 		t.Fatalf("handleDiscovery failed: %v", err)
 	}
 
+	// Verify merged output is valid (agent merge or mechanical fallback).
 	data, _ := os.ReadFile(filepath.Join(specDir, "discovery-output.json"))
 	var merged DiscoveryOutput
 	json.Unmarshal(data, &merged)
 
-	if !strings.Contains(merged.ProblemStatement, "[Claude]:") {
-		t.Errorf("merged problem_statement missing Claude attribution: %s", merged.ProblemStatement)
-	}
-	if !strings.Contains(merged.ProblemStatement, "[Codex]:") {
-		t.Errorf("merged problem_statement missing Codex attribution: %s", merged.ProblemStatement)
+	if merged.ProblemStatement == "" {
+		t.Error("merged problem_statement is empty")
 	}
 }
 

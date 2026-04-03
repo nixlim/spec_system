@@ -106,27 +106,73 @@
         <!-- Start New Workflow (collapsible) -->
         <details id="new-workflow-section">
           <summary><h2 style="display:inline">Start New Workflow</h2></summary>
+          <div class="workflow-type-tabs">
+            <button type="button" class="workflow-type-tab active" data-wf-type="spec">Spec Workflow</button>
+            <button type="button" class="workflow-type-tab" data-wf-type="codereview">Code Review</button>
+            <button type="button" class="workflow-type-tab" data-wf-type="codedoc">Code Doc</button>
+          </div>
           <form id="goal-form" class="card">
-            <div class="form-group">
-              <label for="goal-title">Title</label>
-              <input type="text" id="goal-title" name="title" required placeholder="Feature title">
-            </div>
             <div class="form-group">
               <label for="goal-feature-name">Feature Name</label>
               <input type="text" id="goal-feature-name" name="feature_name" required placeholder="e.g. user-auth">
             </div>
             <div class="form-group">
-              <label for="goal-description">Description</label>
-              <textarea id="goal-description" name="description" rows="4" required placeholder="Describe the feature..."></textarea>
+              <label for="goal-workspace-dir">Workspace Directory</label>
+              <input type="text" id="goal-workspace-dir" name="workspace_dir" placeholder="Leave empty for default">
             </div>
-            <div class="form-group">
-              <label>Source Documents</label>
-              <div class="doc-picker-controls">
-                <button type="button" id="doc-select-all" class="btn btn-sm">Select All</button>
-                <button type="button" id="doc-deselect-all" class="btn btn-sm">Deselect All</button>
+            <div id="spec-fields">
+              <div class="form-group">
+                <label for="goal-title">Title</label>
+                <input type="text" id="goal-title" name="title" required placeholder="Feature title">
               </div>
-              <div id="doc-picker" class="doc-picker">
-                <p class="doc-picker-empty">No documents uploaded yet. Upload documents below.</p>
+              <div class="form-group">
+                <label for="goal-description">Description</label>
+                <textarea id="goal-description" name="description" rows="4" required placeholder="Describe the feature..."></textarea>
+              </div>
+              <div class="form-group">
+                <label for="goal-code-path">Code Repository Path</label>
+                <input type="text" id="goal-code-path" name="code_path" placeholder="Optional — path to the repo being specified (enables codebase analysis during discovery)">
+              </div>
+              <div class="form-group">
+                <label>Source Documents</label>
+                <div class="doc-picker-controls">
+                  <button type="button" id="doc-select-all" class="btn btn-sm">Select All</button>
+                  <button type="button" id="doc-deselect-all" class="btn btn-sm">Deselect All</button>
+                </div>
+                <div id="doc-picker" class="doc-picker">
+                  <p class="doc-picker-empty">No documents uploaded yet. Upload documents below.</p>
+                </div>
+              </div>
+            </div>
+            <div id="cr-fields" style="display:none">
+              <div class="form-group">
+                <label for="cr-code-path">Code Path</label>
+                <input type="text" id="cr-code-path" name="code_path" placeholder="/path/to/code">
+              </div>
+              <div class="form-group">
+                <label for="cr-spec-path">Spec Path (optional)</label>
+                <input type="text" id="cr-spec-path" name="spec_path" placeholder="/path/to/spec.md">
+              </div>
+              <div class="form-group">
+                <label for="cr-task-list-path">Task List Path (optional)</label>
+                <input type="text" id="cr-task-list-path" name="task_list_path" placeholder="/path/to/tasks.json">
+              </div>
+            </div>
+            <div id="cd-fields" style="display:none">
+              <div class="form-group">
+                <label for="cd-code-path">Code Path</label>
+                <input type="text" id="cd-code-path" name="cd_code_path" placeholder="/path/to/code">
+              </div>
+              <div class="form-group">
+                <label for="cd-mode">Mode</label>
+                <select id="cd-mode" name="cd_mode">
+                  <option value="full">Full</option>
+                  <option value="incremental">Incremental</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="cd-description">Description (optional)</label>
+                <input type="text" id="cd-description" name="cd_description" placeholder="What to document">
               </div>
             </div>
             <button type="submit" id="goal-submit" class="btn btn-primary">Submit Goal</button>

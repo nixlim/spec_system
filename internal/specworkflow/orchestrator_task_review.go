@@ -182,7 +182,7 @@ func (o *Orchestrator) handleTaskReview(state *WorkflowStateJSON, specDir string
 	}
 
 	// Merge findings using the same dedup algorithm as spec review.
-	merged, err := MergeReviewerOutputs(reviewerOutputs, round)
+	merged, err := MergeReviewerOutputs(reviewerOutputs, round, SpecDedupKey, true)
 	if err != nil {
 		return fmt.Errorf("merge task review findings: %w", err)
 	}

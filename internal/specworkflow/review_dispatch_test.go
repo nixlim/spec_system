@@ -136,7 +136,7 @@ func TestReviewDispatch_AllSucceed(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 2, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
+	result, err := DispatchReviewers(runner, nil, SpecReviewerLensGroups(), makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("DispatchReviewers returned unexpected error: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestReviewDispatch_OneFailsThenSucceedsOnRetry(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 2, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
+	result, err := DispatchReviewers(runner, nil, SpecReviewerLensGroups(), makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("DispatchReviewers returned unexpected error: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestReviewDispatch_OneFailsAfterAllRetries(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 2, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
+	result, err := DispatchReviewers(runner, nil, SpecReviewerLensGroups(), makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("DispatchReviewers should not return error for 1 failure, got: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestReviewDispatch_TwoFailAfterAllRetries_ReturnsError(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 1, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
+	result, err := DispatchReviewers(runner, nil, SpecReviewerLensGroups(), makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err == nil {
 		t.Fatal("expected error when 2+ reviewers fail, got nil")
 	}
@@ -351,7 +351,7 @@ func TestReviewDispatch_InvalidJSONTriggersRetry(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 2, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
+	result, err := DispatchReviewers(runner, nil, SpecReviewerLensGroups(), makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -387,7 +387,7 @@ func TestReviewDispatch_CostAndDurationAccumulation(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 0, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
+	result, err := DispatchReviewers(runner, nil, SpecReviewerLensGroups(), makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -440,7 +440,7 @@ func TestReviewDispatch_ConcurrentExecution(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 0, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
+	result, err := DispatchReviewers(runner, nil, SpecReviewerLensGroups(), makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -471,7 +471,7 @@ func TestReviewDispatch_MissingPrompt(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 0, TimeoutSeconds: 30}
-	_, err := DispatchReviewers(runner, nil, prompts, outputPaths, nil, config, noopDelay, nil)
+	_, err := DispatchReviewers(runner, nil, SpecReviewerLensGroups(), prompts, outputPaths, nil, config, noopDelay, nil)
 	if err == nil {
 		t.Fatal("expected error when prompt is missing for a lens group")
 	}
@@ -491,7 +491,7 @@ func TestReviewDispatch_MissingOutputPath(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 0, TimeoutSeconds: 30}
-	_, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
+	_, err := DispatchReviewers(runner, nil, SpecReviewerLensGroups(), makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err == nil {
 		t.Fatal("expected error when output path is missing for a lens group")
 	}
@@ -529,7 +529,7 @@ func TestReviewDispatch_RetryDelayIsCalled(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 2, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, trackingDelay, nil)
+	result, err := DispatchReviewers(runner, nil, SpecReviewerLensGroups(), makePrompts(), outputPaths, nil, config, trackingDelay, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -589,7 +589,7 @@ func TestReviewDispatch_SchemaViolationTriggersRetry(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 2, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
+	result, err := DispatchReviewers(runner, nil, SpecReviewerLensGroups(), makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -667,7 +667,7 @@ func TestReviewDispatch_PartialFindingsAccepted(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 2, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
+	result, err := DispatchReviewers(runner, nil, SpecReviewerLensGroups(), makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -726,7 +726,7 @@ func TestReviewDispatch_RunnerInfrastructureError(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 0, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
+	result, err := DispatchReviewers(runner, nil, SpecReviewerLensGroups(), makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("expected no dispatch error for 1 failure, got: %v", err)
 	}
@@ -762,7 +762,7 @@ func TestDispatch_BackwardCompat_ClaudeOnly(t *testing.T) {
 
 	// nil codexRunner, nil codexOutputPaths — backward compat path.
 	config := ReviewDispatchConfig{MaxRetries: 1, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(runner, nil, makePrompts(), outputPaths, nil, config, noopDelay, nil)
+	result, err := DispatchReviewers(runner, nil, SpecReviewerLensGroups(), makePrompts(), outputPaths, nil, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -797,7 +797,7 @@ func TestMerge_BackwardCompat_FourInputs(t *testing.T) {
 		outputs[i] = &out
 	}
 
-	merged, err := MergeReviewerOutputs(outputs, 1)
+	merged, err := MergeReviewerOutputs(outputs, 1, SpecDedupKey, true)
 	if err != nil {
 		t.Fatalf("merge error: %v", err)
 	}
@@ -857,7 +857,7 @@ func TestDispatch_DualProvider_8Reviewers(t *testing.T) {
 	}
 
 	config := ReviewDispatchConfig{MaxRetries: 1, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(claudeRunner, codexRunner, makePrompts(), claudeOutputPaths, codexOutputPaths, config, noopDelay, nil)
+	result, err := DispatchReviewers(claudeRunner, codexRunner, SpecReviewerLensGroups(), makePrompts(), claudeOutputPaths, codexOutputPaths, config, noopDelay, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -920,7 +920,7 @@ func TestDispatch_DualProvider_FailureTolerance(t *testing.T) {
 	// With 8 reviewers, maxFailuresAllowed = 8/2-1 = 3.
 	// 4 codex failures > 3 → should return error.
 	config := ReviewDispatchConfig{MaxRetries: 0, TimeoutSeconds: 30}
-	result, err := DispatchReviewers(claudeRunner, codexRunner, makePrompts(), claudeOutputPaths, codexOutputPaths, config, noopDelay, nil)
+	result, err := DispatchReviewers(claudeRunner, codexRunner, SpecReviewerLensGroups(), makePrompts(), claudeOutputPaths, codexOutputPaths, config, noopDelay, nil)
 	if err == nil {
 		t.Fatal("expected error when 4 of 8 reviewers fail, got nil")
 	}

@@ -85,7 +85,7 @@ func DiscoveryOutputSchema() []byte {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["assumption", "confidence"],
+        "required": ["assumption", "confidence", "question_for_user"],
         "properties": {
           "assumption": { "type": "string" },
           "confidence": { "type": "string", "enum": ["high", "medium", "low"] },

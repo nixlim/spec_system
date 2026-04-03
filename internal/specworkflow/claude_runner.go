@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -33,14 +34,19 @@ type ClaudeRunner struct {
 	// Env holds additional environment variables for the subprocess.
 	// These are merged with the current process environment.
 	Env map[string]string
+	// JSONSchema is an optional JSON Schema string for structured output
+	// validation. When set, --json-schema is appended to the CLI args.
+	// The CLI will validate the output against this schema.
+	JSONSchema string
 }
 
 // claudeOutput is the normalised result extracted from the Claude CLI output.
 type claudeOutput struct {
-	Result     string  `json:"result"`
-	CostUSD    float64 `json:"cost_usd"`
-	DurationMS int64   `json:"duration_ms"`
-	IsError    bool    `json:"is_error"`
+	Result           string          `json:"result"`
+	StructuredOutput json.RawMessage `json:"structured_output,omitempty"`
+	CostUSD          float64         `json:"cost_usd"`
+	DurationMS       int64           `json:"duration_ms"`
+	IsError          bool            `json:"is_error"`
 }
 
 // claudeStreamEvent is a single event in the verbose JSON stream array
@@ -53,6 +59,8 @@ type claudeStreamEvent struct {
 	IsError    bool    `json:"is_error,omitempty"`
 	// Result message content — present on type=="result" events
 	Result string `json:"result,omitempty"`
+	// StructuredOutput contains validated JSON when --json-schema is used.
+	StructuredOutput json.RawMessage `json:"structured_output,omitempty"`
 	// For assistant messages, content may be in a "message" sub-object
 	Message *struct {
 		Content []struct {
@@ -66,11 +74,43 @@ type claudeStreamEvent struct {
 	} `json:"message,omitempty"`
 }
 
+// WithJSONSchema returns a copy of the runner with the given JSON schema set.
+// The original runner is not modified.
+func (r *ClaudeRunner) WithJSONSchema(schema string) *ClaudeRunner {
+	clone := *r
+	clone.JSONSchema = schema
+	return &clone
+}
+
+// ForJSONOnly returns a copy of the runner configured for pure JSON production:
+// --json-schema set, all tools disabled (--tools ""), so structured_output is
+// guaranteed to be populated. Use this for merge/combine agents that receive
+// all input inline and only need to produce JSON.
+func (r *ClaudeRunner) ForJSONOnly(schema string) *ClaudeRunner {
+	clone := *r
+	clone.JSONSchema = schema
+	// Replace --dangerously-skip-permissions with --tools "" to disable all tools.
+	// This ensures the agent produces a direct text response (no tool use),
+	// which makes --json-schema reliably populate structured_output.
+	var filteredArgs []string
+	for _, arg := range clone.Args {
+		if arg != "--dangerously-skip-permissions" {
+			filteredArgs = append(filteredArgs, arg)
+		}
+	}
+	filteredArgs = append(filteredArgs, "--tools", "")
+	clone.Args = filteredArgs
+	return &clone
+}
+
 // BuildCommand constructs the exec.Cmd for a given prompt and timeout context.
 // Exported for testing command construction without executing.
 func (r *ClaudeRunner) BuildCommand(ctx context.Context, prompt string) *exec.Cmd {
 	args := []string{"-p", prompt}
 	args = append(args, r.Args...)
+	if r.JSONSchema != "" {
+		args = append(args, "--json-schema", r.JSONSchema)
+	}
 
 	cmd := exec.CommandContext(ctx, r.Command, args...)
 
@@ -136,11 +176,12 @@ func extractFromStream(events []claudeStreamEvent) (*claudeOutput, error) {
 		switch ev.Type {
 		case "result":
 			out.Result = ev.Result
+			out.StructuredOutput = ev.StructuredOutput
 			out.CostUSD = ev.CostUSD
 			out.DurationMS = ev.DurationMS
 			out.IsError = ev.IsError
-			log.Printf("[claude-runner] found result event: cost=$%.4f, duration=%dms, is_error=%v, result_len=%d",
-				ev.CostUSD, ev.DurationMS, ev.IsError, len(ev.Result))
+			log.Printf("[claude-runner] found result event: cost=$%.4f, duration=%dms, is_error=%v, result_len=%d, structured_output_len=%d",
+				ev.CostUSD, ev.DurationMS, ev.IsError, len(ev.Result), len(ev.StructuredOutput))
 
 		case "assistant":
 			// Extract text from the assistant message content blocks.
@@ -298,21 +339,81 @@ func (r *ClaudeRunner) Run(prompt string, outputPath string, timeoutSeconds int)
 		}
 	}
 
-	// Agent didn't write a valid JSON file — use the result field.
-	// Check if the result field itself is valid JSON.
-	trimmedResult := bytes.TrimSpace([]byte(parsed.Result))
-	if len(trimmedResult) > 0 && (trimmedResult[0] == '{' || trimmedResult[0] == '[') {
-		log.Printf("[claude-runner] result field is JSON, writing to %s (%d bytes)", outputPath, len(parsed.Result))
+	// Agent didn't write a valid JSON file — prefer structured_output (from --json-schema),
+	// fall back to the result field, attempting JSON extraction if needed.
+	var outputData []byte
+	if len(parsed.StructuredOutput) > 0 && json.Valid(parsed.StructuredOutput) {
+		outputData = parsed.StructuredOutput
+		log.Printf("[claude-runner] using structured_output field (%d bytes)", len(outputData))
 	} else {
-		log.Printf("[claude-runner] WARNING: result field is not JSON (starts with %q), writing anyway (%d bytes)",
-			truncate(parsed.Result, 40), len(parsed.Result))
+		outputData = []byte(parsed.Result)
+		trimmedResult := bytes.TrimSpace(outputData)
+		if len(trimmedResult) > 0 && (trimmedResult[0] == '{' || trimmedResult[0] == '[') {
+			log.Printf("[claude-runner] result field is JSON, writing to %s (%d bytes)", outputPath, len(outputData))
+		} else {
+			// Result is not pure JSON — try to extract a JSON object from the text.
+			// The agent may have embedded JSON in its response along with commentary.
+			if extracted := extractJSONFromText(parsed.Result); extracted != nil {
+				log.Printf("[claude-runner] extracted JSON object from text result (%d bytes from %d)", len(extracted), len(parsed.Result))
+				outputData = extracted
+			} else {
+				log.Printf("[claude-runner] WARNING: result field is not JSON and no JSON could be extracted (starts with %q), writing anyway (%d bytes)",
+					truncate(parsed.Result, 40), len(outputData))
+			}
+		}
 	}
-	if writeErr := writeOutputFile(outputPath, []byte(parsed.Result)); writeErr != nil {
+	if writeErr := writeOutputFile(outputPath, outputData); writeErr != nil {
 		return code, stderrStr, parsed.CostUSD, parsed.DurationMS, fmt.Errorf("write output file: %w", writeErr)
 	}
 
-	log.Printf("[claude-runner] SUCCESS: wrote %d bytes to %s", len(parsed.Result), outputPath)
+	log.Printf("[claude-runner] SUCCESS: wrote %d bytes to %s", len(outputData), outputPath)
 	return code, stderrStr, parsed.CostUSD, parsed.DurationMS, nil
+}
+
+// extractJSONFromText attempts to find and extract the largest valid JSON object
+// from a text string that may contain commentary around it. This handles the
+// common case where an agent produces text like "Here's the output: {...}" or
+// embeds JSON in markdown code fences.
+func extractJSONFromText(text string) []byte {
+	// Try extracting from markdown code fences first: ```json ... ``` or ``` ... ```
+	fenceStarts := []string{"```json\n", "```json\r\n", "```\n", "```\r\n"}
+	for _, start := range fenceStarts {
+		idx := strings.Index(text, start)
+		if idx < 0 {
+			continue
+		}
+		content := text[idx+len(start):]
+		endIdx := strings.Index(content, "```")
+		if endIdx < 0 {
+			continue
+		}
+		candidate := strings.TrimSpace(content[:endIdx])
+		if len(candidate) > 0 && candidate[0] == '{' && json.Valid([]byte(candidate)) {
+			return []byte(candidate)
+		}
+	}
+
+	// Try finding the largest top-level JSON object by scanning for { and matching }.
+	// Find the first { and try to parse from there.
+	firstBrace := strings.Index(text, "{")
+	if firstBrace < 0 {
+		return nil
+	}
+
+	// Try progressively from the first { to find valid JSON.
+	candidate := text[firstBrace:]
+	// Find the matching closing brace by trying json.Valid on increasingly larger substrings.
+	// Start from the end and work backwards for the largest valid object.
+	for i := len(candidate); i > 0; i-- {
+		if candidate[i-1] == '}' {
+			sub := candidate[:i]
+			if json.Valid([]byte(sub)) {
+				return []byte(sub)
+			}
+		}
+	}
+
+	return nil
 }
 
 // writeOutputFile creates parent directories and writes data to path.

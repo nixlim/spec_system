@@ -1,0 +1,549 @@
+{
+  "version": "0.1.0",
+  "tasks": [
+    {
+      "task_id": "cr-config-and-types",
+      "task_name": "Define CodeReviewConfig struct and code review domain types",
+      "goal": "CodeReviewConfig is parseable from YAML with all fields (MaxRounds, MaxCostUSD, MaxWallClockMinutes, FixerTimeoutSeconds, CommitMode, StalenessThreshold, MaxRetries, ReviewerTimeoutSeconds), defaults are applied, validation rejects invalid values, and all code-review domain types (FixOutput, FixAction, FixStatus, TestResults, GrillCodeMode, CodeReviewVerdict) are defined with JSON tags.",
+      "inputs": [
+        {"name": "yaml_config", "type": "string", "constraints": "valid YAML under code_review key", "source": "Server config file"}
+      ],
+      "outputs": [
+        {"name": "config_struct", "type": "CodeReviewConfig", "constraints": "all numeric fields >= 0, CommitMode in {branch_per_round, direct_commit}", "destination": "internal/codereview/config.go"},
+        {"name": "domain_types", "type": "Go source", "constraints": "FixOutput, FixAction, FixStatus, TestResults, GrillCodeMode, CodeReviewVerdict types defined", "destination": "internal/codereview/types.go"}
+      ],
+      "acceptance": [
+        "DefaultCodeReviewConfig() returns MaxRounds=3, MaxCostUSD=50.0, MaxWallClockMinutes=120, FixerTimeoutSeconds=600, CommitMode=branch_per_round, StalenessThreshold=2, MaxRetries=2, ReviewerTimeoutSeconds=300",
+        "Parsing YAML with max_rounds: 5 produces MaxRounds=5",
+        "ValidateConfig returns error for CommitMode=invalid containing 'must be one of'",
+        "ValidateConfig returns error for MaxRounds=-1 containing 'must be >= 0'",
+        "FixStatus constants FixStatusFixed, FixStatusDeferred, FixStatusFailed equal 'fixed', 'deferred', 'failed'",
+        "GrillCodeMode has values CodeOnly, SpecOnly, FullContext",
+        "CodeReviewVerdict has values VerdictPass, VerdictPassWithObservations, VerdictRevise",
+        "go test ./internal/codereview/ -run TestConfig passes",
+        "go test ./internal/codereview/ -run TestTypes passes"
+      ],
+      "depends_on": {"status": "N/A", "reason": "First task, new package with no dependencies on other new code"},
+      "constraints": ["New package internal/codereview separate from specworkflow", "Use yaml struct tags consistent with existing config patterns"],
+      "files_scope": ["internal/codereview/config.go", "internal/codereview/config_test.go", "internal/codereview/types.go", "internal/codereview/types_test.go"],
+      "priority": "critical",
+      "estimate": "small"
+    },
+    {
+      "task_id": "cr-state-machine",
+      "task_name": "Implement code review state machine with transitions and guards",
+      "goal": "A StateMachine instance for code review enforces the transition table (CR_INIT -> CR_HUMAN_GATE_SCOPE -> CR_REVIEWING -> CR_FIXING -> CR_HUMAN_GATE_FIXES -> CR_COMPLETE/CR_ESCALATED) with MaxRoundsGuard blocking CR_REVIEWING when round > max_rounds, CostGuard blocking when over budget, and WallClockGuard blocking when over time.",
+      "inputs": [
+        {"name": "config", "type": "CodeReviewConfig", "constraints": "validated config", "source": "internal/codereview/config.go"}
+      ],
+      "outputs": [
+        {"name": "state_machine", "type": "Go source", "constraints": "all CR_ states defined, transition table enforced, guards implemented", "destination": "internal/codereview/statemachine.go"}
+      ],
+      "acceptance": [
+        "States CR_INIT, CR_HUMAN_GATE_SCOPE, CR_REVIEWING, CR_FIXING, CR_HUMAN_GATE_FIXES, CR_COMPLETE, CR_ESCALATED are defined as string constants",
+        "Transition from CR_HUMAN_GATE_SCOPE to CR_REVIEWING succeeds",
+        "Transition from CR_REVIEWING to CR_INIT returns error containing 'invalid transition'",
+        "MaxRoundsGuard blocks transition to CR_REVIEWING when round=4 and max_rounds=3",
+        "MaxRoundsGuard allows transition to CR_REVIEWING when round=3 and max_rounds=3",
+        "MaxRoundsGuard blocks transition to CR_REVIEWING when round=1 and max_rounds=0",
+        "CostGuard blocks when cumulative cost > max_cost_usd with reason containing 'cost budget exceeded'",
+        "WallClockGuard blocks when elapsed minutes > max_wall_clock_minutes with reason containing 'wall clock budget exceeded'",
+        "go test ./internal/codereview/ -run TestStateMachine passes"
+      ],
+      "depends_on": ["cr-config-and-types"],
+      "constraints": ["Replicate the StateMachine pattern from specworkflow but with code review specific states and transitions"],
+      "files_scope": ["internal/codereview/statemachine.go", "internal/codereview/statemachine_test.go"],
+      "priority": "critical",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "cr-convergence-and-staleness",
+      "task_name": "Implement severity-based convergence routing and staleness detection",
+      "goal": "EvaluateConvergence returns VerdictPass (route to CR_COMPLETE) for zero findings, VerdictPassWithObservations (route to CR_HUMAN_GATE_FIXES) for minor/observation-only findings, VerdictRevise (route to CR_FIXING) for critical/major findings, and DetectStaleness returns true after StalenessThreshold consecutive rounds without decrease in open CRITICAL+MAJOR count.",
+      "inputs": [
+        {"name": "findings", "type": "list<MergedFinding>", "constraints": "each has Severity field", "source": "Merge output"},
+        {"name": "round_history", "type": "list<int>", "constraints": "open CRIT+MAJ counts per round", "source": "Orchestrator state"}
+      ],
+      "outputs": [
+        {"name": "verdict", "type": "CodeReviewVerdict", "constraints": "one of PASS, PASS_WITH_OBSERVATIONS, REVISE", "destination": "Return value"},
+        {"name": "next_state", "type": "string", "constraints": "valid CR_ state", "destination": "Return value"},
+        {"name": "is_stale", "type": "bool", "constraints": "true when staleness threshold met", "destination": "Return value"}
+      ],
+      "acceptance": [
+        "EvaluateConvergence with 0 findings returns VerdictPass and CR_COMPLETE",
+        "EvaluateConvergence with 3 MINOR and 2 OBSERVATION returns VerdictPassWithObservations and CR_HUMAN_GATE_FIXES",
+        "EvaluateConvergence with 1 CRITICAL and 0 MAJOR returns VerdictRevise and CR_FIXING",
+        "EvaluateConvergence with 0 CRITICAL and 2 MAJOR returns VerdictRevise and CR_FIXING",
+        "DetectStaleness with history [3, 3] and threshold 2 returns true",
+        "DetectStaleness with history [3, 4] and threshold 2 returns true (got worse counts as no improvement)",
+        "DetectStaleness with history [3, 2] and threshold 2 returns false (improvement)",
+        "DetectStaleness with history [3, 4, 2] and threshold 2 returns false (counter resets on decrease)",
+        "go test ./internal/codereview/ -run TestConvergence passes"
+      ],
+      "depends_on": ["cr-config-and-types"],
+      "constraints": ["No LLM judge invocation -- pure severity-based routing"],
+      "files_scope": ["internal/codereview/convergence.go", "internal/codereview/convergence_test.go"],
+      "priority": "critical",
+      "estimate": "small"
+    },
+    {
+      "task_id": "cr-parameterize-dispatch-and-merge",
+      "task_name": "Parameterize DispatchReviewers with lensGroups and MergeReviewerOutputs with DedupKeyFunc and PromoteSeverity",
+      "goal": "DispatchReviewers accepts a lensGroups []string parameter instead of using hardcoded reviewerLensGroups, MergeReviewerOutputs accepts DedupKeyFunc and PromoteSeverity parameters replacing the hardcoded isDuplicate logic, existing spec workflow callers pass the original 4 lens groups with PromoteSeverity=true and the 3-tuple key function, and all existing spec workflow tests pass unchanged.",
+      "inputs": [
+        {"name": "existing_dispatch", "type": "Go source", "constraints": "current DispatchReviewers in review_dispatch.go", "source": "internal/specworkflow/review_dispatch.go"},
+        {"name": "existing_merge", "type": "Go source", "constraints": "current MergeReviewerOutputs in merge.go", "source": "internal/specworkflow/merge.go"}
+      ],
+      "outputs": [
+        {"name": "updated_dispatch", "type": "Go source", "constraints": "lensGroups parameter added", "destination": "internal/specworkflow/review_dispatch.go"},
+        {"name": "updated_merge", "type": "Go source", "constraints": "DedupKeyFunc and PromoteSeverity parameters added", "destination": "internal/specworkflow/merge.go"}
+      ],
+      "acceptance": [
+        "DispatchReviewers signature includes lensGroups []string parameter",
+        "Existing spec workflow callers pass []string{clarity, consistency, security, correctness} explicitly",
+        "MergeReviewerOutputs signature includes DedupKeyFunc func(*Finding) string and PromoteSeverity bool parameters",
+        "Spec workflow callers pass PromoteSeverity=true with the existing 3-tuple key function (affected_section, lens, constitution_principle)",
+        "Code review dedup key function produces key from (file_path, line_range, lens, severity) where file_path and line_range are extracted from AffectedSection",
+        "Two findings at same file:line, same lens, same severity are merged (single output)",
+        "Two findings at same file:line, same lens, different severity are NOT merged (two outputs)",
+        "Spec workflow merge with PromoteSeverity=true still promotes higher severity on duplicate (MAJOR + CRITICAL = CRITICAL kept)",
+        "go test ./internal/specworkflow/ passes with zero failures (full existing test suite)",
+        "go test ./internal/codereview/ -run TestDedupKey passes"
+      ],
+      "depends_on": ["cr-config-and-types"],
+      "constraints": ["Must not break any existing spec workflow behavior", "Existing callers must be updated in the same change"],
+      "files_scope": ["internal/specworkflow/review_dispatch.go", "internal/specworkflow/review_dispatch_test.go", "internal/specworkflow/merge.go", "internal/specworkflow/merge_test.go", "internal/specworkflow/orchestrator_review.go", "internal/specworkflow/orchestrator_task_review.go", "internal/codereview/dedup.go", "internal/codereview/dedup_test.go"],
+      "priority": "critical",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "cr-prompt-builders",
+      "task_name": "Implement grill-code reviewer prompt builder and fix agent prompt builder",
+      "goal": "BuildReviewerPrompt produces a prompt string containing the lens name, grill-code skill content, code_path, spec content (if provided), and grill-code mode; BuildFixAgentPrompt produces a prompt string containing the findings file path, spec content (if provided), all non-behavior constraints, FixOutput JSON schema, and submodule exclusion instructions.",
+      "inputs": [
+        {"name": "lens", "type": "string", "constraints": "one of 6 lens names", "source": "Orchestrator dispatch"},
+        {"name": "code_path", "type": "string", "constraints": "valid git repo path", "source": "Workflow config"},
+        {"name": "spec_content", "type": "optional<string>", "constraints": "markdown content or empty", "source": "Start request"},
+        {"name": "findings_path", "type": "string", "constraints": "path to code-findings-round-N.json", "source": "Workspace directory"}
+      ],
+      "outputs": [
+        {"name": "reviewer_prompt", "type": "string", "constraints": "contains lens, skill content, mode", "destination": "Return value"},
+        {"name": "fix_prompt", "type": "string", "constraints": "contains findings path, non-behaviors, FixOutput schema", "destination": "Return value"}
+      ],
+      "acceptance": [
+        "BuildReviewerPrompt('security', '/repo', 'spec content', FullContext) contains '--lens security'",
+        "BuildReviewerPrompt('correctness', '/repo', '', CodeOnly) contains 'code-only' and does not contain spec content placeholder",
+        "BuildFixAgentPrompt('/workspace/findings.json', 'spec text', []) contains the findings file path",
+        "BuildFixAgentPrompt includes all 11 non-behavior constraints from the spec (force-push, branch deletion, .gitignore, outside scope, merge, git clean, own repo, grill-spec, dependencies, symlinks, submodules)",
+        "BuildFixAgentPrompt includes FixOutput JSON schema description",
+        "BuildFixAgentPrompt includes instruction not to traverse or modify submodule directories",
+        "go test ./internal/codereview/ -run TestPrompt passes"
+      ],
+      "depends_on": ["cr-config-and-types"],
+      "constraints": ["Prompt content must match the integration boundary contract from the spec"],
+      "files_scope": ["internal/codereview/prompts.go", "internal/codereview/prompts_test.go"],
+      "priority": "high",
+      "estimate": "small"
+    },
+    {
+      "task_id": "cr-fix-output-parsing",
+      "task_name": "Implement FixOutput JSON parsing and routing logic",
+      "goal": "ParseFixOutput parses FixOutput JSON, rejects invalid/malformed JSON with a descriptive error, and RouteAfterFix returns CR_REVIEWING when all CRITICAL+MAJOR findings have status fixed, CR_HUMAN_GATE_FIXES when any are deferred or failed, and CR_HUMAN_GATE_FIXES with parse error warning when JSON is invalid.",
+      "inputs": [
+        {"name": "raw_json", "type": "bytes", "constraints": "JSON bytes from fix agent stdout", "source": "Agent runner output"}
+      ],
+      "outputs": [
+        {"name": "fix_output", "type": "FixOutput", "constraints": "parsed and validated", "destination": "Return value"},
+        {"name": "route", "type": "string", "constraints": "CR_REVIEWING or CR_HUMAN_GATE_FIXES", "destination": "Return value"}
+      ],
+      "acceptance": [
+        "ParseFixOutput with valid JSON containing round=1, fixes_applied with 2 entries returns FixOutput with correct fields",
+        "ParseFixOutput with empty JSON {} returns error containing 'missing required fields'",
+        "ParseFixOutput with invalid JSON returns error containing 'parse error'",
+        "ParseFixOutput with status value 'invalid' returns error containing 'invalid fix status'",
+        "RouteAfterFix where all findings have status=fixed returns CR_REVIEWING",
+        "RouteAfterFix where one finding has status=deferred returns CR_HUMAN_GATE_FIXES",
+        "RouteAfterFix where one finding has status=failed returns CR_HUMAN_GATE_FIXES",
+        "RouteAfterFix with parse error returns CR_HUMAN_GATE_FIXES with warning 'fix output parse error'",
+        "ParseFixOutput with test_results=null returns FixOutput with nil TestResults (valid)",
+        "go test ./internal/codereview/ -run TestFixOutput passes"
+      ],
+      "depends_on": ["cr-config-and-types"],
+      "constraints": ["Strict validation -- unknown status values are parse errors, not silently accepted"],
+      "files_scope": ["internal/codereview/fix_output.go", "internal/codereview/fix_output_test.go"],
+      "priority": "high",
+      "estimate": "small"
+    },
+    {
+      "task_id": "cr-persistence",
+      "task_name": "Implement atomic workflow state persistence and recovery for code review",
+      "goal": "SaveState writes workflow-state.json atomically (temp file + rename) containing all workflow fields (state, round, cumulative_cost_usd, cumulative_wall_clock_seconds, feature_name, code_path, spec_path, grill_code_mode, git_branch, git_sha, warnings), LoadState reads it back correctly, and RecoverFromCrash detects partial state (agent output files for CR_REVIEWING, uncommitted git changes for CR_FIXING) and returns the correct recovery action.",
+      "inputs": [
+        {"name": "workspace_dir", "type": "string", "constraints": "valid directory path", "source": "Orchestrator"},
+        {"name": "state", "type": "WorkflowState", "constraints": "all fields populated", "source": "Orchestrator"}
+      ],
+      "outputs": [
+        {"name": "state_file", "type": "JSON file", "constraints": "atomic write via temp+rename", "destination": "workspace/code-reviews/{feature}/workflow-state.json"},
+        {"name": "loaded_state", "type": "WorkflowState", "constraints": "matches saved state", "destination": "Return value"}
+      ],
+      "acceptance": [
+        "SaveState writes to a temp file then renames to workflow-state.json",
+        "LoadState reads workflow-state.json and returns WorkflowState with all fields including cumulative_cost_usd and round",
+        "RecoverFromCrash in CR_REVIEWING state with 8 of 12 valid output files returns RecoveryAction with 4 agents to re-dispatch",
+        "RecoverFromCrash in CR_REVIEWING state with a corrupt output file (invalid JSON) deletes the corrupt file and includes that agent in the re-dispatch list",
+        "RecoverFromCrash in CR_REVIEWING state ignores output files from previous rounds",
+        "RecoverFromCrash in CR_FIXING state with uncommitted git changes returns route to CR_HUMAN_GATE_FIXES with partial fix warning and list of uncommitted files",
+        "RecoverFromCrash in CR_FIXING state with no uncommitted changes and no FixOutput file returns re-dispatch fix agent action",
+        "RecoverFromCrash in gate state returns resume-at-gate action",
+        "Circuit breaker values (cost, wall clock, round) survive save/load cycle",
+        "go test ./internal/codereview/ -run TestPersistence passes"
+      ],
+      "depends_on": ["cr-config-and-types", "cr-state-machine"],
+      "constraints": ["Atomic writes to prevent corruption on crash", "Output file naming must match review-{provider}-{lens}-round-{N}.json convention"],
+      "files_scope": ["internal/codereview/persistence.go", "internal/codereview/persistence_test.go"],
+      "priority": "high",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "cr-orchestrator-init-and-scope",
+      "task_name": "Implement code review orchestrator initialization and scope gate",
+      "goal": "CodeReviewOrchestrator.Start validates inputs (code_path exists, is git repo, no path traversal, feature_name is kebab-case, spec_path exists if provided), creates workspace directory, snapshots git state, detects grill-code mode, persists initial state, and transitions to CR_HUMAN_GATE_SCOPE; HandleScopeGate transitions to CR_REVIEWING on confirm and CR_ESCALATED on cancel.",
+      "inputs": [
+        {"name": "start_request", "type": "StartCodeReviewRequest", "constraints": "code_path required, feature_name required and kebab-case", "source": "API handler"},
+        {"name": "gate_action", "type": "string", "constraints": "confirm or cancel", "source": "API handler"}
+      ],
+      "outputs": [
+        {"name": "workspace", "type": "directory", "constraints": "created at workspace/code-reviews/{feature_name}/", "destination": "Filesystem"},
+        {"name": "state", "type": "WorkflowState", "constraints": "persisted to workflow-state.json", "destination": "Workspace directory"}
+      ],
+      "acceptance": [
+        "Start with valid code_path pointing to git repo creates workspace/code-reviews/{feature_name}/ directory",
+        "Start captures git branch name and HEAD SHA in workflow state",
+        "Start with spec_path and task_list_path sets mode to FullContext",
+        "Start with spec_path only sets mode to SpecOnly",
+        "Start with neither spec_path nor task_list_path sets mode to CodeOnly",
+        "Start with nonexistent code_path returns error containing 'does not exist'",
+        "Start with non-git directory returns error containing 'not a git repository'",
+        "Start with feature_name containing spaces returns error containing 'kebab-case'",
+        "Start with feature_name 'My-Feature' (uppercase) returns error containing 'kebab-case'",
+        "Start with code_path containing '..' returns error containing path traversal indicator",
+        "Start with nonexistent spec_path returns error containing 'spec file not found'",
+        "HandleScopeGate with confirm transitions to CR_REVIEWING",
+        "HandleScopeGate with cancel transitions to CR_ESCALATED with reason containing 'operator cancelled'",
+        "go test ./internal/codereview/ -run TestOrchestrator passes"
+      ],
+      "depends_on": ["cr-config-and-types", "cr-state-machine", "cr-persistence"],
+      "constraints": ["Must validate all inputs before creating workspace directory", "Git operations use standard exec.Command calls"],
+      "files_scope": ["internal/codereview/orchestrator.go", "internal/codereview/orchestrator_test.go"],
+      "priority": "critical",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "cr-orchestrator-review-phase",
+      "task_name": "Implement code review orchestrator review dispatch and merge phase",
+      "goal": "The review phase dispatches 12 agents (6 lens groups x 2 providers) when Codex is available or 6 Claude-only agents when Codex is unavailable, collects outputs, merges findings using the code review dedup key, writes code-findings-round-N.json, evaluates convergence, checks circuit breakers and staleness, and transitions to the correct next state.",
+      "inputs": [
+        {"name": "agents", "type": "list<AgentRunner>", "constraints": "ClaudeRunner and optionally CodexRunner", "source": "Orchestrator config"},
+        {"name": "lens_groups", "type": "list<string>", "constraints": "6 code review lenses", "source": "Constant"},
+        {"name": "config", "type": "CodeReviewConfig", "constraints": "validated", "source": "Orchestrator"}
+      ],
+      "outputs": [
+        {"name": "merged_findings", "type": "JSON file", "constraints": "code-findings-round-{N}.json in workspace", "destination": "Workspace directory"},
+        {"name": "next_state", "type": "string", "constraints": "CR_FIXING, CR_HUMAN_GATE_FIXES, CR_COMPLETE, or CR_ESCALATED", "destination": "State machine"}
+      ],
+      "acceptance": [
+        "With both runners available, 12 agents are dispatched (6 Claude + 6 Codex across correctness, security, testing, error-handling, observability, overcomplexity)",
+        "With CodexRunner unavailable, 6 Claude-only agents are dispatched and reduced_coverage warning is stored",
+        "Merged findings file code-findings-round-1.json is written to workspace",
+        "Deduplication uses code review key (file_path, line_range, lens, severity)",
+        "Zero findings routes to CR_COMPLETE",
+        "Minor-only findings routes to CR_HUMAN_GATE_FIXES with VerdictPassWithObservations",
+        "Critical findings routes to CR_FIXING",
+        "More than half agents failing routes to CR_ESCALATED",
+        "Cost guard blocks dispatch when over budget",
+        "Staleness detection triggers after configured threshold of non-improvement",
+        "MaxRoundsGuard blocks re-review transition when round exceeds max_rounds",
+        "go test ./internal/codereview/ -run TestReviewPhase passes"
+      ],
+      "depends_on": ["cr-orchestrator-init-and-scope", "cr-parameterize-dispatch-and-merge", "cr-convergence-and-staleness", "cr-prompt-builders"],
+      "constraints": ["Must reuse DispatchReviewers from specworkflow with 6 code review lens groups", "Agent failures handled with retry up to max_retries"],
+      "files_scope": ["internal/codereview/orchestrator_review.go", "internal/codereview/orchestrator_review_test.go"],
+      "priority": "critical",
+      "estimate": "large"
+    },
+    {
+      "task_id": "cr-orchestrator-fix-phase",
+      "task_name": "Implement code review orchestrator fix agent dispatch and post-fix validation",
+      "goal": "The fix phase creates a branch (branch_per_round mode) or stays on current branch (direct_commit mode), dispatches the fix agent with --allowedTools restriction and WorkspaceDir set to code_path, parses FixOutput, validates all modified files are within code_path via git diff --name-only, handles timeout (SIGTERM/SIGKILL) and OOM, and routes to the correct next state.",
+      "inputs": [
+        {"name": "findings_path", "type": "string", "constraints": "path to code-findings-round-N.json", "source": "Review phase output"},
+        {"name": "config", "type": "CodeReviewConfig", "constraints": "validated, includes commit_mode and fixer_timeout_seconds", "source": "Orchestrator"}
+      ],
+      "outputs": [
+        {"name": "fix_output", "type": "FixOutput", "constraints": "parsed from agent output", "destination": "Orchestrator state"},
+        {"name": "fix_branch", "type": "string", "constraints": "cr-fix-round-{N} or current branch", "destination": "Target git repo"},
+        {"name": "next_state", "type": "string", "constraints": "CR_REVIEWING or CR_HUMAN_GATE_FIXES or CR_ESCALATED", "destination": "State machine"}
+      ],
+      "acceptance": [
+        "In branch_per_round mode, creates branch cr-fix-round-1 from HEAD",
+        "In branch_per_round mode with pre-existing cr-fix-round-1, deletes old branch before creating new one",
+        "In direct_commit mode, no new branch is created",
+        "Fix agent command includes --allowedTools 'Read,Write,Bash' and does NOT include --dangerously-skip-permissions",
+        "Fix agent WorkspaceDir is set to code_path",
+        "Post-fix validation runs git diff --name-only and escalates if any file is outside code_path",
+        "Post-fix validation checks that no files in submodule paths were modified",
+        "All findings fixed routes to CR_REVIEWING",
+        "Any deferred or failed findings routes to CR_HUMAN_GATE_FIXES",
+        "Fix agent timeout fires SIGTERM, waits 5 seconds, then SIGKILL; uncommitted files listed in warning",
+        "Fix agent killed by signal routes to CR_HUMAN_GATE_FIXES with 'killed by signal' warning",
+        "Fix agent parse error routes to CR_HUMAN_GATE_FIXES with 'fix output parse error' warning",
+        "Fix agent exit code != 0 (non-timeout) routes to CR_HUMAN_GATE_FIXES with error details, no retry",
+        "go test ./internal/codereview/ -run TestFixPhase passes"
+      ],
+      "depends_on": ["cr-orchestrator-init-and-scope", "cr-fix-output-parsing", "cr-prompt-builders"],
+      "constraints": ["Fix agent is NOT retried on failure (side effects are not idempotent)", "Must enforce --allowedTools restriction, never --dangerously-skip-permissions"],
+      "files_scope": ["internal/codereview/orchestrator_fix.go", "internal/codereview/orchestrator_fix_test.go"],
+      "priority": "critical",
+      "estimate": "large"
+    },
+    {
+      "task_id": "cr-orchestrator-human-gates",
+      "task_name": "Implement human gate logic for scope gate display and fixes gate with structured data",
+      "goal": "GetScopeGateData returns scope details (spec path, code path, task list path, grill-code mode, git branch, HEAD SHA); GetFixesGateData returns findings summary, fix details, deferred items, git diff stat, structured test results, and reduced_coverage warning if applicable; HandleFixesGate transitions correctly for re-review (increment round), accept, and escalate actions; human comments are persisted to human-comments.json.",
+      "inputs": [
+        {"name": "gate_action", "type": "string", "constraints": "re-review, accept, or escalate for fixes gate", "source": "API handler"},
+        {"name": "comment", "type": "optional<string>", "constraints": "free text", "source": "API handler"}
+      ],
+      "outputs": [
+        {"name": "gate_data", "type": "GateData", "constraints": "structured data for display", "destination": "API response"},
+        {"name": "next_state", "type": "string", "constraints": "depends on action", "destination": "State machine"}
+      ],
+      "acceptance": [
+        "GetScopeGateData returns spec_path, code_path, task_list_path, grill_code_mode, git_branch, git_sha",
+        "GetFixesGateData returns findings summary with open/closed counts by severity",
+        "GetFixesGateData returns fix details with finding IDs and descriptions",
+        "GetFixesGateData returns structured test results with total, passed, failed, and failure names",
+        "GetFixesGateData returns reduced_coverage warning when Codex was unavailable",
+        "HandleFixesGate with re-review transitions to CR_REVIEWING and increments round counter",
+        "HandleFixesGate with accept transitions to CR_COMPLETE",
+        "HandleFixesGate with escalate transitions to CR_ESCALATED",
+        "Human comment is appended to human-comments.json in workspace directory",
+        "go test ./internal/codereview/ -run TestHumanGate passes"
+      ],
+      "depends_on": ["cr-orchestrator-init-and-scope", "cr-fix-output-parsing"],
+      "constraints": ["Gate data must include all fields specified in US-2 and US-5"],
+      "files_scope": ["internal/codereview/orchestrator_gates.go", "internal/codereview/orchestrator_gates_test.go"],
+      "priority": "high",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "cr-events",
+      "task_name": "Implement WebSocket event emission for code review workflow",
+      "goal": "The code review orchestrator emits workflow_status events on state transitions, agent_dispatch events when agents start, agent_complete events when agents finish, and gate_request events at human gates, all via the shared EventEmitter interface with feature_name in every event.",
+      "inputs": [
+        {"name": "emitter", "type": "EventEmitter", "constraints": "shared WebSocket hub emitter", "source": "Dependency injection"}
+      ],
+      "outputs": [
+        {"name": "events", "type": "list<Event>", "constraints": "each includes feature_name field", "destination": "WebSocket hub"}
+      ],
+      "acceptance": [
+        "State transition from CR_HUMAN_GATE_SCOPE to CR_REVIEWING emits workflow_status event with state=CR_REVIEWING",
+        "Agent dispatch emits agent_dispatch event with agent name, lens group, and provider",
+        "Agent completion emits agent_complete event with agent name, success/failure, duration, and cost",
+        "Human gate activation emits gate_request event with gate type and available actions",
+        "All events include feature_name field",
+        "Events are fire-and-forget (no error if no WebSocket clients connected)",
+        "go test ./internal/codereview/ -run TestEvents passes"
+      ],
+      "depends_on": ["cr-orchestrator-init-and-scope"],
+      "constraints": ["Reuse existing EventEmitter interface and ChannelEmitter from specworkflow"],
+      "files_scope": ["internal/codereview/events.go", "internal/codereview/events_test.go"],
+      "priority": "medium",
+      "estimate": "small"
+    },
+    {
+      "task_id": "cr-api-handlers",
+      "task_name": "Implement HTTP API handlers for code review endpoints",
+      "goal": "Six API endpoints are registered: POST /api/codereview/start (validates input, creates orchestrator, returns 200/400/409), POST /api/codereview/{feature_name}/gate (validates action per gate state, returns 200/400/404/409), GET /api/codereview/{feature_name}/status (returns state, round, cost, findings, active agents), POST /api/codereview/{feature_name}/cancel (terminates agents, returns 200/404), POST /api/codereview/{feature_name}/resume (resumes from persisted state, returns 200/404), POST /api/codereview/{feature_name}/reset (deletes workspace for terminal states, returns 200/404/409).",
+      "inputs": [
+        {"name": "http_request", "type": "HTTP request", "constraints": "valid JSON body for POST endpoints", "source": "HTTP client"},
+        {"name": "orchestrator_map", "type": "map<string, CodeReviewOrchestrator>", "constraints": "keyed by feature_name", "source": "WorkflowManager"}
+      ],
+      "outputs": [
+        {"name": "http_response", "type": "HTTP response", "constraints": "JSON with correct status codes", "destination": "HTTP client"}
+      ],
+      "acceptance": [
+        "POST /api/codereview/start with valid body returns 200 {status: started}",
+        "POST /api/codereview/start with missing code_path returns 400",
+        "POST /api/codereview/start with duplicate feature_name returns 409",
+        "POST /api/codereview/{feature}/gate with valid action returns 200 {status: transitioned, new_state: ...}",
+        "POST /api/codereview/{feature}/gate with invalid action returns 400 containing 'invalid gate action'",
+        "POST /api/codereview/{feature}/gate when not in gate state returns 409",
+        "POST /api/codereview/{feature}/gate with unknown feature returns 404",
+        "GET /api/codereview/{feature}/status returns state, round, cost_usd, wall_clock_minutes, findings_summary, active_agents",
+        "GET /api/codereview/unknown/status returns 404",
+        "POST /api/codereview/{feature}/cancel for running workflow returns 200",
+        "POST /api/codereview/{feature}/cancel for unknown feature returns 404",
+        "POST /api/codereview/{feature}/resume for persisted workflow returns 200",
+        "POST /api/codereview/{feature}/reset for completed workflow returns 200 and deletes workspace",
+        "POST /api/codereview/{feature}/reset for running workflow returns 409",
+        "go test ./internal/api/ -run TestCodeReview passes"
+      ],
+      "depends_on": ["cr-orchestrator-init-and-scope", "cr-orchestrator-review-phase", "cr-orchestrator-fix-phase", "cr-orchestrator-human-gates"],
+      "constraints": ["Routes must not conflict with existing /api/workflow/* routes", "WorkflowManager must use a separate sync.RWMutex for code review orchestrator map"],
+      "files_scope": ["internal/api/codereview_handlers.go", "internal/api/codereview_handlers_test.go", "internal/api/workflow_handler.go"],
+      "priority": "high",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "cr-audit-logging",
+      "task_name": "Add JSONL audit logging for code review workflow actions",
+      "goal": "All code review workflow starts, gate submissions, cancellations, and resets are logged to the JSONL audit log via WorkflowLogger with timestamp, action, feature_name, and relevant metadata (gate action, escalation reason, etc.).",
+      "inputs": [
+        {"name": "logger", "type": "WorkflowLogger", "constraints": "existing JSONL logger from specworkflow", "source": "Dependency injection"},
+        {"name": "action_metadata", "type": "map<string, string>", "constraints": "key-value pairs for the log entry", "source": "Orchestrator/API handler"}
+      ],
+      "outputs": [
+        {"name": "log_entries", "type": "JSONL lines", "constraints": "each line has timestamp, action, feature_name, metadata", "destination": "Audit log file"}
+      ],
+      "acceptance": [
+        "Workflow start logs entry with action=codereview_start and feature_name",
+        "Gate submission logs entry with action=codereview_gate and gate_action field",
+        "Cancellation logs entry with action=codereview_cancel and reason field",
+        "Reset logs entry with action=codereview_reset and feature_name",
+        "All log entries include ISO 8601 timestamp",
+        "go test ./internal/codereview/ -run TestAuditLog passes"
+      ],
+      "depends_on": ["cr-orchestrator-init-and-scope"],
+      "constraints": ["Reuse existing WorkflowLogger from specworkflow"],
+      "files_scope": ["internal/codereview/audit.go", "internal/codereview/audit_test.go"],
+      "priority": "medium",
+      "estimate": "small"
+    },
+    {
+      "task_id": "cr-cancel-workflow",
+      "task_name": "Implement workflow cancellation with agent termination",
+      "goal": "POST /api/codereview/{feature_name}/cancel sets a cancellation flag, terminates all running agent subprocesses, and transitions the workflow to CR_ESCALATED with reason 'operator cancelled'; POST to a nonexistent feature returns 404.",
+      "inputs": [
+        {"name": "feature_name", "type": "string", "constraints": "kebab-case", "source": "URL path parameter"}
+      ],
+      "outputs": [
+        {"name": "result", "type": "HTTP response", "constraints": "200 or 404", "destination": "HTTP client"}
+      ],
+      "acceptance": [
+        "Cancel for running workflow terminates agent subprocesses",
+        "Cancel transitions workflow to CR_ESCALATED with reason containing 'operator cancelled'",
+        "Cancel for nonexistent feature returns 404",
+        "Cancel persists the escalated state to workflow-state.json",
+        "go test ./internal/codereview/ -run TestCancel passes"
+      ],
+      "depends_on": ["cr-orchestrator-review-phase", "cr-orchestrator-fix-phase"],
+      "constraints": ["Agent termination must use SIGTERM then SIGKILL pattern"],
+      "files_scope": ["internal/codereview/orchestrator_cancel.go", "internal/codereview/orchestrator_cancel_test.go"],
+      "priority": "medium",
+      "estimate": "small"
+    },
+    {
+      "task_id": "cr-crash-recovery",
+      "task_name": "Implement crash recovery with output file validation and circuit breaker resumption",
+      "goal": "On server restart, LoadPersistedWorkflows discovers all workflow-state.json files in workspace/code-reviews/*, RecoverWorkflow resumes workflows from persisted state (gate states resume at gate, CR_REVIEWING checks output files and re-dispatches missing agents, CR_FIXING checks git status for uncommitted changes), and circuit breakers resume from persisted values.",
+      "inputs": [
+        {"name": "workspace_root", "type": "string", "constraints": "path to workspace/code-reviews/", "source": "Server config"}
+      ],
+      "outputs": [
+        {"name": "recovered_workflows", "type": "list<CodeReviewOrchestrator>", "constraints": "each in correct resumed state", "destination": "WorkflowManager"}
+      ],
+      "acceptance": [
+        "LoadPersistedWorkflows finds all workflow-state.json files under workspace/code-reviews/",
+        "Workflow in CR_HUMAN_GATE_FIXES resumes at that gate state via POST /api/codereview/{feature}/resume",
+        "Workflow in CR_REVIEWING with 8 of 12 valid output files re-dispatches only 4 missing agents",
+        "Workflow in CR_REVIEWING with corrupt output file (invalid JSON) deletes the corrupt file and re-dispatches that agent",
+        "Workflow in CR_REVIEWING ignores output files from previous rounds (only current round loaded)",
+        "Workflow in CR_FIXING with uncommitted git changes routes to CR_HUMAN_GATE_FIXES with partial fix warning and uncommitted file list",
+        "Workflow in CR_FIXING with no uncommitted changes and no FixOutput re-dispatches fix agent",
+        "Circuit breaker values (cost, wall clock, round) resume from persisted state, not reset to 0",
+        "go test ./internal/codereview/ -run TestCrashRecovery passes"
+      ],
+      "depends_on": ["cr-persistence", "cr-orchestrator-review-phase", "cr-orchestrator-fix-phase"],
+      "constraints": ["Output file naming convention: review-{provider}-{lens}-round-{N}.json", "Only valid JSON output files are loaded; corrupt files are deleted"],
+      "files_scope": ["internal/codereview/recovery.go", "internal/codereview/recovery_test.go"],
+      "priority": "medium",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "cr-workspace-reset",
+      "task_name": "Implement workspace cleanup for completed or escalated workflows",
+      "goal": "POST /api/codereview/{feature_name}/reset deletes workspace/code-reviews/{feature_name}/ directory and removes the orchestrator instance for workflows in CR_COMPLETE or CR_ESCALATED state, returns 409 for running workflows, and returns 404 for unknown features.",
+      "inputs": [
+        {"name": "feature_name", "type": "string", "constraints": "kebab-case", "source": "URL path parameter"}
+      ],
+      "outputs": [
+        {"name": "result", "type": "HTTP response", "constraints": "200, 404, or 409", "destination": "HTTP client"}
+      ],
+      "acceptance": [
+        "Reset for completed workflow deletes workspace/code-reviews/{feature_name}/ directory",
+        "Reset for completed workflow removes orchestrator from WorkflowManager",
+        "Reset for running workflow returns 409 with 'cannot reset running workflow'",
+        "Reset for unknown feature returns 404",
+        "Reset does NOT delete cr-fix-round-* branches in the target repository",
+        "go test ./internal/codereview/ -run TestReset passes"
+      ],
+      "depends_on": ["cr-api-handlers"],
+      "constraints": ["Only deletes workspace artifacts, never touches target repository branches"],
+      "files_scope": ["internal/codereview/orchestrator_reset.go", "internal/codereview/orchestrator_reset_test.go"],
+      "priority": "low",
+      "estimate": "small"
+    },
+    {
+      "task_id": "cr-integration-tests",
+      "task_name": "Implement integration tests for full review-fix-rereview loop with mock runners",
+      "goal": "Integration tests cover: full INIT -> SCOPE -> REVIEW -> FIX -> RE-REVIEW -> COMPLETE loop with mock runners, Claude-only fallback, majority agent failure escalation, all gate action combinations, all circuit breaker triggers, staleness escalation, concurrent workflows for different features, and regression tests verifying spec workflow DispatchReviewers and MergeReviewerOutputs still work unchanged.",
+      "inputs": [
+        {"name": "mock_runners", "type": "AgentRunner mocks", "constraints": "return canned ReviewerOutput and FixOutput JSON", "source": "Test setup"}
+      ],
+      "outputs": [
+        {"name": "test_results", "type": "test pass/fail", "constraints": "all pass", "destination": "go test output"}
+      ],
+      "acceptance": [
+        "TestFullReviewFixReReviewLoop: complete cycle with mock runners, workflow reaches CR_COMPLETE",
+        "TestClaudeOnlyFallback: 6 agents dispatched, reduced_coverage warning stored and surfaced at gate",
+        "TestMajorityAgentFailure: 7+ of 12 agents fail, workflow escalates",
+        "TestAllGateActions: confirm, cancel, re-review, accept, escalate all produce correct transitions",
+        "TestCircuitBreakers: cost, wall-clock, and max-rounds breakers all fire at configured thresholds",
+        "TestStalenessEscalation: 2-round staleness with non-improving findings triggers human gate warning",
+        "TestConcurrentWorkflows: two workflows for different features operate independently",
+        "TestSpecWorkflowRegression: spec workflow DispatchReviewers with 4 groups and MergeReviewerOutputs with PromoteSeverity=true produce identical results to pre-change behavior",
+        "go test ./internal/codereview/ -run TestIntegration passes"
+      ],
+      "depends_on": ["cr-orchestrator-review-phase", "cr-orchestrator-fix-phase", "cr-orchestrator-human-gates", "cr-api-handlers"],
+      "constraints": ["All tests use mock AgentRunners, no real CLI invocation"],
+      "files_scope": ["internal/codereview/integration_test.go", "internal/specworkflow/regression_test.go"],
+      "priority": "high",
+      "estimate": "large"
+    },
+    {
+      "task_id": "cr-e2e-tests",
+      "task_name": "Implement end-to-end tests with temp git repos for review-fix cycle",
+      "goal": "E2E tests create temporary git repositories with known Go source files, run the full workflow with real file I/O and git operations (but mock agent runners), verify git branch creation, FixOutput parsing from files, crash recovery with partial output files, and workspace cleanup.",
+      "inputs": [
+        {"name": "temp_repos", "type": "git repositories", "constraints": "created in test setup with known files", "source": "Test setup"}
+      ],
+      "outputs": [
+        {"name": "test_results", "type": "test pass/fail", "constraints": "all pass", "destination": "go test output"}
+      ],
+      "acceptance": [
+        "TestE2EReviewFixCycle: temp git repo, full cycle, cr-fix-round-1 branch created with commits",
+        "TestE2ECrashRecoveryMidReview: kill-restart simulation, partial agents re-dispatched, workflow completes",
+        "TestE2ECrashRecoveryCorruptOutput: corrupt JSON in output file detected, deleted, agent re-dispatched",
+        "TestE2EPostFixScopeValidation: simulated out-of-scope write detected by git diff --name-only",
+        "All temp repos cleaned up after tests",
+        "go test ./internal/codereview/ -run TestE2E passes"
+      ],
+      "depends_on": ["cr-integration-tests", "cr-crash-recovery"],
+      "constraints": ["Use t.TempDir() for test isolation", "Mock agent runners but real git and filesystem operations"],
+      "files_scope": ["internal/codereview/e2e_test.go"],
+      "priority": "medium",
+      "estimate": "large"
+    }
+  ]
+}

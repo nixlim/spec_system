@@ -1430,6 +1430,10 @@ html, body {
 .workflow-meta span {
   margin-right: 12px;
 }
+.workflow-source-docs { font-size: 0.85em; color: #555; margin-top: 4px; }
+.workflow-source-docs summary { cursor: pointer; color: #4a90d9; }
+.workflow-source-docs-list { margin: 4px 0 0 16px; padding: 0; list-style: disc; }
+.workflow-source-docs-list li { font-size: 0.9em; color: #666; }
 .workflow-actions {
   display: flex;
   gap: 8px;
@@ -1561,6 +1565,8 @@ html, body {
 
 .workflow-status-item .wsi-actions {
   flex-shrink: 0;
+  display: flex;
+  gap: 6px;
 }
 
 /* Notification badge — pulsing red dot for workflows needing attention */
@@ -1743,4 +1749,64 @@ html, body {
   .convergence-grid {
     grid-template-columns: 1fr 1fr;
   }
+}
+
+/* --- Workflow Type Tabs --- */
+
+.workflow-type-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.workflow-type-tab {
+  padding: 6px 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 20px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.workflow-type-tab:hover {
+  background: var(--color-bg);
+  border-color: var(--color-primary);
+}
+
+.workflow-type-tab.active {
+  background: var(--color-primary);
+  color: #fff;
+  border-color: var(--color-primary);
+}
+
+/* --- Workflow Type Badge (in status list) --- */
+
+.wsi-type-badge {
+  display: inline-block;
+  font-size: 0.7em;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  margin-left: 6px;
+  vertical-align: middle;
+  letter-spacing: 0.03em;
+}
+
+.wsi-type-cd {
+  color: #0d9488;
+}
+
+.cd-gate-badge {
+  background: #0d9488;
+  color: #fff;
+}
+
+/* --- Tab Disabled State --- */
+
+.tab-disabled {
+  opacity: 0.5;
+  pointer-events: none;
 }

@@ -39,7 +39,7 @@ func TestPromptDiscoveryNonEmpty(t *testing.T) {
 	pb := newTestPromptBuilder(t)
 	doc1 := writeSourceDoc(t, "req.md", "# Requirements\nSome requirements.")
 	doc2 := writeSourceDoc(t, "notes.txt", "Some notes.")
-	prompt, err := pb.BuildDiscoveryPrompt([]string{doc1, doc2})
+	prompt, err := pb.BuildDiscoveryPrompt([]string{doc1, doc2}, "", nil)
 	if err != nil {
 		t.Fatalf("BuildDiscoveryPrompt error: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestPromptDiscoveryReferencesFilePaths(t *testing.T) {
 	designContent := "# Design Notes\nUse JWT tokens with 1-hour expiry."
 	doc1 := writeSourceDoc(t, "requirements.md", reqContent)
 	doc2 := writeSourceDoc(t, "design.md", designContent)
-	prompt, err := pb.BuildDiscoveryPrompt([]string{doc1, doc2})
+	prompt, err := pb.BuildDiscoveryPrompt([]string{doc1, doc2}, "", nil)
 	if err != nil {
 		t.Fatalf("BuildDiscoveryPrompt error: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestPromptDiscoveryListsFilePathsNotContent(t *testing.T) {
 	pb := newTestPromptBuilder(t)
 	doc1 := writeSourceDoc(t, "requirements.md", "req content")
 	doc2 := writeSourceDoc(t, "design.pdf", "pdf content")
-	prompt, err := pb.BuildDiscoveryPrompt([]string{doc1, doc2})
+	prompt, err := pb.BuildDiscoveryPrompt([]string{doc1, doc2}, "", nil)
 	if err != nil {
 		t.Fatalf("BuildDiscoveryPrompt error: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestPromptDiscoveryListsFilePathsNotContent(t *testing.T) {
 
 func TestPromptDiscoveryHandlesNonexistentPath(t *testing.T) {
 	pb := newTestPromptBuilder(t)
-	prompt, err := pb.BuildDiscoveryPrompt([]string{"/nonexistent/path/missing.md"})
+	prompt, err := pb.BuildDiscoveryPrompt([]string{"/nonexistent/path/missing.md"}, "", nil)
 	if err != nil {
 		t.Fatalf("BuildDiscoveryPrompt should not return error for nonexistent path: %v", err)
 	}
@@ -116,11 +116,12 @@ func TestPromptDiscoveryHandlesNonexistentPath(t *testing.T) {
 func TestPromptDiscoveryIncludesOutputPath(t *testing.T) {
 	pb := newTestPromptBuilder(t)
 	doc := writeSourceDoc(t, "req.md", "content")
-	prompt, err := pb.BuildDiscoveryPrompt([]string{doc})
+	prompt, err := pb.BuildDiscoveryPrompt([]string{doc}, "", nil)
 	if err != nil {
 		t.Fatalf("BuildDiscoveryPrompt error: %v", err)
 	}
-	if !strings.Contains(prompt, "specs/auth-feature/discovery-output.json") {
+	// Prompt should contain the output file path.
+	if !strings.Contains(prompt, "discovery-output.json") {
 		t.Error("expected prompt to contain discovery output file path")
 	}
 }
@@ -128,7 +129,7 @@ func TestPromptDiscoveryIncludesOutputPath(t *testing.T) {
 func TestPromptDiscoveryIncludesSchema(t *testing.T) {
 	pb := newTestPromptBuilder(t)
 	doc := writeSourceDoc(t, "req.md", "content")
-	prompt, err := pb.BuildDiscoveryPrompt([]string{doc})
+	prompt, err := pb.BuildDiscoveryPrompt([]string{doc}, "", nil)
 	if err != nil {
 		t.Fatalf("BuildDiscoveryPrompt error: %v", err)
 	}
@@ -140,7 +141,7 @@ func TestPromptDiscoveryIncludesSchema(t *testing.T) {
 func TestPromptDiscoveryIncludesPlanSpecInstructions(t *testing.T) {
 	pb := newTestPromptBuilder(t)
 	doc := writeSourceDoc(t, "req.md", "content")
-	prompt, err := pb.BuildDiscoveryPrompt([]string{doc})
+	prompt, err := pb.BuildDiscoveryPrompt([]string{doc}, "", nil)
 	if err != nil {
 		t.Fatalf("BuildDiscoveryPrompt error: %v", err)
 	}

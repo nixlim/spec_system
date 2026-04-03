@@ -37,6 +37,9 @@ type ConvergenceConfig struct {
 	// CumulativeDismissals is the total number of dismissals across all
 	// prior rounds.
 	CumulativeDismissals int
+	// TotalRaised is the total number of findings raised across all rounds,
+	// used as the denominator for percentage-based escalation checks.
+	TotalRaised int
 }
 
 // ---------------------------------------------------------------------------
@@ -166,7 +169,7 @@ func RunPreCheck(judge *JudgeOutput, tracker *IssueTracker, revision *RevisionOu
 	}
 
 	// (e) Authority limits.
-	authCheck := CheckAuthorityLimits(judge, 0, 0)
+	authCheck := CheckAuthorityLimits(judge, 0, 0, 0)
 	if !authCheck.Valid {
 		failures = append(failures, fmt.Sprintf(
 			"authority limit exceeded: %s", authCheck.Reason,
@@ -185,9 +188,10 @@ func RunPreCheck(judge *JudgeOutput, tracker *IssueTracker, revision *RevisionOu
 
 // CheckAuthorityLimits validates that the judge has not exceeded per-round
 // downgrade (max 2) and dismissal (max 3) limits, that all downgrade reason
-// codes are valid, and that cumulative downgrades+dismissals have not
-// exceeded the escalation threshold (>5 triggers escalation).
-func CheckAuthorityLimits(judge *JudgeOutput, cumulativeDowngrades, cumulativeDismissals int) AuthorityCheckResult {
+// codes are valid, and that cumulative dismissals have not reached 80% of
+// total raised findings (indicating the judge is dismissing rather than
+// driving genuine convergence).
+func CheckAuthorityLimits(judge *JudgeOutput, cumulativeDowngrades, cumulativeDismissals, totalRaised int) AuthorityCheckResult {
 	result := AuthorityCheckResult{Valid: true}
 
 	// Count this round's dismissals from issue updates.
@@ -252,18 +256,22 @@ func CheckAuthorityLimits(judge *JudgeOutput, cumulativeDowngrades, cumulativeDi
 		result.Reason = reason
 	}
 
-	// Cumulative escalation check: total across all rounds including current.
-	totalDowngrades := cumulativeDowngrades + len(judge.Downgrades)
+	// Percentage-based escalation check: if cumulative dismissals (including
+	// this round) reach >=80% of all raised findings, the judge is dismissing
+	// rather than driving genuine convergence.
 	totalDismissals := cumulativeDismissals + roundDismissals
-	if totalDowngrades+totalDismissals > 5 {
-		result.Valid = false
-		if result.Reason != "" {
-			result.Reason += "; "
+	if totalRaised > 0 {
+		dismissalPct := float64(totalDismissals) / float64(totalRaised) * 100
+		if dismissalPct >= 80 {
+			result.Valid = false
+			if result.Reason != "" {
+				result.Reason += "; "
+			}
+			result.Reason += fmt.Sprintf(
+				"cumulative dismissals %d/%d (%.0f%%) reaches escalation threshold of 80%%",
+				totalDismissals, totalRaised, dismissalPct,
+			)
 		}
-		result.Reason += fmt.Sprintf(
-			"cumulative downgrades(%d)+dismissals(%d)=%d exceeds escalation threshold of 5",
-			totalDowngrades, totalDismissals, totalDowngrades+totalDismissals,
-		)
 	}
 
 	return result
@@ -285,7 +293,7 @@ func ProcessVerdict(judge *JudgeOutput, tracker *IssueTracker, revision *Revisio
 	}
 
 	// Always check authority limits.
-	result.AuthorityCheck = CheckAuthorityLimits(judge, config.CumulativeDowngrades, config.CumulativeDismissals)
+	result.AuthorityCheck = CheckAuthorityLimits(judge, config.CumulativeDowngrades, config.CumulativeDismissals, config.TotalRaised)
 
 	// Count this round's dismissals for cumulative check.
 	var roundDismissals int
@@ -294,10 +302,14 @@ func ProcessVerdict(judge *JudgeOutput, tracker *IssueTracker, revision *Revisio
 			roundDismissals++
 		}
 	}
-	totalDowngrades := config.CumulativeDowngrades + len(judge.Downgrades)
+	// Percentage-based escalation: if cumulative dismissals reach >=80% of
+	// all raised findings, escalate to human intervention.
 	totalDismissals := config.CumulativeDismissals + roundDismissals
-	if totalDowngrades+totalDismissals > 5 {
-		result.ShouldEscalate = true
+	if config.TotalRaised > 0 {
+		dismissalPct := float64(totalDismissals) / float64(config.TotalRaised) * 100
+		if dismissalPct >= 80 {
+			result.ShouldEscalate = true
+		}
 	}
 
 	// Run pre-check only for PASS verdicts.
