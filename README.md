@@ -161,47 +161,45 @@ The workflow halts automatically when any limit is exceeded:
 
 ## Quick Start
 
-### One-line Install
+### Prerequisites
+
+Install these **before** running the installer:
+
+| Dependency | Required | Install |
+|------------|----------|---------|
+| **Claude CLI** | Yes — runs all AI agents | [claude.ai/install.sh](https://claude.ai/install.sh) |
+| **Codex CLI** | No — enables dual-provider mode | [github.com/openai/codex](https://github.com/openai/codex) |
+
+```bash
+# Verify Claude is installed and authenticated
+claude --version
+claude auth login   # if not already done
+```
+
+The installer handles everything else (server binary, bd, taskval, skills).
+
+### Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/nixlim/spec_system/main/install.sh | bash
 ```
 
-This installs the server binary, skills, and all optional dependencies (Claude CLI, bd, taskval). Run `./install.sh --help` for options including `--skip-beads`, `--skip-taskval`, `--dir`, and `--dry-run`.
-
-### Prerequisites
-
-#### Required
-
-| Dependency | Purpose | Install |
-|------------|---------|---------|
-| **Go 1.21+** | Build the server | [golang.org/dl](https://golang.org/dl/) |
-| **Claude CLI** | All AI agent execution | `npm install -g @anthropic-ai/claude-code` |
-| **plan-spec skill** | Spec/BDD templates | See [Skill Directories](#skill-directories) |
-| **grill-spec skill** | Review constitution | See [Skill Directories](#skill-directories) |
-
-#### Optional (but recommended)
-
-| Dependency | Purpose | How it affects the system |
-|------------|---------|--------------------------|
-| **Codex CLI** | Dual-provider mode | Runs Claude + GPT agents in parallel for richer outputs |
-| **bd (Beads)** | Issue tracking | Creates epics, finding issues, and gate proxies in Beads; human gates use Beads tasks. https://github.com/gastownhall/beads |
-| **taskval** | Task graph validation | Validates task JSON DAG structure; orchestrator re-prompts on failure. https://github.com/nixlim/task_templating |
-
-**Checking your environment:**
+The script:
+- Downloads a pre-built binary (no Go required), or builds from source if Go is available
+- Installs **bd** (Beads issue tracking) and **taskval** (task graph validation)
+- Copies the bundled `plan-spec` and `grill-spec` skills to `~/.claude/skills/`
+- Writes a default `config.yaml` and creates the workspace directory
 
 ```bash
-# Required
-claude --version          # Must succeed and show a version
-go version                # Must be 1.21+
-
-# Optional
-codex --version           # Enables dual-provider mode
-bd --version              # Enables Beads issue tracking
-taskval --version         # Enables strict task graph validation
+# Options
+./install.sh --help           # All flags
+./install.sh --skip-beads     # Skip bd installation
+./install.sh --skip-taskval   # Skip taskval installation
+./install.sh --dir ~/bin      # Custom binary location
+./install.sh --dry-run        # Preview without making changes
 ```
 
-If `bd` is not on your PATH, Beads integration is silently disabled and the workflow continues normally. Same for `codex` and `taskval`.
+If `bd` or `taskval` are not on your PATH, those features are silently disabled and the workflow continues without them.
 
 ### Build
 

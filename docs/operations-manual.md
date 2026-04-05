@@ -6,48 +6,109 @@ This guide covers day-to-day operation of the Adversarial Spec System: installat
 
 ## Installation
 
-### 1. Install Required Dependencies
+### Step 1 — Install Claude CLI (required, do this first)
 
-#### Go
-
-The server is a Go binary. You need Go 1.21 or later.
+The server spawns `claude` as a subprocess for all AI work. Install it yourself before running the installer — it requires authentication that can't be automated.
 
 ```bash
-# Check your version
-go version
-# Expected: go version go1.21+ ...
+# macOS / Linux
+curl -fsSL https://claude.ai/install.sh | bash
+
+# macOS (Homebrew)
+brew install --cask claude-code
+
+# Verify and authenticate
+claude --version
+claude auth login
 ```
 
-Download from [golang.org/dl](https://golang.org/dl/) if needed.
+If `claude` is not on your PATH, or authentication has expired, agents will fail when the workflow runs.
 
-#### Claude CLI
+### Step 2 — Install Codex CLI (optional)
 
-All AI agent work runs through the Claude CLI. Install it and authenticate:
+Install this if you want dual-provider mode (Claude + GPT running in parallel). Follow the instructions at [github.com/openai/codex](https://github.com/openai/codex).
 
 ```bash
-npm install -g @anthropic-ai/claude-code
-claude --version    # Verify installation
-claude auth login   # Authenticate (if not already done)
+codex --version   # Verify
 ```
 
-The server spawns `claude` as a subprocess. If `claude` is not on your PATH or authentication has expired, agents will fail.
+When detected at startup, the server logs: `[orchestrator] codex CLI detected — dual-provider review enabled`
 
-#### Skill Directories
+### Step 3 — Run the installer
 
-The system needs two skill directories that contain the spec templates and review rules. These are typically found in your Claude skills directory (`~/.claude/skills/`). The server auto-discovers them there.
+```bash
+curl -fsSL https://raw.githubusercontent.com/nixlim/spec_system/main/install.sh | bash
+```
 
-If you need to install them manually, each directory must contain:
+The installer handles everything else:
 
-**plan-spec/**
-- `spec-template.md` — Specification document format
-- `bdd-template.md` — BDD scenario format (Given/When/Then)
-- `test-dataset-template.md` — Test dataset format
+| What | How |
+|------|-----|
+| **specworkflow binary** | Downloads pre-built from GitHub releases; builds from source (Go) as fallback |
+| **bd (Beads)** | Installs via npm, brew, or curl depending on platform |
+| **taskval** | Installs via `go install` if Go is available |
+| **plan-spec / grill-spec skills** | Copies from the bundled repo into `~/.claude/skills/` |
+| **config.yaml** | Writes a default config if none exists |
+| **Beads workspace** | Runs `bd ready` in the current directory |
 
-**grill-spec/**
-- `review-constitution.md` — Review lenses and quality criteria
-- `report-template.md` — Judge report format
+**Installer flags:**
 
-Point to them explicitly in `config.yaml` if they are not in a standard location:
+```bash
+./install.sh --skip-beads     # Skip bd installation
+./install.sh --skip-taskval   # Skip taskval installation
+./install.sh --dir ~/bin      # Install binary to a custom directory
+./install.sh --dry-run        # Preview all steps without making changes
+./install.sh --help           # Full usage
+```
+
+### Manual binary install (no installer)
+
+If you prefer not to use the curl installer:
+
+**Option A — Download a pre-built binary:**
+```bash
+# macOS arm64 example — adjust PLATFORM and ARCH for your system
+curl -fsSL https://github.com/nixlim/spec_system/releases/latest/download/specworkflow_darwin_arm64 \
+  -o /usr/local/bin/specworkflow
+chmod +x /usr/local/bin/specworkflow
+```
+
+**Option B — Build from source (requires Go 1.21+):**
+```bash
+git clone https://github.com/nixlim/spec_system.git
+cd spec_system
+go build -o specworkflow ./cmd/specworkflow
+```
+
+### Optional dependencies (bd and taskval)
+
+These are silently skipped if not installed — the workflow runs without them.
+
+**bd (Beads)** — issue tracking ([github.com/gastownhall/beads](https://github.com/gastownhall/beads)):
+```bash
+npm install -g @beads/bd   # recommended (no C compiler needed)
+# or: brew install beads
+# or: curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+bd ready                   # initialise workspace in your project directory
+```
+When detected: `[orchestrator] Beads integration enabled`
+
+**taskval** — task graph validation ([github.com/nixlim/task_templating](https://github.com/nixlim/task_templating)):
+```bash
+go install github.com/nixlim/task_templating/cmd/taskval@latest
+```
+When installed, validates task JSON DAG after each taskify attempt and feeds errors back into the prompt.
+
+### Skill directories
+
+The `plan-spec` and `grill-spec` skills are bundled in the repo and copied to `~/.claude/skills/` by the installer. If you installed manually, copy them yourself:
+
+```bash
+cp -r .claude/skills/plan-spec  ~/.claude/skills/
+cp -r .claude/skills/grill-spec ~/.claude/skills/
+```
+
+Or point to them explicitly in `config.yaml`:
 
 ```yaml
 skill_paths:
@@ -55,77 +116,7 @@ skill_paths:
   grill_spec: "/path/to/grill-spec"
 ```
 
-### 2. Install Optional Dependencies
-
-These are optional. The system detects them at startup and silently skips their features if missing.
-
-#### Codex CLI (dual-provider mode)
-
-Runs GPT models in parallel with Claude for richer, more diverse outputs.
-
-```bash
-# Install per OpenAI documentation
-codex --version    # Verify
-```
-
-When detected, the server logs: `[orchestrator] codex CLI detected — dual-provider review enabled`
-
-Enable dual-provider phases in `config.yaml`:
-
-```yaml
-enable_codex_reviewers: true   # Adds Codex reviewers + holdout generation
-enable_codex_discovery: false  # Adds Codex discovery (heavier, optional)
-enable_codex_drafting: false   # Adds Codex drafting (heavier, optional)
-codex_model: "gpt-5.4"        # Which GPT model to use
-```
-
-#### bd (Beads) — Issue Tracking
-
-Beads is an issue tracking system backed by Dolt. When installed, the orchestrator creates epics, finding issues, and gate proxy tasks automatically.
-
-```bash
-# Install per Beads documentation
-bd --version       # Verify
-bd ready           # Initialise a .beads workspace in the current directory
-```
-
-When detected, the server logs: `[orchestrator] Beads integration enabled`
-
-When not detected: `[orchestrator] Beads integration disabled: bd not found` — the workflow continues normally without any Beads features.
-
-See [Beads Integration](#beads-integration) for details on what gets tracked.
-
-#### taskval — Task Graph Validation
-
-Validates the task JSON graph produced by the taskify agent against schema and DAG rules.
-
-```bash
-taskval --version  # Verify
-```
-
-When installed, the orchestrator runs `taskval --mode=graph <path>` after each taskify attempt. Validation errors are fed back into the prompt for the next retry.
-
-### 3. Build the Server
-
-```bash
-git clone <repo>
-cd adversarial-spec-system
-go build -o specworkflow ./cmd/specworkflow
-```
-
-### 4. Create a Config File
-
-Copy the example below and adjust to your environment. A minimal config only needs skill paths:
-
-```yaml
-skill_paths:
-  plan_spec: "~/.claude/skills/plan-spec"
-  grill_spec: "~/.claude/skills/grill-spec"
-```
-
-See the [full config reference](#configuration-reference) for all options.
-
-### 5. Start the Server
+### Start the Server
 
 ```bash
 ./specworkflow --config config.yaml --workspace ./workspace
