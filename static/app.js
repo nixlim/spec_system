@@ -748,6 +748,9 @@
 
     // Re-fetch convergence tab data
     loadConvergence();
+
+    // Re-fetch workspace tab data
+    loadWorkspaceFiles();
   }
 
   /**
@@ -810,6 +813,22 @@
       fetchJSON("/api/codedoc/" + encodeURIComponent(featureName) + "/status").then(function (cdStatus) {
         if (cdStatus) showCDFinalGatePanel(featureName, cdStatus);
       }).catch(function () {});
+    } else if (state === "HUMAN_GATE_FINAL") {
+      fetchJSON("/api/workspace/features/" + encodeURIComponent(featureName) + "/files").then(function (files) {
+        var specFiles = (files || []).filter(function (f) { return /^spec-v\d+\.md$/.test(f.name); });
+        specFiles.sort(function (a, b) {
+          var na = parseInt(a.name.replace("spec-v", "").replace(".md", ""), 10);
+          var nb = parseInt(b.name.replace("spec-v", "").replace(".md", ""), 10);
+          return nb - na;
+        });
+        if (specFiles.length > 0) {
+          fetchJSON("/api/workspace/features/" + encodeURIComponent(featureName) + "/files/" + encodeURIComponent(specFiles[0].name))
+            .then(function (specData) { showFinalGatePanel(featureName, specFiles[0].name, specData); })
+            .catch(function () { showFinalGatePanel(featureName, "", null); });
+        } else {
+          showFinalGatePanel(featureName, "", null);
+        }
+      }).catch(function () { showFinalGatePanel(featureName, "", null); });
     }
   }
 
@@ -1718,6 +1737,7 @@
         if (tab === "convergence") loadConvergence();
         if (tab === "messages") startMessagesPolling();
         if (tab === "running-agents") loadRunningAgents();
+        if (tab === "workspace") loadWorkspaceFiles();
 
         // Stop polling when leaving tabs
         if (tab !== "messages") stopMessagesPolling();
@@ -3531,6 +3551,72 @@
       "</div>";
   }
 
+  // --- Final Gate: Accept or reject the finished spec ---
+
+  function showFinalGatePanel(featureName, specFileName, specData) {
+    var container = $("#gate-panels");
+    clearChildren(container);
+
+    var panel = el("div", { className: "gate-panel" });
+    var header = '<h3><span class="gate-badge">Final Gate</span> Spec Review — ' + escapeHtml(featureName) + '</h3>';
+    var content = "";
+
+    if (specData) {
+      var specText = typeof specData === "string" ? specData : (specData.content || JSON.stringify(specData, null, 2));
+      content += '<div class="gate-section">';
+      content += '<div class="gate-section-label">' + escapeHtml(specFileName) + '</div>';
+      content += '<pre style="max-height:500px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5;padding:12px;background:var(--color-bg-secondary,#1a1a1a);border:1px solid var(--color-border);border-radius:4px;">' + escapeHtml(specText) + '</pre>';
+      content += '</div>';
+    } else {
+      content += '<div class="gate-section"><div class="gate-section-value" style="color:var(--color-text-muted);">No spec file found.</div></div>';
+    }
+
+    content += '<div class="gate-section" style="margin-top:12px;">';
+    content += '<div class="gate-section-label">Comment (optional)</div>';
+    content += '<textarea id="final-gate-comment" class="gate-textarea" rows="3" placeholder="Add a comment for rejection or notes..."></textarea>';
+    content += '</div>';
+
+    content += '<div class="gate-actions">';
+    content += '<button id="final-gate-accept" class="btn btn-success">Accept &amp; Finalize</button>';
+    content += '<button id="final-gate-reject" class="btn btn-danger">Reject — Re-review</button>';
+    content += '</div>';
+
+    panel.innerHTML = header + content;
+    container.appendChild(panel);
+
+    panel.querySelector("#final-gate-accept").addEventListener("click", function () {
+      var comment = (panel.querySelector("#final-gate-comment") || {}).value || "";
+      var payload = { action: "accept" };
+      if (comment.trim()) payload.comment = comment.trim();
+      fetchJSON("/api/tasks/" + encodeURIComponent(featureName) + "/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      }).then(function () {
+        clearChildren(container);
+        refreshWorkflowStatusList();
+      }).catch(function (err) {
+        alert("Final gate accept failed: " + (err.message || err));
+      });
+    });
+
+    panel.querySelector("#final-gate-reject").addEventListener("click", function () {
+      var comment = (panel.querySelector("#final-gate-comment") || {}).value || "";
+      var payload = { action: "reject" };
+      if (comment.trim()) payload.comment = comment.trim();
+      fetchJSON("/api/tasks/" + encodeURIComponent(featureName) + "/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      }).then(function () {
+        clearChildren(container);
+        refreshWorkflowStatusList();
+      }).catch(function (err) {
+        alert("Final gate reject failed: " + (err.message || err));
+      });
+    });
+  }
+
   // --- Gate 2: Ambiguity Resolution ---
 
   function showGate2Panel(data) {
@@ -4156,6 +4242,7 @@
     initCancelButton();
     initMessages();
     initWorkflowControls();
+    initWorkspaceTab();
     wsConnect();
     // Load workspace browser on startup and start auto-refresh
     loadFeatureList();
@@ -4411,6 +4498,95 @@
         clearChildren(actionCell);
       }
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // Workspace Tab
+  // -----------------------------------------------------------------------
+
+  function loadWorkspaceFiles() {
+    var tbody = $("#workspace-file-body");
+    var table = $("#workspace-file-table");
+    var empty = $("#workspace-empty");
+    if (!tbody || !table || !empty) return;
+
+    if (!selectedFeature) {
+      table.style.display = "none";
+      empty.style.display = "";
+      return;
+    }
+
+    fetchJSON("/api/workspace/features/" + encodeURIComponent(selectedFeature) + "/files")
+      .then(function (files) {
+        clearChildren(tbody);
+        hideWorkspaceViewer();
+
+        if (!files || files.length === 0) {
+          table.style.display = "none";
+          empty.style.display = "";
+          return;
+        }
+
+        table.style.display = "";
+        empty.style.display = "none";
+
+        files.forEach(function (f) {
+          var row = el("tr", { className: "workspace-file-row", style: "cursor:pointer" });
+          row.appendChild(el("td", { textContent: f.name, className: "workspace-file-name" }));
+          row.appendChild(el("td", { textContent: formatFileSize(f.size) }));
+          row.appendChild(el("td", { textContent: formatTimestamp(f.modified) }));
+          row.addEventListener("click", function () { openWorkspaceFile(f.name); });
+          tbody.appendChild(row);
+        });
+      })
+      .catch(function () {
+        table.style.display = "none";
+        empty.style.display = "";
+      });
+  }
+
+  function openWorkspaceFile(filename) {
+    var viewer = $("#workspace-file-viewer");
+    var titleEl = $("#workspace-viewer-filename");
+    var contentEl = $("#workspace-viewer-content");
+    if (!viewer || !titleEl || !contentEl) return;
+
+    titleEl.textContent = filename;
+    contentEl.textContent = "Loading…";
+    viewer.style.display = "";
+
+    fetchJSON("/api/workspace/features/" + encodeURIComponent(selectedFeature) + "/files/" + encodeURIComponent(filename))
+      .then(function (data) {
+        var text;
+        if (typeof data === "string") {
+          text = data;
+        } else if (data && typeof data.content === "string") {
+          text = data.content;
+        } else {
+          text = JSON.stringify(data, null, 2);
+        }
+        contentEl.textContent = text;
+      })
+      .catch(function (err) {
+        contentEl.textContent = "Error loading file: " + err.message;
+      });
+  }
+
+  function hideWorkspaceViewer() {
+    var viewer = $("#workspace-file-viewer");
+    if (viewer) viewer.style.display = "none";
+  }
+
+  function formatFileSize(bytes) {
+    if (bytes == null) return "-";
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  function initWorkspaceTab() {
+    var closeBtn = $("#workspace-viewer-close");
+    if (closeBtn) closeBtn.addEventListener("click", hideWorkspaceViewer);
   }
 
   if (document.readyState === "loading") {

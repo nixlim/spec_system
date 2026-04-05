@@ -3,6 +3,7 @@ package specworkflow
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -205,7 +206,18 @@ func (c *BeadsClient) GateShow(ctx context.Context, actor string, beadID string)
 	args = append(args, readArgs(actor)...)
 	args = append(args, "--json", beadID)
 	out, err := c.run(ctx, args...)
-	return []byte(out), err
+	if err != nil {
+		return nil, err
+	}
+	data := bytes.TrimSpace([]byte(out))
+	// bd show --json returns a JSON array; extract the first element.
+	if len(data) > 0 && data[0] == '[' {
+		var arr []json.RawMessage
+		if json.Unmarshal(data, &arr) == nil && len(arr) > 0 {
+			return arr[0], nil
+		}
+	}
+	return data, nil
 }
 
 func (c *BeadsClient) GateClose(ctx context.Context, actor string, beadID string, reason string) error {
