@@ -259,6 +259,21 @@ func (t *IssueTracker) TerminalIDs() map[string]bool {
 	return ids
 }
 
+// AutoVerifyAddressedFindings transitions all findings currently in
+// StatusAddressed to StatusVerified, then closes them via CloseVerifiedFindings.
+// This is called when the judge issues a PASS verdict to treat PASS as an
+// implicit verification of every addressed finding — the judge has determined
+// the spec is ready regardless of whether each finding was explicitly listed
+// in the issue_updates array.
+func (t *IssueTracker) AutoVerifyAddressedFindings(round int) {
+	for id, issue := range t.Issues {
+		if issue.Status == StatusAddressed {
+			_ = t.TransitionIssue(id, StatusVerified, round, "auto-verified on judge PASS verdict")
+		}
+	}
+	t.CloseVerifiedFindings(round)
+}
+
 // AcknowledgeMinorFindings transitions all findings with severity MINOR or
 // OBSERVATION that are currently in StatusRaised to StatusAcknowledged.
 func (t *IssueTracker) AcknowledgeMinorFindings(round int) {

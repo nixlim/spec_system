@@ -620,6 +620,15 @@ func (o *Orchestrator) handleJudging(state *WorkflowStateJSON, specDir string) e
 		return nil
 	}
 
+	// When the judge issues PASS, treat it as an implicit verification of all
+	// addressed findings. The judge may not list every previously-addressed
+	// finding in its issue_updates; a PASS verdict means the judge is satisfied
+	// with the spec regardless. Without this, check (a) of RunPreCheck would
+	// fail on any CRITICAL finding still in "addressed" state.
+	if judge.Verdict == VerdictPass {
+		o.tracker.AutoVerifyAddressedFindings(state.Round)
+	}
+
 	// Run convergence pre-check + process verdict.
 	// Build a dummy revision for rounds where no revision was performed
 	// (zero-critical path goes directly to judging).
