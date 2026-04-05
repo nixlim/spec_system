@@ -56,7 +56,7 @@ var transitionTable = map[WorkflowState][]WorkflowState{
 	StateHumanGate2:     {StateReviewing, StateDrafting, StateEscalated},
 	StateReviewing:      {StateRevising, StateJudging, StateError},
 	StateRevising:       {StateJudging, StateError},
-	StateJudging:        {StateReviewing, StateHumanGateFinal, StateFinalized, StateEscalated, StateError},
+	StateJudging:        {StateReviewing, StateRevising, StateHumanGateFinal, StateFinalized, StateEscalated, StateError},
 	StateHumanGateFinal: {StateFinalized, StateReviewing, StateEscalated},
 	StateFinalized:      {StateTaskify},
 	StateTaskify:        {StateTaskReview, StateTaskify, StateEscalated},

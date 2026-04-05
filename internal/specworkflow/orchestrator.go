@@ -814,6 +814,12 @@ func ReloadFindings(tracker *IssueTracker, specDir string, maxRound int) {
 					}
 				}
 				tracker.CloseVerifiedFindings(round)
+				// A PASS verdict implicitly verifies all addressed findings —
+				// mirror the same logic that handleJudging applies at runtime
+				// so the replayed tracker matches the live state.
+				if judge.Verdict == VerdictPass {
+					tracker.AutoVerifyAddressedFindings(round)
+				}
 			}
 		}
 	}
