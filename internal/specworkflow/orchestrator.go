@@ -509,6 +509,7 @@ func (o *Orchestrator) runnerFor(role string) AgentRunner {
 		c := *cr
 		clone = &c
 	}
+	clone.Role = role
 	o.mu.Lock()
 	ctx := o.runCtx
 	o.mu.Unlock()
