@@ -8,67 +8,51 @@ The system supports **dual-provider execution** (Claude + Codex in parallel) acr
 
 ### Spec Workflow
 
-```
-Source Documents
-       |
-       v
-  [ DISCOVERY ]  ──>  Extract actors, scope, constraints, requirements
-       |                (dual-provider: Claude + Codex with intelligent merge)
-       v
-  [ HUMAN GATE 1 ]  ──>  Confirm / correct requirements (up to 3 corrections)
-       |
-       v
-  [ DRAFTING ]  ──>  Produce spec + holdout test dataset from templates
-       |              (dual-provider: Claude + Codex with combine agent)
-       v
-  [ HUMAN GATE 2 ]  ──>  Resolve ambiguity warnings (1 redraft allowed)
-       |
-       v
-  ┌─────────────────────────────────┐
-  │  [ REVIEWING ]                  │
-  │    4 parallel reviewer agents   │  Adversarial review loop
-  │    8 lenses across 4 groups     │  (2-5 rounds, configurable)
-  │    + optional Codex reviewers   │
-  │            |                    │
-  │  [ REVISING ]                   │
-  │    Address findings             │
-  │    (with judge block feedback   │
-  │     when previous revision      │
-  │     was BLOCKed)                │
-  │            |                    │
-  │  [ JUDGING ]                    │
-  │    Convergence check            │
-  │    Anti-gaming pre-checks       │
-  │    BLOCK → back to REVISING     │
-  └─────────────┬───────────────────┘
-                |
-                v
-  [ HUMAN GATE FINAL ]  ──>  Only if critical findings remain
-                |
-                v
-          [ FINALIZED ]
-                |
-                v
-         [ TASKIFY ]  ──>  Decompose spec into structured task graph
-                |            (validation+retry with schema/DAG checks)
-                v
-  ┌─────────────────────────────────┐
-  │  [ TASK REVIEW ]                │
-  │    Dual-provider review of      │  Task review loop
-  │    task graph quality           │  (up to 3 rounds)
-  │            |                    │
-  │  [ TASK REVISION ]              │
-  │    Address task findings        │
-  └─────────────┬───────────────────┘
-                |
-                v
-  [ TASK HUMAN GATE ]  ──>  Approve / correct / re-decompose tasks
-                |
-                v
-       [ TASKS APPROVED ]
-                |
-                v
-          [ COMPLETE ]
+```mermaid
+%%{init: {"theme": "neutral", "flowchart": {"defaultRenderer": "elk"}}}%%
+flowchart TD
+    SRC([Source Documents])
+    DISC[DISCOVERY<br/>Extract actors · scope · constraints · requirements<br/><i>dual-provider: Claude + Codex</i>]
+    HG1[/HUMAN GATE 1<br/>Confirm / correct requirements\]
+    DRAFT[DRAFTING<br/>Produce spec + holdout test dataset<br/><i>dual-provider: Claude + Codex</i>]
+    HG2[/HUMAN GATE 2<br/>Resolve ambiguity warnings\]
+
+    subgraph ADVLOOP["Adversarial Review Loop · 2–5 rounds"]
+        direction TB
+        REV[REVIEWING<br/>4 parallel reviewer agents<br/>8 lenses across 4 groups + optional Codex]
+        REVIS[REVISING<br/>Address findings<br/>Judge block feedback on prior BLOCK]
+        JUDG[JUDGING<br/>Convergence check · anti-gaming pre-checks]
+    end
+
+    HGF[/HUMAN GATE FINAL<br/>Only if critical findings remain\]
+    FIN[FINALIZED]
+    TASK[TASKIFY<br/>Decompose spec into structured task graph<br/>validation + retry with schema/DAG checks]
+
+    subgraph TASKLOOP["Task Review Loop · up to 3 rounds"]
+        direction TB
+        TR[TASK REVIEW<br/>Dual-provider task graph quality review]
+        TRV[TASK REVISION<br/>Address task findings]
+    end
+
+    THG[/TASK HUMAN GATE<br/>Approve / correct / re-decompose\]
+    TAPPR[TASKS APPROVED]
+    COMP([COMPLETE])
+
+    SRC --> DISC --> HG1 --> DRAFT --> HG2 --> REV
+    REV --> REVIS --> JUDG
+    JUDG -- REVISE --> REV
+    JUDG -- BLOCK --> REVIS
+    JUDG -- PASS --> HGF --> FIN --> TASK --> TR --> TRV --> TR
+    TRV --> THG
+    THG -- approve --> TAPPR --> COMP
+    THG -- re-decompose --> TASK
+
+    classDef agent fill:#ffffff,stroke:#000000,color:#000000
+    classDef gate fill:#e8e8e8,stroke:#000000,color:#000000,stroke-dasharray:5 3
+    classDef terminal fill:#1a1a1a,stroke:#1a1a1a,color:#ffffff
+    class DISC,DRAFT,REV,REVIS,JUDG,FIN,TASK,TR,TRV,TAPPR agent
+    class HG1,HG2,HGF,THG gate
+    class SRC,COMP terminal
 ```
 
 The dashboard displays this as a visual pipeline stepper showing all stages, with completed stages in green, the current stage pulsing, and future stages grayed out.
@@ -85,26 +69,32 @@ When rewinding to the discovery phase, the system detects existing artefacts and
 
 A separate workflow for automated code auditing:
 
-```
-Code Path
-    |
-    v
-  [ CR_INIT ]  ──>  [ CR_HUMAN_GATE_SCOPE ]  ──>  Confirm review scope
-    |
-    v
-  ┌─────────────────────────────────┐
-  │  [ CR_REVIEWING ]               │
-  │    Dual-provider code review    │  Fix-review loop
-  │            |                    │  (configurable rounds)
-  │  [ CR_FIXING ]                  │
-  │    Automated fix application    │
-  │            |                    │
-  │  [ CR_HUMAN_GATE_FIXES ]        │
-  │    Human approval of fixes      │
-  └─────────────┬───────────────────┘
-                |
-                v
-  [ CR_COMPLETE ] or [ CR_ESCALATED ]
+```mermaid
+%%{init: {"theme": "neutral", "flowchart": {"defaultRenderer": "elk"}}}%%
+flowchart TD
+    CP([Code Path])
+    CRINIT[CR_INIT]
+    CRHGS[/CR_HUMAN_GATE_SCOPE<br/>Confirm review scope\]
+
+    subgraph CRLOOP["Fix-Review Loop · configurable rounds"]
+        direction TB
+        CRREV[CR_REVIEWING<br/>Dual-provider code review]
+        CRFIX[CR_FIXING<br/>Automated fix application]
+        CRHGF[/CR_HUMAN_GATE_FIXES<br/>Human approval of fixes\]
+    end
+
+    CRDONE([CR_COMPLETE / CR_ESCALATED])
+
+    CP --> CRINIT --> CRHGS --> CRREV --> CRFIX --> CRHGF
+    CRHGF -- continue --> CRREV
+    CRHGF -- done --> CRDONE
+
+    classDef agent fill:#ffffff,stroke:#000000,color:#000000
+    classDef gate fill:#e8e8e8,stroke:#000000,color:#000000,stroke-dasharray:5 3
+    classDef terminal fill:#1a1a1a,stroke:#1a1a1a,color:#ffffff
+    class CRINIT,CRREV,CRFIX agent
+    class CRHGS,CRHGF gate
+    class CP,CRDONE terminal
 ```
 
 ### Agents

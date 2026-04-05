@@ -137,6 +137,44 @@ Open `http://localhost:8080` in your browser.
 
 ## Running a Spec Workflow
 
+```mermaid
+%%{init: {"theme": "neutral", "flowchart": {"defaultRenderer": "elk"}}}%%
+flowchart TD
+    START([Start Workflow])
+    UPLOAD[Upload Source Documents]
+    DISC[DISCOVERY<br/>Agents extract requirements from source docs]
+    HG1[/GATE 1<br/>Review requirements · answer questions · correct\]
+    DRAFT[DRAFTING<br/>Spec + holdout test dataset produced]
+    HG2[/GATE 2<br/>Resolve ambiguity warnings\]
+    LOOP[REVIEW LOOP<br/>REVIEWING → REVISING → JUDGING<br/>2–5 rounds]
+    HGF[/GATE FINAL<br/>Only if critical findings remain\]
+    FIN[FINALIZED]
+    TASK[TASKIFY<br/>Task graph decomposition + validation]
+    THG[/TASK GATE<br/>Approve or re-decompose\]
+    DONE([COMPLETE])
+    ESC([ESCALATED<br/>Circuit breaker tripped])
+
+    START --> UPLOAD --> DISC --> HG1
+    HG1 -- approve --> DRAFT
+    HG1 -- "correct, up to 3×" --> DISC
+    DRAFT --> HG2
+    HG2 -- approve --> LOOP
+    HG2 -- "redraft, once" --> DRAFT
+    LOOP -- PASS --> HGF --> FIN --> TASK --> THG
+    LOOP -- limit exceeded --> ESC
+    THG -- approve --> DONE
+    THG -- re-decompose --> TASK
+
+    classDef agent fill:#ffffff,stroke:#000000,color:#000000
+    classDef gate fill:#e8e8e8,stroke:#000000,color:#000000,stroke-dasharray:5 3
+    classDef terminal fill:#1a1a1a,stroke:#1a1a1a,color:#ffffff
+    classDef warn fill:#d0d0d0,stroke:#000000,color:#000000
+    class UPLOAD,DISC,DRAFT,LOOP,FIN,TASK agent
+    class HG1,HG2,HGF,THG gate
+    class START,DONE terminal
+    class ESC warn
+```
+
 ### Step 1 — Upload Source Documents
 
 Upload the documents that describe the system you want to spec (PRDs, design docs, prior specs, architecture notes):
@@ -186,6 +224,25 @@ The system runs multiple review/revise/judge iterations:
 - **REVIEWING**: 4 reviewer agents run in parallel (+ Codex reviewers if enabled), each examining the spec through specific lenses
 - **REVISING**: A reviser agent addresses findings. If the previous judge BLOCKed the revision, the reviser receives the judge's full rationale and must address every flagged issue
 - **JUDGING**: The judge reads the live issue tracker (with current statuses — not a stale snapshot) and renders PASS, REVISE, or BLOCK
+
+```mermaid
+%%{init: {"theme": "neutral", "flowchart": {"defaultRenderer": "elk"}}}%%
+flowchart LR
+    REV[REVIEWING<br/>4 parallel reviewer agents<br/>8 lenses · + Codex if enabled]
+    REVIS[REVISING<br/>Address findings<br/>Receives judge rationale on BLOCK]
+    JUDG{JUDGING<br/>Convergence judge}
+    NEXT([Proceed to FINALIZED])
+
+    REV --> REVIS --> JUDG
+    JUDG -- "PASS — all CRIT/MAJ resolved" --> NEXT
+    JUDG -- "REVISE — minor issues remain" --> REV
+    JUDG -- "BLOCK — critical findings unaddressed" --> REVIS
+
+    classDef agent fill:#ffffff,stroke:#000000,color:#000000
+    classDef terminal fill:#1a1a1a,stroke:#1a1a1a,color:#ffffff
+    class REV,REVIS agent
+    class NEXT terminal
+```
 
 Watch progress in the **Convergence** tab. The **Issues** tab shows each finding with its current status, the round it was raised, and the round it was closed.
 
@@ -257,6 +314,29 @@ When `bd` is installed and `bd ready` has been run in the working directory, all
 
 ### Using Beads as a Gate Interface
 
+```mermaid
+%%{init: {"theme": "neutral", "flowchart": {"defaultRenderer": "elk"}}}%%
+flowchart TD
+    WF[Workflow reaches gate]
+    CREATE[Beads task issue created]
+
+    subgraph PATHS["Two ways to unblock"]
+        direction LR
+        DASH[Dashboard<br/>Click Approve or Reject<br/>in the gate panel]
+        CLI["Beads CLI<br/>bd close &lt;id&gt;<br/>--reason ACCEPT: ..."]
+    end
+
+    POLL[Orchestrator polls task every 5s]
+    RESUME([Workflow continues])
+
+    WF --> CREATE --> PATHS --> POLL --> RESUME
+
+    classDef agent fill:#ffffff,stroke:#000000,color:#000000
+    classDef terminal fill:#1a1a1a,stroke:#1a1a1a,color:#ffffff
+    class CREATE,POLL,DASH,CLI agent
+    class WF,RESUME terminal
+```
+
 Every human gate creates a Beads task issue. You can approve or reject the gate from the dashboard **or** by closing the Beads task:
 
 ```bash
@@ -307,6 +387,32 @@ Multiple workflows can run at the same time on different features:
 
 ## Dual-Provider Mode
 
+```mermaid
+%%{init: {"theme": "neutral", "flowchart": {"defaultRenderer": "elk"}}}%%
+flowchart TD
+    INPUT([Source Documents / Spec])
+
+    subgraph PARALLEL["Parallel Execution (when Codex enabled)"]
+        direction LR
+        CLAUDE[Claude Agent]
+        CODEX[Codex Agent]
+    end
+
+    MERGE[Merge / Combine Agent<br/>Intelligent synthesis of both outputs]
+    GATE[/Human Gate<br/>Per-provider outputs shown side-by-side\]
+    OUT([Merged Output])
+
+    INPUT --> CLAUDE & CODEX
+    CLAUDE & CODEX --> MERGE --> GATE --> OUT
+
+    classDef agent fill:#ffffff,stroke:#000000,color:#000000
+    classDef gate fill:#e8e8e8,stroke:#000000,color:#000000,stroke-dasharray:5 3
+    classDef terminal fill:#1a1a1a,stroke:#1a1a1a,color:#ffffff
+    class CLAUDE,CODEX,MERGE agent
+    class GATE gate
+    class INPUT,OUT terminal
+```
+
 When Codex CLI is detected and the relevant config flags are enabled, the system runs Claude and Codex agents in parallel:
 
 **Discovery** (enable via `enable_codex_discovery: true`): Both providers analyse source documents independently. An intelligent merge agent combines outputs. Gate 1 shows per-provider outputs side-by-side with the merged result.
@@ -320,6 +426,36 @@ When Codex CLI is detected and the relevant config flags are enabled, the system
 ---
 
 ## Handling Errors
+
+```mermaid
+%%{init: {"theme": "neutral", "flowchart": {"defaultRenderer": "elk"}}}%%
+flowchart TD
+    STOP([Workflow stopped])
+    Q{What state?}
+
+    subgraph ERR_OPT["ERROR — agent failure"]
+        direction TB
+        E1[Resume<br/>Retry the failed agent]
+        E2[Rewind<br/>Go back to a known-good stage]
+        E3[Reset<br/>Delete and start fresh]
+    end
+
+    subgraph ESC_OPT["ESCALATED — limit exceeded"]
+        direction TB
+        S1[Force Finalize<br/>Accept spec with open findings]
+        S2[Rewind + adjust config<br/>Increase limits and retry]
+        S3[Reset<br/>Delete and start fresh]
+    end
+
+    STOP --> Q
+    Q -- "agent failed" --> ERR_OPT
+    Q -- "max rounds / cost / staleness / time" --> ESC_OPT
+
+    classDef opt fill:#ffffff,stroke:#000000,color:#000000
+    classDef terminal fill:#1a1a1a,stroke:#1a1a1a,color:#ffffff
+    class E1,E2,E3,S1,S2,S3 opt
+    class STOP terminal
+```
 
 ### Workflow in ERROR State
 

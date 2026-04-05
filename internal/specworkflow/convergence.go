@@ -133,14 +133,25 @@ func RunPreCheck(judge *JudgeOutput, tracker *IssueTracker, revision *RevisionOu
 		changeByID[revision.Changes[i].FindingID] = &revision.Changes[i]
 	}
 
-	// (b) Revision change log must reference every CRITICAL and MAJOR finding.
-	// (c) CRITICAL findings marked "closed" must have non-empty sections_modified.
+	// (b) Revision change log must reference every open CRITICAL and MAJOR finding.
+	// Terminal findings resolved in prior rounds do not need to appear in the
+	// current revision's change log. However, if the reviser explicitly references
+	// a terminal finding in this round's change log, we still apply check (c).
+	// (c) CRITICAL findings closed (either this round or referenced in this revision)
+	// must have non-empty sections_modified.
 	for _, issue := range tracker.Issues {
 		if issue.Finding.Severity != SeverityCritical && issue.Finding.Severity != SeverityMajor {
 			continue
 		}
 
 		ch, referenced := changeByID[issue.Finding.ID]
+
+		// Terminal findings not referenced in this revision were resolved in a
+		// prior round — no requirement to appear in the current change log.
+		if IsTerminal(issue.Status) && !referenced {
+			continue
+		}
+
 		if !referenced {
 			failures = append(failures, fmt.Sprintf(
 				"%s finding %s not referenced in revision change log",

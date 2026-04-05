@@ -61,54 +61,39 @@ The code-doc workflow is a **sibling workflow** to the existing `specworkflow` a
 
 ## 2. Workflow States
 
-```
-Code Path + Mode (full | incremental)
-       |
-       v
-  [ CD_INIT ]
-       |
-       v
-  [ CD_DISCOVERY ]  ──>  Analyse codebase: modules, deps, entry points,
-       |                  test coverage, existing docs, language/framework
-       |                  (dual-provider: Claude + Codex with merge)
-       v
-  [ CD_HUMAN_GATE_SCOPE ]  ──>  Confirm/adjust scope, select focus areas
-       |
-       v
-  [ CD_DRAFTING ]  ──>  Produce documentation artefacts:
-       |                 - As-implemented report
-       |                 - Architecture diagrams (Mermaid)
-       |                 - Comment/stub/dead-code audit (JSON + findings)
-       |                 - Updated existing doc files
-       |                 (dual-provider: Claude + Codex with combine)
-       v
-  [ CD_SANITISING ]  ──>  Scan all documentation output for secrets/credentials
-       |
-       v
-  [ CD_HUMAN_GATE_DRAFT ]  ──>  Review draft docs, approve/correct direction
-       |
-       v
-  ┌─────────────────────────────────────┐
-  │  [ CD_REVIEWING ]                   │
-  │    4 parallel reviewer groups       │  Adversarial review loop
-  │    9 lenses across 4 groups         │  (configurable rounds)
-  │    + optional Codex reviewers       │
-  │              |                      │
-  │  [ CD_REVISING ]                    │
-  │    Address findings, update docs    │
-  │              |                      │
-  │  [ CD_JUDGING ]                     │
-  │    Convergence + accuracy check     │
-  └──────────────┬──────────────────────┘
-                 |
-                 v
-  [ CD_HUMAN_GATE_FINAL ]  ──>  (only when unresolved CRITICAL or MAJOR findings remain)
-                 |
-                 v
-  [ CD_WRITING ]  ──>  Write approved docs to target repo's docs/ directory
-                 |     (staging → atomic move, with drift check)
-                 v
-          [ CD_COMPLETE ]
+```mermaid
+%%{init: {"theme": "neutral", "flowchart": {"defaultRenderer": "elk"}}}%%
+flowchart TD
+    CP(["Code Path<br/>Mode: full | incremental"])
+    INIT[CD_INIT]
+    DISC[CD_DISCOVERY<br/>Analyse codebase: modules · deps · entry points<br/>test coverage · existing docs · language/framework<br/><i>dual-provider: Claude + Codex</i>]
+    HGS[/CD_HUMAN_GATE_SCOPE<br/>Confirm/adjust scope · select focus areas\]
+    DRAFT[CD_DRAFTING<br/>As-implemented report · architecture diagrams<br/>comment/stub/dead-code audit · updated docs<br/><i>dual-provider: Claude + Codex</i>]
+    SANIT[CD_SANITISING<br/>Scan all docs for secrets/credentials]
+    HGD[/CD_HUMAN_GATE_DRAFT<br/>Review draft docs · approve/correct direction\]
+
+    subgraph LOOP["Adversarial Review Loop · configurable rounds"]
+        direction TB
+        REV[CD_REVIEWING<br/>4 parallel reviewer groups · 9 lenses]
+        REVIS[CD_REVISING<br/>Address findings · update docs]
+        JUDG[CD_JUDGING<br/>Convergence + accuracy check]
+    end
+
+    HGF[/CD_HUMAN_GATE_FINAL<br/>Only when unresolved CRITICAL or MAJOR findings remain\]
+    WRITE[CD_WRITING<br/>Write approved docs to target repo<br/>staging → atomic move · drift check]
+    DONE([CD_COMPLETE])
+
+    CP --> INIT --> DISC --> HGS --> DRAFT --> SANIT --> HGD --> REV
+    REV --> REVIS --> JUDG
+    JUDG -- "REVISE / BLOCK" --> REV
+    JUDG -- PASS --> HGF --> WRITE --> DONE
+
+    classDef agent fill:#ffffff,stroke:#000000,color:#000000
+    classDef gate fill:#e8e8e8,stroke:#000000,color:#000000,stroke-dasharray:5 3
+    classDef terminal fill:#1a1a1a,stroke:#1a1a1a,color:#ffffff
+    class INIT,DISC,DRAFT,SANIT,REV,REVIS,JUDG,WRITE agent
+    class HGS,HGD,HGF gate
+    class CP,DONE terminal
 ```
 
 ### State Definitions

@@ -2167,7 +2167,7 @@
           var rewindRow = el("div", { className: "workflow-rewind", style: "display:flex;gap:6px;align-items:center;margin-top:6px;" });
 
           var stageSelect = el("select", { className: "rewind-select", style: "font-size:12px;padding:2px 4px;" });
-          var stages = ["DISCOVERY", "DRAFTING", "REVIEWING", "REVISING", "JUDGING"];
+          var stages = ["DISCOVERY", "DRAFTING", "REVIEWING", "REVISING", "JUDGING", "TASKIFY"];
           stages.forEach(function (s) {
             var opt = el("option", { value: s, textContent: s });
             stageSelect.appendChild(opt);

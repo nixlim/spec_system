@@ -88,16 +88,34 @@ func TestConvergence_PreCheck_RejectsCriticalNotClosed(t *testing.T) {
 	}
 }
 
-func TestConvergence_PreCheck_RejectsChangeLogMissingCriticalReference(t *testing.T) {
-	// CRITICAL finding is closed, but revision change log does not reference it.
+func TestConvergence_PreCheck_AllowsClosedCriticalNotInChangeLog(t *testing.T) {
+	// CRITICAL finding is already closed (resolved in a prior round) and the
+	// current revision change log does not reference it. This must NOT cause a
+	// failure — the finding was addressed in an earlier round.
 	tracker := makeTrackerWithCritical("F-001", StatusClosed)
+	judge := minimalJudge(VerdictPass)
+	revision := minimalRevision() // empty — no changes referencing F-001
+
+	result := RunPreCheck(judge, tracker, revision, 3, 2)
+
+	for _, f := range result.Failures {
+		if strings.Contains(f, "F-001") && strings.Contains(f, "not referenced") {
+			t.Errorf("closed CRITICAL should not require change-log reference, but got failure: %s", f)
+		}
+	}
+}
+
+func TestConvergence_PreCheck_RejectsOpenCriticalNotInChangeLog(t *testing.T) {
+	// CRITICAL finding is still open (raised) and not referenced in the change
+	// log. The pre-check must fail.
+	tracker := makeTrackerWithCritical("F-001", StatusRaised)
 	judge := minimalJudge(VerdictPass)
 	revision := minimalRevision() // empty — no changes at all
 
 	result := RunPreCheck(judge, tracker, revision, 3, 2)
 
 	if result.Passed {
-		t.Fatal("expected pre-check to fail when change log missing CRITICAL reference")
+		t.Fatal("expected pre-check to fail when open CRITICAL not referenced in change log")
 	}
 
 	found := false

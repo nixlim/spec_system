@@ -181,6 +181,12 @@ func (t *IssueTracker) TransitionIssue(findingID string, newStatus IssueStatus, 
 	issue.StatusHistory = append(issue.StatusHistory, change)
 	t.History[findingID] = append(t.History[findingID], change)
 
+	// Record the closing round on the finding itself so the UI can display it.
+	if IsTerminal(newStatus) && issue.Finding.RoundClosed == nil {
+		r := round
+		issue.Finding.RoundClosed = &r
+	}
+
 	if t.OnTransition != nil {
 		t.OnTransition(findingID, newStatus)
 	}

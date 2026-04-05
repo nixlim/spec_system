@@ -109,27 +109,27 @@ grill-spec adversarially reviews specs through four phases: Context Gathering, I
 
 ### 3.3 The Existing Manual Loop
 
-```
-User provides feature brief
-       |
-       v
-  /plan-spec  (Phase 1: discovery + human gate)
-       |
-       v
-  /plan-spec  (Phases 2-6: produce spec)
-       |
-       v
-  /grill-spec (adversarial review -> BLOCK/REVISE/PASS)
-       |
-       +-- PASS --> /taskify (decompose into tasks)
-       |
-       +-- BLOCK/REVISE --> /plan-spec --revise <spec> <review>
-                              |
-                              v
-                         /grill-spec (re-review)
-                              |
-                              +-- PASS --> /taskify
-                              +-- BLOCK/REVISE --> (repeat)
+```mermaid
+%%{init: {"theme": "neutral", "flowchart": {"defaultRenderer": "elk"}}}%%
+flowchart TD
+    USER([User provides feature brief])
+    PH1["/plan-spec<br/>Phase 1: discovery + human gate"]
+    PH2["/plan-spec<br/>Phases 2–6: produce spec"]
+    GS["/grill-spec<br/>Adversarial review"]
+    TASK(["/taskify — decompose into tasks"])
+    REVISE["/plan-spec --revise &lt;spec&gt; &lt;review&gt;"]
+    GS2["/grill-spec<br/>Re-review"]
+
+    USER --> PH1 --> PH2 --> GS
+    GS -- PASS --> TASK
+    GS -- "BLOCK / REVISE" --> REVISE --> GS2
+    GS2 -- PASS --> TASK
+    GS2 -- "BLOCK / REVISE" --> REVISE
+
+    classDef cmd fill:#ffffff,stroke:#000000,color:#000000
+    classDef terminal fill:#1a1a1a,stroke:#1a1a1a,color:#ffffff
+    class PH1,PH2,GS,REVISE,GS2 cmd
+    class USER,TASK terminal
 ```
 
 **What the multi-agent system automates:** The review-revise loop between grill-spec and plan-spec --revise. It does NOT automate the Phase 1 human gates (requirements confirmation, ambiguity resolution) -- those remain human decisions.
@@ -140,81 +140,41 @@ User provides feature brief
 
 ### 4.1 High-Level Architecture
 
-```
-                    +------------------+
-                    |   User Request   |
-                    |  + Source Docs    |
-                    +--------+---------+
-                             |
-                             v
-                  +--------------------+
-                  |    DISCOVERY        |  <-- plan-spec Phase 1
-                  | Discovery Agent    |
-                  | produces questions  |
-                  | + requirements     |
-                  +--------+-----------+
-                             |
-                             v
-                  +--------------------+
-                  |   HUMAN_GATE_1     |  <-- user confirms requirements
-                  | (system pauses)    |
-                  +--------+-----------+
-                             |
-                             v
-                  +--------------------+
-                  |    DRAFTING         |  <-- plan-spec Phases 2-6
-                  | Drafter Agent      |
-                  | produces spec +    |
-                  | ambiguity warnings |
-                  +--------+-----------+
-                             |
-                             v
-                  +--------------------+
-                  |   HUMAN_GATE_2     |  <-- user resolves ambiguities
-                  | (system pauses)    |
-                  +--------+-----------+
-                             |
-                             v
-              +--------------+--------------+--------------+
-              |              |              |              |
-              v              v              v              v
-     +--------------+ +--------------+ +--------------+ +--------------+
-     |  Reviewer A  | |  Reviewer B  | |  Reviewer C  | |  Reviewer D  |
-     | Lenses 1-2   | | Lenses 3-4   | | Lenses 5-6   | | Lenses 7-8   |
-     | (Ambiguity,  | | (Inconsist,  | | (STRIDE,     | | (Incorrect,  |
-     | Incomplete)  | | Infeasib.)   | | Inoperab.)   | | Overcomplex) |
-     +--------------+ +--------------+ +--------------+ +--------------+
-              |              |              |              |
-              +--------------+--------------+--------------+
-                             |
-                             v
-                  +--------------------+
-                  |  ISSUE_MERGE       |  <-- deterministic code
-                  |  (parse JSON,      |
-                  |   dedup, rank)     |
-                  +--------+-----------+
-                             |
-                             v
-                  +--------------------+
-                  |    REVISING         |  <-- plan-spec --revise
-                  | Revision Agent     |
-                  +--------+-----------+
-                             |
-                             v
-                  +--------------------+
-                  |    JUDGING          |
-                  | Convergence Judge  |
-                  +--------+-----------+
-                             |
-                      +------+------+
-                      |             |
-                 CONVERGED     NOT CONVERGED
-                      |             |
-                      v             +-> (back to REVIEWING)
-              +-----------+
-              | FINALIZED |
-              | Final Spec|
-              +-----------+
+```mermaid
+%%{init: {"theme": "neutral", "flowchart": {"defaultRenderer": "elk"}}}%%
+flowchart TD
+    USER(["User Request + Source Docs"])
+    DISC[DISCOVERY<br/>Discovery Agent<br/>plan-spec Phase 1]
+    HG1[/HUMAN_GATE_1<br/>User confirms requirements\]
+    DRAFT[DRAFTING<br/>Drafter Agent<br/>plan-spec Phases 2–6]
+    HG2[/HUMAN_GATE_2<br/>User resolves ambiguities\]
+
+    subgraph REVS["Parallel Review"]
+        direction LR
+        RA[Reviewer A<br/>Ambiguity · Incompleteness]
+        RB[Reviewer B<br/>Consistency · Feasibility]
+        RC[Reviewer C<br/>STRIDE · Operability]
+        RD[Reviewer D<br/>Correctness · Complexity]
+    end
+
+    MERGE[ISSUE_MERGE<br/>Parse JSON · dedup · rank]
+    REVIS[REVISING<br/>Revision Agent]
+    JUDG[JUDGING<br/>Convergence Judge]
+    FIN[FINALIZED<br/>Final Spec]
+
+    USER --> DISC --> HG1 --> DRAFT --> HG2
+    HG2 --> RA & RB & RC & RD
+    RA & RB & RC & RD --> MERGE
+    MERGE --> REVIS --> JUDG
+    JUDG -- "PASS — converged" --> FIN
+    JUDG -- "REVISE / BLOCK — not converged" --> REVS
+
+    classDef agent fill:#ffffff,stroke:#000000,color:#000000
+    classDef gate fill:#e8e8e8,stroke:#000000,color:#000000,stroke-dasharray:5 3
+    classDef terminal fill:#1a1a1a,stroke:#1a1a1a,color:#ffffff
+    class DISC,DRAFT,RA,RB,RC,RD,MERGE,REVIS,JUDG,FIN agent
+    class HG1,HG2 gate
+    class USER terminal
 ```
 
 Note: Gates (HUMAN_GATE_1, HUMAN_GATE_2) are modelled as **states** (not transitions) for persistence and crash recovery. The system persists state before entering a gate and resumes from the gate state after restart.
