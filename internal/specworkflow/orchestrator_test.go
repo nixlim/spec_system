@@ -969,7 +969,12 @@ func TestOrchestratorCircuitBreakerMaxRounds(t *testing.T) {
 	feature := "test-feature"
 	specDir := filepath.Join(workspace, "specs", feature)
 
-	// Set max rounds to 1.
+	os.MkdirAll(filepath.Join(workspace, ".tasks"), 0o755)
+	os.MkdirAll(specDir, 0o755)
+	// After round-1 revision, CurrentSpecVersion=1; AssembleFinalSpec needs spec-v1.md.
+	os.WriteFile(filepath.Join(specDir, "spec-v1.md"), []byte("# Spec v1\n"), 0o644)
+
+	// Set max rounds to 1 so the first REVISE verdict triggers the exit condition.
 	orch.config.MaxRounds = 1
 
 	runner.SetOutput("Discovery Agent", orchDiscoveryOutput())
@@ -984,9 +989,16 @@ func TestOrchestratorCircuitBreakerMaxRounds(t *testing.T) {
 	}
 	runner.SetOutput("Reviewer Agent", orchReviewerOutputWith("reviewer", 1, critFindings))
 	runner.SetOutput("Reviser Agent", orchRevisionOutput(1))
+	// Judge returns REVISE — max rounds exceeded routes to HUMAN_GATE_FINAL
+	// (because HadCriticalFindings=true) rather than erroring.
 	runner.SetOutput("Judge Agent", orchJudgeRevise(1))
 
-	os.WriteFile(filepath.Join(specDir, "spec-v1.md"), []byte("# Spec v1\n"), 0o644)
+	taskRunner := &regressionTaskGraphRunner{
+		base:         runner,
+		taskGraphDir: filepath.Join(workspace, ".tasks"),
+		featureName:  feature,
+	}
+	orch.runner = taskRunner
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -996,26 +1008,25 @@ func TestOrchestratorCircuitBreakerMaxRounds(t *testing.T) {
 		})
 	}()
 
-	// Gate 1: confirm.
-	time.Sleep(50 * time.Millisecond)
-	orch.HandleGateResponse(GateResponse{Action: "confirm"})
-
-	// Gate 2: confirm.
-	time.Sleep(50 * time.Millisecond)
-	orch.HandleGateResponse(GateResponse{Action: "confirm"})
+	go func() {
+		sendGateResponse(orch, GateResponse{Action: "confirm"})  // Gate 1
+		sendGateResponse(orch, GateResponse{Action: "confirm"})  // Gate 2
+		sendGateResponse(orch, GateResponse{Action: "accept"})   // Gate Final (max rounds exit)
+		sendGateResponse(orch, GateResponse{Action: "approve"})  // Task review gate
+	}()
 
 	select {
 	case err := <-errCh:
 		if err != nil {
 			t.Fatalf("RunWorkflow returned error: %v", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("RunWorkflow timed out")
 	}
 
 	finalState := orch.sm.State()
-	if finalState.State != StateEscalated {
-		t.Errorf("expected ESCALATED from circuit breaker, got %s", finalState.State)
+	if finalState.State != StateComplete {
+		t.Errorf("expected COMPLETE after max-rounds exit, got %s", finalState.State)
 	}
 }
 

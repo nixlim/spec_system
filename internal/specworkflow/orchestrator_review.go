@@ -733,6 +733,26 @@ func (o *Orchestrator) handleJudging(state *WorkflowStateJSON, specDir string) e
 		}
 	case VerdictRevise:
 		state.Round++
+		// Check max rounds before attempting the transition — the MaxRoundsGuard
+		// would block it anyway, but we want a graceful escalation rather than an error.
+		roundResult := CheckMaxRounds(state.Round, o.config.MaxRounds)
+		if roundResult.Triggered {
+			log.Printf("[orchestrator] max review rounds reached (%d/%d) — advancing to finalization",
+				state.Round, o.config.MaxRounds)
+			o.emitter.Emit(NewCircuitBreakerEvent(roundResult.BreakerName, roundResult.CurrentValue, roundResult.Limit))
+			if state.HadCriticalFindings {
+				o.logTransition(StateJudging, StateHumanGateFinal)
+				if err := o.sm.Transition(StateHumanGateFinal); err != nil {
+					return fmt.Errorf("transition JUDGING -> HUMAN_GATE_FINAL (max rounds): %w", err)
+				}
+			} else {
+				o.logTransition(StateJudging, StateFinalized)
+				if err := o.sm.Transition(StateFinalized); err != nil {
+					return fmt.Errorf("transition JUDGING -> FINALIZED (max rounds): %w", err)
+				}
+			}
+			return nil
+		}
 		o.logTransition(StateJudging, StateReviewing)
 		if err := o.sm.Transition(StateReviewing); err != nil {
 			return fmt.Errorf("transition JUDGING -> REVIEWING: %w", err)
