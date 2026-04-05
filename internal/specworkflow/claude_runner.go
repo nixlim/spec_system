@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/foundry-zero/adversarial-spec-system/internal/process"
 )
 
 // ClaudeRunner implements AgentRunner by invoking the Claude CLI as a
@@ -45,6 +47,13 @@ type ClaudeRunner struct {
 	// validation. When set, --json-schema is appended to the CLI args.
 	// The CLI will validate the output against this schema.
 	JSONSchema string
+	// Tracker is an optional ProcessTracker for recording subprocess lifecycle.
+	// When set, Register is called after cmd.Start() and RecordEnd after cmd.Wait().
+	Tracker *process.ProcessTracker
+	// Feature identifies the workflow feature for process tracking events.
+	Feature string
+	// Role identifies the agent role for process tracking events.
+	Role string
 }
 
 // claudeOutput is the normalised result extracted from the Claude CLI output.
@@ -293,6 +302,18 @@ func (r *ClaudeRunner) Run(prompt string, outputPath string, timeoutSeconds int)
 	}
 	log.Printf("[claude-runner] process started (PID %d)", cmd.Process.Pid)
 
+	// Register with process tracker (if available).
+	if r.Tracker != nil {
+		if regErr := r.Tracker.Register(process.ProcessRecord{
+			Feature:   r.Feature,
+			Role:      r.Role,
+			PID:       cmd.Process.Pid,
+			StartedAt: startTime,
+		}); regErr != nil {
+			log.Printf("[claude-runner] WARNING: failed to register PID %d with process tracker: %v (process runs unmanaged)", cmd.Process.Pid, regErr)
+		}
+	}
+
 	// Read stdout fully.
 	stdoutData, readErr := io.ReadAll(stdoutPipe)
 	if readErr != nil {
@@ -317,6 +338,9 @@ func (r *ClaudeRunner) Run(prompt string, outputPath string, timeoutSeconds int)
 	// Check for context timeout.
 	if ctx.Err() == context.DeadlineExceeded {
 		log.Printf("[claude-runner] TIMEOUT after %v", timeout)
+		if r.Tracker != nil {
+			r.Tracker.RecordEnd(cmd.Process.Pid, 1)
+		}
 		return 1, stderrStr, 0, 0, fmt.Errorf("claude process timed out after %v", timeout)
 	}
 
@@ -328,8 +352,16 @@ func (r *ClaudeRunner) Run(prompt string, outputPath string, timeoutSeconds int)
 			log.Printf("[claude-runner] non-zero exit code: %d", code)
 		} else {
 			log.Printf("[claude-runner] process error: %v", waitErr)
+			if r.Tracker != nil {
+				r.Tracker.RecordEnd(cmd.Process.Pid, 1)
+			}
 			return 1, stderrStr, 0, 0, fmt.Errorf("claude process error: %w", waitErr)
 		}
+	}
+
+	// Record process end with tracker (if available).
+	if r.Tracker != nil {
+		r.Tracker.RecordEnd(cmd.Process.Pid, code)
 	}
 
 	// Parse the JSON output.
@@ -486,6 +518,9 @@ func (r *ClaudeRunner) CloneForAgent(agentName string) AgentRunner {
 		Timeout:      r.Timeout,
 		WorkspaceDir: r.WorkspaceDir,
 		Env:          envCopy,
+		Tracker:      r.Tracker,
+		Feature:      r.Feature,
+		Role:         agentName,
 	}
 }
 

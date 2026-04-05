@@ -20,6 +20,7 @@ import (
 
 	"github.com/foundry-zero/adversarial-spec-system/internal/codedoc"
 	"github.com/foundry-zero/adversarial-spec-system/internal/codereview"
+	"github.com/foundry-zero/adversarial-spec-system/internal/process"
 	"github.com/foundry-zero/adversarial-spec-system/internal/specworkflow"
 )
 
@@ -64,6 +65,7 @@ type WorkflowManager struct {
 	otelReceiver       *OTELReceiver
 	crManager          *CodeReviewManager
 	cdManager          *CodedocManager
+	processTracker     *process.ProcessTracker
 	mu                 sync.RWMutex
 }
 
@@ -110,6 +112,14 @@ func (m *WorkflowManager) SetMetricsStore(store *MetricsStore) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.metricsStore = store
+}
+
+// SetProcessTracker configures the process tracker for subprocess lifecycle
+// tracking. Must be called before starting any workflows.
+func (m *WorkflowManager) SetProcessTracker(tracker *process.ProcessTracker) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.processTracker = tracker
 }
 
 // SetOTELReceiver configures the OTEL receiver reference so the status
@@ -361,12 +371,15 @@ func (m *WorkflowManager) ResumeFromGate(featureName string) (*specworkflow.Orch
 	if beadsErr != nil {
 		return nil, fmt.Errorf("create orchestrator: %w", beadsErr)
 	}
+	runner := specworkflow.DefaultClaudeRunner(m.workspaceDir, m.otelPort, featureName, m.config.ClaudeModels.Default)
+	runner.Tracker = m.processTracker
+	runner.Feature = featureName
 	orchConfig := specworkflow.OrchestratorConfig{
 		WorkspaceDir:   m.workspaceDir,
 		FeatureName:    featureName,
 		SourceDocPaths: sourcePaths,
 		Config:         m.config,
-		Runner:         specworkflow.DefaultClaudeRunner(m.workspaceDir, m.otelPort, featureName, m.config.ClaudeModels.Default),
+		Runner:         runner,
 		Emitter:        specworkflow.NewFeatureEmitter(m.emitter, featureName),
 		BeadsClient:    beadsClient,
 	}
@@ -540,12 +553,15 @@ func HandleStartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create beads client: %v", beadsErr))
 			return
 		}
+		startRunner := specworkflow.DefaultClaudeRunner(wsDir, manager.otelPort, req.FeatureName, manager.config.ClaudeModels.Default)
+		startRunner.Tracker = manager.processTracker
+		startRunner.Feature = req.FeatureName
 		orchConfig := specworkflow.OrchestratorConfig{
 			WorkspaceDir:   wsDir,
 			FeatureName:    req.FeatureName,
 			SourceDocPaths: sourcePaths,
 			Config:         manager.config,
-			Runner:         specworkflow.DefaultClaudeRunner(wsDir, manager.otelPort, req.FeatureName, manager.config.ClaudeModels.Default),
+			Runner:         startRunner,
 			Emitter:        specworkflow.NewFeatureEmitter(manager.emitter, req.FeatureName),
 			BeadsClient:    beadsClient,
 		}
@@ -1325,12 +1341,15 @@ func HandleResumeWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create beads client: %v", beadsErr))
 			return
 		}
+		resumeRunner := specworkflow.DefaultClaudeRunner(manager.workspaceDir, manager.otelPort, req.FeatureName, manager.config.ClaudeModels.Default)
+		resumeRunner.Tracker = manager.processTracker
+		resumeRunner.Feature = req.FeatureName
 		orchConfig := specworkflow.OrchestratorConfig{
 			WorkspaceDir:   manager.workspaceDir,
 			FeatureName:    req.FeatureName,
 			SourceDocPaths: sourcePaths,
 			Config:         manager.config,
-			Runner:         specworkflow.DefaultClaudeRunner(manager.workspaceDir, manager.otelPort, req.FeatureName, manager.config.ClaudeModels.Default),
+			Runner:         resumeRunner,
 			Emitter:        specworkflow.NewFeatureEmitter(manager.emitter, req.FeatureName),
 			BeadsClient:    beadsClient,
 		}
@@ -2042,6 +2061,9 @@ func HandleReplayPhase(manager *WorkflowManager) http.HandlerFunc {
 			round := state.Gate1CorrectionCount + 1
 			// Discovery merge requires an agent runner.
 			runner := specworkflow.DefaultClaudeRunner(workspace, manager.otelPort, req.FeatureName, manager.config.ClaudeModels.Default)
+			runner.Tracker = manager.processTracker
+			runner.Feature = req.FeatureName
+			runner.Role = "discovery-merge"
 			timeout := manager.config.AgentTimeoutSeconds
 			if timeout == 0 {
 				timeout = 120
@@ -2051,6 +2073,9 @@ func HandleReplayPhase(manager *WorkflowManager) http.HandlerFunc {
 		case "drafting_combine":
 			version := state.Gate2RedraftCount + 1
 			runner := specworkflow.DefaultClaudeRunner(workspace, manager.otelPort, req.FeatureName, manager.config.ClaudeModels.Default)
+			runner.Tracker = manager.processTracker
+			runner.Feature = req.FeatureName
+			runner.Role = "drafting-combine"
 			timeout := manager.config.AgentTimeoutSeconds
 			if timeout == 0 {
 				timeout = 120

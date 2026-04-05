@@ -15,6 +15,8 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"io"
@@ -24,10 +26,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/foundry-zero/adversarial-spec-system/internal/api"
 	"github.com/foundry-zero/adversarial-spec-system/internal/codedoc"
 	"github.com/foundry-zero/adversarial-spec-system/internal/codereview"
+	"github.com/foundry-zero/adversarial-spec-system/internal/process"
 	"github.com/foundry-zero/adversarial-spec-system/internal/specworkflow"
 	"gopkg.in/yaml.v3"
 )
@@ -141,6 +145,47 @@ func main() {
 	workflowManager.SetMetricsStore(metricsStore)
 	log.Printf("[main] metrics store opened at %s", metricsDBPath)
 
+	// --- Open process tracking store (shares the metrics DB file) ---
+	processDB, err := sql.Open("sqlite", metricsDBPath)
+	if err != nil {
+		log.Fatalf("failed to open process tracking db: %v", err)
+	}
+	defer processDB.Close()
+	processStore, err := process.NewSQLiteStore(processDB)
+	if err != nil {
+		log.Fatalf("failed to create process store: %v", err)
+	}
+
+	// Bridge EventEmitFunc → ChannelEmitter so process events reach WebSocket clients.
+	processEmitFn := func(eventType, featureName string, data interface{}) {
+		_ = emitter.Emit(specworkflow.EventEnvelope{
+			Event:       eventType,
+			FeatureName: featureName,
+			Data:        data,
+		})
+	}
+	processTracker := process.NewProcessTracker(processStore, processEmitFn)
+	killEscalationTimeout := time.Duration(config.KillEscalationTimeoutSeconds) * time.Second
+	killService := process.NewKillService(process.RealSignalSender{}, processTracker, killEscalationTimeout)
+
+	// Recover stale "running" records from a prior server crash/shutdown.
+	lostRecords, err := processStore.MarkLostOnStartup(context.Background())
+	if err != nil {
+		log.Fatalf("[process-tracker] failed to mark lost on startup: %v", err)
+	}
+	for _, rec := range lostRecords {
+		processEmitFn("process_lost", rec.Feature, process.ProcessLostEvent{
+			Type:    "process_lost",
+			PID:     rec.PID,
+			Feature: rec.Feature,
+			Role:    rec.Role,
+		})
+		log.Printf("[process-tracker] marked PID %d as lost (feature=%s, role=%s)", rec.PID, rec.Feature, rec.Role)
+	}
+
+	// Wire process tracker into workflow manager so runners get it.
+	workflowManager.SetProcessTracker(processTracker)
+
 	// Start WebSocket broadcast goroutine.
 	go wsHub.StartBroadcasting(emitter)
 
@@ -186,6 +231,10 @@ func main() {
 		handleTaskRouting(workflowManager).ServeHTTP(w, r)
 	})
 
+	// --- Process tracking endpoints ---
+	mux.HandleFunc("/api/processes", api.HandleListProcesses(processTracker))
+	mux.HandleFunc("/api/processes/", api.HandleKillProcess(killService))
+
 	// --- Workflow control endpoints (retry/reset/restart/resume/rewind) ---
 	mux.HandleFunc("/api/workflow/retry", api.HandleRetryWorkflow(workflowManager))
 	mux.HandleFunc("/api/workflow/finalize", api.HandleFinalizeWorkflow(workflowManager))
@@ -204,10 +253,17 @@ func main() {
 	crManager := api.NewCodeReviewManager(absWorkspace, crConfig)
 	// Wire per-role runners and detect Codex CLI availability.
 	crReviewRunner := specworkflow.DefaultClaudeRunner(absWorkspace, *otelPort, "", crConfig.ClaudeModels.For("reviewer"))
+	crReviewRunner.Tracker = processTracker
+	crReviewRunner.Role = "reviewer"
 	crFixRunner := specworkflow.DefaultClaudeRunner(absWorkspace, *otelPort, "", crConfig.ClaudeModels.For("fixer"))
+	crFixRunner.Tracker = processTracker
+	crFixRunner.Role = "fixer"
 	var crCodexRunner specworkflow.AgentRunner
 	if _, codexErr := exec.LookPath("codex"); codexErr == nil {
-		crCodexRunner = specworkflow.DefaultCodexRunner("", absWorkspace, specworkflow.ReviewerOutputSchema())
+		cr := specworkflow.DefaultCodexRunner("", absWorkspace, specworkflow.ReviewerOutputSchema())
+		cr.Tracker = processTracker
+		cr.Role = "reviewer"
+		crCodexRunner = cr
 		log.Printf("[codereview] codex CLI detected — dual-provider code review enabled")
 	}
 	crManager.SetRunners(crReviewRunner, crCodexRunner, crFixRunner)
@@ -244,10 +300,15 @@ func main() {
 	cdManager := api.NewCodedocManager(absWorkspace, cdConfig)
 	// Per-role runners: reviewer/drafter/discovery share a base runner; merge uses its own.
 	cdRunner := specworkflow.DefaultClaudeRunner(absWorkspace, *otelPort, "", cdConfig.ClaudeModels.Default)
+	cdRunner.Tracker = processTracker
 	cdMergeRunner := specworkflow.DefaultClaudeRunner(absWorkspace, *otelPort, "", cdConfig.ClaudeModels.For("merge"))
+	cdMergeRunner.Tracker = processTracker
+	cdMergeRunner.Role = "merge"
 	var cdCodexRunner specworkflow.AgentRunner
 	if _, codexErr := exec.LookPath("codex"); codexErr == nil {
-		cdCodexRunner = specworkflow.DefaultCodexRunner("", absWorkspace, nil)
+		cd := specworkflow.DefaultCodexRunner("", absWorkspace, nil)
+		cd.Tracker = processTracker
+		cdCodexRunner = cd
 		log.Printf("[codedoc] codex CLI detected — dual-provider codedoc enabled")
 	}
 	cdManager.SetRunners(cdRunner, cdCodexRunner, cdMergeRunner)
@@ -362,6 +423,8 @@ func main() {
 	fmt.Printf("  GET  /api/workflow/{f}/source-docs  List workflow source docs\n")
 	fmt.Printf("  POST /api/tasks/{id}/approve   Approve a gate task\n")
 	fmt.Printf("  POST /api/tasks/{id}/reject    Reject a gate task\n")
+	fmt.Printf("  GET  /api/processes             List tracked processes\n")
+	fmt.Printf("  POST /api/processes/{pid}/kill  Kill a running agent\n")
 	fmt.Printf("  GET  /ws                       WebSocket event stream\n")
 	fmt.Printf("  GET  /api/messages             Workflow log messages\n")
 	fmt.Printf("  GET  /api/logs/server          Server log (ring buffer)\n")

@@ -151,6 +151,9 @@ type SpecWorkflowConfig struct {
 	// orchestrator logs a warning. Zero uses the default (24h).
 	// The warning is advisory only — polling continues (US-3 AC-8).
 	BeadsGateTimeout time.Duration `yaml:"beads_gate_timeout"`
+	// KillEscalationTimeoutSeconds is the duration in seconds to wait after
+	// SIGTERM before escalating to SIGKILL. Default: 10.
+	KillEscalationTimeoutSeconds int `yaml:"kill_escalation_timeout_seconds"`
 	// SkillPaths holds the filesystem paths to skill directories.
 	SkillPaths SkillPaths `yaml:"skill_paths"`
 }
@@ -177,6 +180,7 @@ func DefaultConfig() SpecWorkflowConfig {
 		AgentTimeoutSeconds:    300,
 		TaskifyMaxRetries:      3,
 		TaskReviewMaxRounds:    3,
+		KillEscalationTimeoutSeconds: 10,
 	}
 }
 
@@ -230,6 +234,9 @@ func (c *SpecWorkflowConfig) Validate() error {
 	}
 	if c.TaskReviewMaxRounds <= 0 {
 		return fmt.Errorf("task_review_max_rounds must be > 0, got %d", c.TaskReviewMaxRounds)
+	}
+	if c.KillEscalationTimeoutSeconds <= 0 {
+		return fmt.Errorf("kill_escalation_timeout_seconds must be > 0, got %d", c.KillEscalationTimeoutSeconds)
 	}
 	if c.SkillPaths.PlanSpec != "" {
 		if _, err := os.Stat(c.SkillPaths.PlanSpec); err != nil {

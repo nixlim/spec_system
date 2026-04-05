@@ -20,6 +20,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/foundry-zero/adversarial-spec-system/internal/process"
 )
 
 // ---------------------------------------------------------------------------
@@ -161,6 +163,10 @@ type OrchestratorConfig struct {
 	// BeadsClient is an optional Beads integration client. When nil, all Beads
 	// operations are silently skipped (graceful degradation).
 	BeadsClient BeadsClientInterface
+	// ProcessTracker is an optional tracker for subprocess lifecycle events.
+	// When set, internally created CodexRunners inherit it so their
+	// subprocesses are tracked alongside ClaudeRunner subprocesses.
+	ProcessTracker *process.ProcessTracker
 }
 
 // ---------------------------------------------------------------------------
@@ -550,8 +556,16 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 			lookPath = exec.LookPath
 		}
 		if _, err := lookPath("codex"); err == nil {
-			codexRunner = DefaultCodexRunner(cfg.Config.CodexModel, cfg.WorkspaceDir, ReviewerOutputSchema())
-			codexHoldoutRunner = DefaultCodexRunner(cfg.Config.CodexModel, cfg.WorkspaceDir, HoldoutOutputSchema())
+			cr := DefaultCodexRunner(cfg.Config.CodexModel, cfg.WorkspaceDir, ReviewerOutputSchema())
+			cr.Tracker = cfg.ProcessTracker
+			cr.Feature = cfg.FeatureName
+			cr.Role = "reviewer"
+			codexRunner = cr
+			ch := DefaultCodexRunner(cfg.Config.CodexModel, cfg.WorkspaceDir, HoldoutOutputSchema())
+			ch.Tracker = cfg.ProcessTracker
+			ch.Feature = cfg.FeatureName
+			ch.Role = "holdout"
+			codexHoldoutRunner = ch
 			log.Printf("[orchestrator] codex CLI detected — dual-provider review enabled")
 		} else {
 			log.Printf("[orchestrator] WARNING: codex CLI not found — codex reviewers disabled, running claude-only")
@@ -566,7 +580,11 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 			lookPathDraft = exec.LookPath
 		}
 		if _, err := lookPathDraft("codex"); err == nil {
-			codexDraftingRunner = DefaultCodexRunner(cfg.Config.CodexModel, cfg.WorkspaceDir, DrafterOutputSchema())
+			cdr := DefaultCodexRunner(cfg.Config.CodexModel, cfg.WorkspaceDir, DrafterOutputSchema())
+			cdr.Tracker = cfg.ProcessTracker
+			cdr.Feature = cfg.FeatureName
+			cdr.Role = "drafter"
+			codexDraftingRunner = cdr
 			log.Printf("[orchestrator] codex CLI detected — dual-provider drafting enabled")
 		} else {
 			log.Printf("[orchestrator] Codex unavailable, falling back to Claude-only drafting")
@@ -581,7 +599,11 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 			lookPath2 = exec.LookPath
 		}
 		if _, err := lookPath2("codex"); err == nil {
-			codexDiscoveryRunner = DefaultCodexRunner(cfg.Config.CodexModel, cfg.WorkspaceDir, DiscoveryOutputSchema())
+			cdis := DefaultCodexRunner(cfg.Config.CodexModel, cfg.WorkspaceDir, DiscoveryOutputSchema())
+			cdis.Tracker = cfg.ProcessTracker
+			cdis.Feature = cfg.FeatureName
+			cdis.Role = "discovery"
+			codexDiscoveryRunner = cdis
 			log.Printf("[orchestrator] codex CLI detected — dual-provider discovery enabled")
 		} else {
 			log.Printf("[orchestrator] Codex CLI not available, falling back to Claude-only discovery")

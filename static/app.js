@@ -1533,6 +1533,8 @@
             }
           });
         }).catch(function () {});
+        // Re-fetch Running Agents table to recover events missed during disconnect.
+        loadRunningAgents();
       }
     };
 
@@ -1638,6 +1640,20 @@
       }
     }
 
+    // Process tracking events apply globally (not filtered by selected workflow).
+    if (envelope.event === "process_started") {
+      onProcessStarted(data);
+      return;
+    }
+    if (envelope.event === "process_ended") {
+      onProcessEnded(data);
+      return;
+    }
+    if (envelope.event === "process_lost") {
+      onProcessLost(data);
+      return;
+    }
+
     // For all other events, only update UI panels if the event matches
     // the selected workflow (or no workflow is selected).
     if (!eventMatchesSelectedFeature(data)) return;
@@ -1701,6 +1717,7 @@
         if (tab === "issues") loadIssues();
         if (tab === "convergence") loadConvergence();
         if (tab === "messages") startMessagesPolling();
+        if (tab === "running-agents") loadRunningAgents();
 
         // Stop polling when leaving tabs
         if (tab !== "messages") stopMessagesPolling();
@@ -4220,6 +4237,180 @@
         }
       });
     }).catch(function () {});
+  }
+
+  // -----------------------------------------------------------------------
+  // Running Agents Tab
+  // -----------------------------------------------------------------------
+
+  function loadRunningAgents() {
+    fetchJSON("/api/processes").then(function (processes) {
+      var tbody = $("#running-agents-body");
+      var table = $("#running-agents-table");
+      var empty = $("#running-agents-empty");
+      if (!tbody || !table || !empty) return;
+      clearChildren(tbody);
+
+      if (!processes || processes.length === 0) {
+        table.style.display = "none";
+        empty.style.display = "";
+        return;
+      }
+
+      table.style.display = "";
+      empty.style.display = "none";
+
+      sortProcesses(processes).forEach(function (p) {
+        tbody.appendChild(buildProcessRow(p));
+      });
+    });
+  }
+
+  function sortProcesses(processes) {
+    var running = [];
+    var terminated = [];
+    processes.forEach(function (p) {
+      if (p.status === "running") {
+        running.push(p);
+      } else {
+        terminated.push(p);
+      }
+    });
+    running.sort(function (a, b) {
+      return (b.started_at || "").localeCompare(a.started_at || "");
+    });
+    terminated.sort(function (a, b) {
+      // Records with ended_at sort before those without (lost records),
+      // within each group sort descending by the available timestamp.
+      var aHasEnd = a.ended_at ? 1 : 0;
+      var bHasEnd = b.ended_at ? 1 : 0;
+      if (aHasEnd !== bHasEnd) return bHasEnd - aHasEnd;
+      var aKey = a.ended_at || a.started_at || "";
+      var bKey = b.ended_at || b.started_at || "";
+      return bKey.localeCompare(aKey);
+    });
+    return running.concat(terminated);
+  }
+
+  function buildProcessRow(p) {
+    var row = el("tr", { "data-pid": String(p.pid) });
+
+    row.appendChild(el("td", { textContent: p.feature || "-" }));
+    row.appendChild(el("td", { textContent: p.role || "-" }));
+    var pidCell = el("td", { textContent: String(p.pid), className: "pid-cell" });
+    row.appendChild(pidCell);
+    row.appendChild(el("td", { textContent: formatTimestamp(p.started_at) }));
+
+    var statusCell = el("td", {});
+    var badge = el("span", {
+      className: "status-badge " + processStatusClass(p.status),
+      textContent: p.status || "unknown"
+    });
+    statusCell.appendChild(badge);
+    row.appendChild(statusCell);
+
+    var actionCell = el("td", {});
+    if (p.status === "running") {
+      var killBtn = el("button", {
+        className: "btn btn-danger btn-sm",
+        textContent: "Kill"
+      });
+      killBtn.addEventListener("click", function () {
+        if (!confirm("Kill process PID " + p.pid + "?")) return;
+        killBtn.textContent = "Killing\u2026";
+        killBtn.disabled = true;
+        fetch("/api/processes/" + p.pid + "/kill", { method: "POST" })
+          .then(function (resp) {
+            if (resp.ok) return;
+            return resp.json().then(function (body) {
+              var msg = (body && body.error) || ("HTTP " + resp.status);
+              alert("Kill failed: " + msg);
+              killBtn.textContent = "Kill";
+              killBtn.disabled = false;
+            });
+          })
+          .catch(function () {
+            killBtn.textContent = "Kill";
+            killBtn.disabled = false;
+          });
+      });
+      actionCell.appendChild(killBtn);
+    }
+    row.appendChild(actionCell);
+
+    return row;
+  }
+
+  function processStatusClass(status) {
+    switch (status) {
+      case "running": return "status-running";
+      case "exited": return "status-exited";
+      case "killed": return "status-killed";
+      case "lost": return "status-lost";
+      default: return "";
+    }
+  }
+
+  function formatTimestamp(ts) {
+    if (!ts) return "-";
+    try {
+      var d = new Date(ts);
+      return d.toLocaleString();
+    } catch (e) {
+      return ts;
+    }
+  }
+
+  function onProcessStarted(data) {
+    var tbody = $("#running-agents-body");
+    var table = $("#running-agents-table");
+    var empty = $("#running-agents-empty");
+    if (!tbody) return;
+
+    // Show table, hide empty state.
+    if (table) table.style.display = "";
+    if (empty) empty.style.display = "none";
+
+    var row = buildProcessRow({
+      feature: data.feature,
+      role: data.role,
+      pid: data.pid,
+      started_at: data.started_at,
+      status: "running"
+    });
+    tbody.insertBefore(row, tbody.firstChild);
+  }
+
+  function onProcessEnded(data) {
+    updateProcessRow(data.pid, data.status || "exited");
+  }
+
+  function onProcessLost(data) {
+    updateProcessRow(data.pid, "lost");
+  }
+
+  function updateProcessRow(pid, newStatus) {
+    var tbody = $("#running-agents-body");
+    if (!tbody) return;
+
+    var rows = tbody.querySelectorAll("tr[data-pid='" + pid + "']");
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      // Update status cell (5th cell, index 4).
+      var statusCell = row.children[4];
+      if (statusCell) {
+        clearChildren(statusCell);
+        statusCell.appendChild(el("span", {
+          className: "status-badge " + processStatusClass(newStatus),
+          textContent: newStatus
+        }));
+      }
+      // Remove kill button (6th cell, index 5).
+      var actionCell = row.children[5];
+      if (actionCell) {
+        clearChildren(actionCell);
+      }
+    }
   }
 
   if (document.readyState === "loading") {

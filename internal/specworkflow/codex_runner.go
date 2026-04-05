@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/foundry-zero/adversarial-spec-system/internal/process"
 )
 
 // CodexRunner implements AgentRunner by invoking the Codex CLI as a
@@ -28,6 +30,12 @@ type CodexRunner struct {
 	WorkspaceDir string
 	// SchemaBytes is the JSON schema bytes written to a temp file for --output-schema.
 	SchemaBytes []byte
+	// Tracker is an optional ProcessTracker for recording subprocess lifecycle.
+	Tracker *process.ProcessTracker
+	// Feature identifies the workflow feature for process tracking events.
+	Feature string
+	// Role identifies the agent role for process tracking events.
+	Role string
 }
 
 // buildArgs constructs the argument list for the codex CLI invocation.
@@ -105,6 +113,18 @@ func (r *CodexRunner) Run(prompt string, outputPath string, timeoutSeconds int) 
 	}
 	log.Printf("[codex-runner] process started (PID %d)", cmd.Process.Pid)
 
+	// Register with process tracker (if available).
+	if r.Tracker != nil {
+		if regErr := r.Tracker.Register(process.ProcessRecord{
+			Feature:   r.Feature,
+			Role:      r.Role,
+			PID:       cmd.Process.Pid,
+			StartedAt: startTime,
+		}); regErr != nil {
+			log.Printf("[codex-runner] WARNING: failed to register PID %d with process tracker: %v (process runs unmanaged)", cmd.Process.Pid, regErr)
+		}
+	}
+
 	// Wait for completion or timeout.
 	type waitResult struct {
 		err error
@@ -135,14 +155,22 @@ func (r *CodexRunner) Run(prompt string, outputPath string, timeoutSeconds int) 
 		}
 	}
 
+	pid := cmd.Process.Pid
+
 	select {
 	case <-timeoutCtx.Done():
 		elapsed := time.Since(startTime)
 		if timeoutCtx.Err() == context.DeadlineExceeded {
 			killProcess(fmt.Sprintf("TIMEOUT after %v", timeout))
+			if r.Tracker != nil {
+				r.Tracker.RecordEnd(pid, 1)
+			}
 			return 1, stderrBuf.String(), 0, elapsed.Milliseconds(), fmt.Errorf("codex process timed out after %v", timeout)
 		}
 		killProcess("cancelled")
+		if r.Tracker != nil {
+			r.Tracker.RecordEnd(pid, 1)
+		}
 		return 1, stderrBuf.String(), 0, elapsed.Milliseconds(), fmt.Errorf("codex process cancelled")
 
 	case res := <-done:
@@ -173,8 +201,16 @@ func (r *CodexRunner) Run(prompt string, outputPath string, timeoutSeconds int) 
 				log.Printf("[codex-runner] non-zero exit code: %d", code)
 			} else {
 				log.Printf("[codex-runner] process error: %v", res.err)
+				if r.Tracker != nil {
+					r.Tracker.RecordEnd(pid, 1)
+				}
 				return 1, stderrStr, 0, elapsed.Milliseconds(), fmt.Errorf("codex process error: %w", res.err)
 			}
+		}
+
+		// Record process end with tracker (if available).
+		if r.Tracker != nil {
+			r.Tracker.RecordEnd(pid, code)
 		}
 
 		if code == 0 {

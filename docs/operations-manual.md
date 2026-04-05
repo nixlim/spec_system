@@ -530,8 +530,32 @@ enable_codex_reviewers: false
 
 - **Pipeline stepper**: Visual progress through all workflow stages
 - **Activity feed**: Timestamped log of agent dispatches, completions, costs, retries
+- **Running Agents tab**: Live process table — Feature, Role, PID, Start Time, Status; Kill button per running process
 - **Convergence tab**: Round-over-round progress (findings opened/closed)
 - **Issues tab**: All findings with severity, status, round raised, round closed
+
+### Process Monitoring
+
+The **Running Agents** tab shows every agent subprocess spawned since the server started:
+
+| Column | Description |
+|--------|-------------|
+| Feature | Workflow feature name |
+| Role | Agent role (Reviewer, Drafter, etc.) |
+| PID | OS process ID |
+| Start Time | When the subprocess was launched |
+| Status | `running` / `exited` / `killed` / `lost` |
+| Action | Kill button (visible for `running` processes only) |
+
+The table updates in real-time via WebSocket — no page reload needed. On reconnect, the table re-fetches from `GET /api/processes` automatically.
+
+**Killing a process**: Click the Kill button → the server sends SIGTERM, waits up to 10 seconds (configurable via `kill_escalation_timeout_seconds` in `config.yaml`), then escalates to SIGKILL if the process is still alive.
+
+**Startup recovery**: On server restart, any process record with `status: running` is automatically marked `lost` and a `process_lost` event is emitted. These records appear in the table with status `lost`.
+
+**API**:
+- `GET /api/processes?feature=X&status=running` — filtered list (max 500 records)
+- `POST /api/processes/{pid}/kill` — trigger kill; returns 200, 404 (not found), 409 (already terminated), 403 (permission denied)
 
 ### Telemetry
 
@@ -565,6 +589,9 @@ To disable telemetry: `--otel-port 0`
 | Missing spec versions after restart | Server restarted mid-agent | Resume — agent will re-run and regenerate output |
 | Gate panel disappeared | Browser refresh during gate | Refresh again — gate state is persisted |
 | `bd not found` in logs | Beads not installed | Install `bd` and run `bd ready`, or ignore if you don't need issue tracking |
+| Kill button returns 409 | Process already terminated | Table will update on next WebSocket event; refresh the Running Agents tab |
+| Kill button returns 403 | Permission denied (PID owned by another user) | Expected on multi-user hosts; only processes spawned by this server can be killed |
+| Running Agents tab shows stale data after reconnect | Reconnect did not trigger re-fetch | Fixed in latest build; re-fetch fires automatically in `wasReconnect` WS branch |
 | Codex agents not running | Codex CLI not on PATH | Install Codex CLI; server auto-detects on startup |
 | Task graph validation fails repeatedly | DAG cycles or missing required fields | Check Messages tab for `taskval` errors; manually edit task JSON if needed |
 | JSON validation failures | Agent wrapping JSON in markdown | System auto-extracts JSON; retry with error feedback happens automatically |

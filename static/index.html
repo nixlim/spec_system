@@ -21,6 +21,7 @@
       </div>
       <ul class="nav-tabs">
         <li><button class="nav-tab active" data-tab="controls">Controls</button></li>
+        <li><button class="nav-tab" data-tab="running-agents">Running Agents</button></li>
         <li><button class="nav-tab" data-tab="spec">Spec</button></li>
         <li><button class="nav-tab" data-tab="issues">Issues</button></li>
         <li><button class="nav-tab" data-tab="convergence">Convergence</button></li>
@@ -350,6 +351,27 @@
         <div id="messages-container" class="messages-log">
           <!-- Message entries rendered here -->
         </div>
+      </section>
+
+      <!-- Running Agents Tab -->
+      <section id="tab-running-agents" class="tab-panel">
+        <h2>Running Agents</h2>
+        <div id="running-agents-empty" class="card" style="display:none">
+          <p class="workflow-empty">No agent processes recorded.</p>
+        </div>
+        <table id="running-agents-table" class="table card" style="display:none">
+          <thead>
+            <tr>
+              <th>Feature</th>
+              <th>Role</th>
+              <th>PID</th>
+              <th>Start Time</th>
+              <th>Status</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="running-agents-body"></tbody>
+        </table>
       </section>
     </main>
   </div>

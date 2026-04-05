@@ -2049,3 +2049,44 @@ code {
   font-family: var(--font-mono);
   font-size: 12px;
 }
+
+/* --- Running Agents Tab --- */
+
+.status-badge {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  padding: 2px 8px;
+  border-radius: var(--radius);
+  display: inline-block;
+}
+
+.status-badge.status-running {
+  color: var(--color-primary);
+  background: var(--color-primary-dim);
+  border: 1px solid rgba(0, 200, 150, 0.3);
+}
+
+.status-badge.status-exited {
+  color: var(--color-text-muted);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+}
+
+.status-badge.status-killed {
+  color: var(--sev-critical);
+  background: var(--sev-critical-bg);
+  border: 1px solid var(--sev-critical-border);
+}
+
+.status-badge.status-lost {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+}
+
+.pid-cell {
+  font-family: var(--font-mono);
+  text-align: right;
+}

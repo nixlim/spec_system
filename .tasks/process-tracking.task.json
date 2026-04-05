@@ -1,0 +1,265 @@
+{
+  "version": "0.1.0",
+  "tasks": [
+    {
+      "task_id": "pt-process-types",
+      "task_name": "Define process tracking types and ProcessStore interface in internal/process package",
+      "goal": "A new internal/process package exists with ProcessRecord struct (feature, role, pid, status, started_at, ended_at, exit_code fields), ProcessEvent types (process_started, process_ended, process_lost), ProcessStore interface (Save, UpdateEnd, MarkLostOnStartup, List with filter params), SignalSender interface, and all status constants (running, exited, killed, lost).",
+      "inputs": [
+        {"name": "spec", "type": "string", "constraints": "FR-001 through FR-006, FR-026", "source": "docs/specs/process-tracking-spec.md"}
+      ],
+      "outputs": [
+        {"name": "types_source", "type": "Go source", "constraints": "all structs have json tags; status constants are typed strings", "destination": "internal/process/types.go"},
+        {"name": "store_interface", "type": "Go source", "constraints": "ProcessStore interface with Save, UpdateEnd, MarkLostOnStartup, List methods", "destination": "internal/process/store.go"},
+        {"name": "signal_interface", "type": "Go source", "constraints": "SignalSender interface with Send(pid int, sig syscall.Signal) error", "destination": "internal/process/signal.go"}
+      ],
+      "acceptance": [
+        "ProcessRecord struct has fields: Feature string, Role string, PID int, Status string, StartedAt time.Time, EndedAt *time.Time, ExitCode *int with json tags matching spec Dataset 3",
+        "StatusRunning, StatusExited, StatusKilled, StatusLost constants equal 'running', 'exited', 'killed', 'lost'",
+        "ProcessStartedEvent struct has fields: Type string, Feature string, Role string, PID int, StartedAt string (RFC3339) with json tags",
+        "ProcessEndedEvent struct has fields: Type string, PID int, ExitCode int, Status string, EndedAt string (RFC3339) with json tags",
+        "ProcessLostEvent struct has fields: Type string, PID int, Feature string, Role string with json tags",
+        "ProcessStore interface declares Save, UpdateEnd, MarkLostOnStartup, List methods",
+        "SignalSender interface declares Send(pid int, sig syscall.Signal) error method",
+        "go build ./internal/process/... succeeds with zero errors"
+      ],
+      "depends_on": {"status": "N/A", "reason": "First task, new package with no dependencies on other new code"},
+      "constraints": ["Package must be internal/process per FR-026", "Must not import internal/specworkflow or internal/api"],
+      "files_scope": ["internal/process/types.go", "internal/process/store.go", "internal/process/signal.go"],
+      "priority": "critical",
+      "estimate": "small"
+    },
+    {
+      "task_id": "pt-sqlite-store",
+      "task_name": "Implement SQLite-backed ProcessStore with startup recovery",
+      "goal": "A SQLiteProcessStore implementation persists ProcessRecord to an agent_processes table in the existing metrics.db, supports Save/UpdateEnd/List with feature and status filters, and MarkLostOnStartup atomically updates all status=running records to status=lost and returns the affected records.",
+      "inputs": [
+        {"name": "store_interface", "type": "Go interface", "constraints": "ProcessStore from pt-process-types", "source": "internal/process/store.go"},
+        {"name": "db_path", "type": "string", "constraints": "path to existing metrics.db", "source": "Server config"}
+      ],
+      "outputs": [
+        {"name": "sqlite_store", "type": "Go source", "constraints": "implements ProcessStore; uses modernc.org/sqlite driver", "destination": "internal/process/sqlite_store.go"},
+        {"name": "store_tests", "type": "Go source", "constraints": "covers all 11 status transition cases from Dataset 2", "destination": "internal/process/sqlite_store_test.go"}
+      ],
+      "acceptance": [
+        "TestProcessStore_SaveAndLoad: save a record, query it back, all fields match including feature, role, pid, status, started_at",
+        "TestProcessStore_MarkLostOnStartup: insert records with status=running, call MarkLostOnStartup, verify status changed to lost",
+        "TestProcessStore_TerminatedRecordsUnchanged: insert records with status=exited and status=killed, call MarkLostOnStartup, verify both records retain original status",
+        "List with feature filter returns only records matching that feature",
+        "List with status filter returns only records matching that status",
+        "List with invalid status parameter returns error",
+        "List returns max 500 records ordered by started_at descending per FR-006",
+        "go test ./internal/process/ -run TestProcessStore passes"
+      ],
+      "depends_on": ["pt-process-types"],
+      "constraints": ["Use modernc.org/sqlite driver consistent with existing codebase", "Bounded retries (max 3, exponential backoff capped at 500ms) on write failures per FR-004", "MarkLostOnStartup failure must return error (caller handles fatal exit per FR-005)"],
+      "files_scope": ["internal/process/sqlite_store.go", "internal/process/sqlite_store_test.go"],
+      "priority": "critical",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "pt-process-tracker",
+      "task_name": "Implement ProcessTracker with runtime map, event emission, and kill-request flag",
+      "goal": "ProcessTracker manages an in-memory runtime map of pid to os.Process, emits ProcessStartedEvent/ProcessEndedEvent/ProcessLostEvent via a broadcast callback, persists records via ProcessStore, and supports atomic running-to-kill-requested transitions under a sync.Mutex.",
+      "inputs": [
+        {"name": "store", "type": "ProcessStore", "constraints": "initialized SQLiteProcessStore", "source": "internal/process/sqlite_store.go"},
+        {"name": "broadcast_fn", "type": "func(interface{})", "constraints": "sends event to WebSocket hub", "source": "internal/api/websocket.go"}
+      ],
+      "outputs": [
+        {"name": "tracker_source", "type": "Go source", "constraints": "ProcessTracker struct with RecordStart, RecordEnd, MarkKillRequested, IsKillRequested, GetProcess, StartupRecovery methods", "destination": "internal/process/tracker.go"},
+        {"name": "tracker_tests", "type": "Go source", "constraints": "covers event emission, kill flag, runtime map lifecycle", "destination": "internal/process/tracker_test.go"}
+      ],
+      "acceptance": [
+        "TestProcessTracker_EmitsStartedEvent: RecordStart emits ProcessStartedEvent with correct feature, role, pid, started_at via broadcast callback",
+        "TestProcessTracker_EmitsEndedEvent: RecordEnd emits ProcessEndedEvent with correct pid, exit_code, status=exited, ended_at",
+        "TestProcessTracker_EmitsKilledStatus: RecordEnd with kill-requested flag set emits status=killed",
+        "TestProcessTracker_EmitsEndedEvent_WithoutFeatureRole: ProcessEndedEvent does not require feature/role fields per Dataset 3",
+        "TestProcessTracker_NoEventOnStoreFailure: if ProcessStore.Save fails, no ProcessStartedEvent is emitted and no runtime map entry exists",
+        "TestProcessTracker_MarkKillRequested: transitions running PID to kill-requested; second call returns error",
+        "TestKillService_KillFlagRace: concurrent natural exit and kill request results in status=killed",
+        "RecordStart adds pid to runtime map; RecordEnd removes pid from runtime map",
+        "StartupRecovery calls MarkLostOnStartup and emits ProcessLostEvent for each affected record",
+        "go test ./internal/process/ -run TestProcessTracker passes"
+      ],
+      "depends_on": ["pt-sqlite-store"],
+      "constraints": ["Runtime map protected by sync.Mutex per spec Assumptions", "Kill-requested flag checked atomically under same mutex", "Nil-safe: if tracker is nil, all methods are no-ops"],
+      "files_scope": ["internal/process/tracker.go", "internal/process/tracker_test.go"],
+      "priority": "critical",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "pt-kill-service",
+      "task_name": "Implement KillService with SIGTERM, SIGKILL escalation, and cancellation",
+      "goal": "KillService validates PID, sends SIGTERM via SignalSender, starts a 10-second escalation timer that sends SIGKILL if the process has not exited, and cancels the timer if the process exits before the timeout.",
+      "inputs": [
+        {"name": "tracker", "type": "ProcessTracker", "constraints": "initialized with runtime map", "source": "internal/process/tracker.go"},
+        {"name": "signal_sender", "type": "SignalSender", "constraints": "real or mock implementation", "source": "internal/process/signal.go"},
+        {"name": "escalation_timeout", "type": "time.Duration", "constraints": "default 10s, configurable per FR-024", "source": "Config"}
+      ],
+      "outputs": [
+        {"name": "kill_service", "type": "Go source", "constraints": "KillService struct with Kill method returning typed errors", "destination": "internal/process/kill_service.go"},
+        {"name": "kill_tests", "type": "Go source", "constraints": "covers all kill scenarios from TDD plan tests 7-13", "destination": "internal/process/kill_service_test.go"}
+      ],
+      "acceptance": [
+        "TestKillService_SendsSIGTERM: Kill calls SignalSender.Send with SIGTERM for a running PID",
+        "TestKillService_EscalatesToSIGKILL: when process does not exit within timeout, SignalSender.Send is called with SIGKILL",
+        "TestKillService_CancelsEscalation: when process exits before timeout, no SIGKILL is sent",
+        "TestKillService_AlreadyTerminated: Kill returns ErrAlreadyTerminated for PID with status != running",
+        "TestKillService_InvalidPID: Kill returns ErrInvalidPID for PID <= 0 without calling SignalSender",
+        "TestKillService_UnknownPID: Kill returns ErrNotFound for PID not in process store",
+        "TestKillService_EPERM: EPERM from SignalSender surfaces as ErrPermissionDenied",
+        "TestKillService_SimultaneousRequests: second concurrent kill for same PID returns ErrAlreadyTerminated",
+        "On graceful server shutdown, pending escalation timers are cancelled and SIGKILL sent immediately per FR-009",
+        "go test ./internal/process/ -run TestKillService passes"
+      ],
+      "depends_on": ["pt-process-tracker"],
+      "constraints": ["Escalation uses select with cancel channel, not sleep per Dataset 4 note", "Timeout configurable via constructor parameter"],
+      "files_scope": ["internal/process/kill_service.go", "internal/process/kill_service_test.go"],
+      "priority": "high",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "pt-runner-integration",
+      "task_name": "Inject ProcessTracker into ClaudeRunner and CodexRunner with event emission",
+      "goal": "ClaudeRunner and CodexRunner each have Feature, Role, and Tracker fields; Run calls Tracker.RecordStart after cmd.Start() succeeds and Tracker.RecordEnd after cmd.Wait() returns; all existing runner tests pass without modification.",
+      "inputs": [
+        {"name": "tracker", "type": "ProcessTracker", "constraints": "nil-safe", "source": "internal/process/tracker.go"},
+        {"name": "existing_runners", "type": "Go source", "constraints": "ClaudeRunner and CodexRunner structs", "source": "internal/specworkflow/claude_runner.go, internal/specworkflow/codex_runner.go"}
+      ],
+      "outputs": [
+        {"name": "modified_runners", "type": "Go source", "constraints": "Feature, Role, Tracker fields added; Run emits events", "destination": "internal/specworkflow/claude_runner.go, internal/specworkflow/codex_runner.go"},
+        {"name": "integration_tests", "type": "Go source", "constraints": "verify events via channel with real subprocess", "destination": "internal/specworkflow/runner_process_test.go"}
+      ],
+      "acceptance": [
+        "ClaudeRunner struct has Feature string, Role string, Tracker process.ProcessTracker fields",
+        "CodexRunner struct has Feature string, Role string, Tracker process.ProcessTracker fields",
+        "All six ClaudeRunner clone methods propagate Feature, Role, Tracker via shallow copy (no code changes needed, verified by test)",
+        "TestClaudeRunner_EmitsProcessEvents: real subprocess start emits process_started event with correct feature and role",
+        "TestCodexRunner_EmitsProcessEvents: real subprocess start emits process_started event with correct feature and role",
+        "TestNoEventOnStartFailure: bad binary path produces no process_started event and no store record",
+        "All existing TestClaudeRunner_* and TestCodexRunner_* tests pass without modification (SC-006)",
+        "go test ./internal/specworkflow/ -run TestClaudeRunner passes",
+        "go test ./internal/specworkflow/ -run TestCodexRunner passes"
+      ],
+      "depends_on": ["pt-process-tracker"],
+      "constraints": ["Tracker is nil-safe: nil tracker means no-op, existing tests unaffected", "Feature and Role set at construction time in orchestrator"],
+      "files_scope": ["internal/specworkflow/claude_runner.go", "internal/specworkflow/codex_runner.go", "internal/specworkflow/runner_process_test.go"],
+      "priority": "high",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "pt-http-handlers",
+      "task_name": "Implement GET /api/processes and POST /api/processes/{pid}/kill HTTP handlers",
+      "goal": "GET /api/processes returns a JSON array of process records with optional feature and status query param filters; POST /api/processes/{pid}/kill validates the PID, delegates to KillService, and returns appropriate HTTP status codes (200, 400, 403, 404, 409).",
+      "inputs": [
+        {"name": "kill_service", "type": "KillService", "constraints": "initialized", "source": "internal/process/kill_service.go"},
+        {"name": "store", "type": "ProcessStore", "constraints": "initialized", "source": "internal/process/sqlite_store.go"}
+      ],
+      "outputs": [
+        {"name": "handler_source", "type": "Go source", "constraints": "ProcessHandler struct with List and Kill methods", "destination": "internal/process/handler.go"},
+        {"name": "handler_tests", "type": "Go source", "constraints": "covers TDD tests 14-19", "destination": "internal/process/handler_test.go"}
+      ],
+      "acceptance": [
+        "TestProcessHandler_List: GET /api/processes returns 200 with JSON array of records",
+        "TestProcessHandler_List_InvalidStatusParam: GET /api/processes?status=pending returns 400 with error JSON",
+        "TestProcessHandler_Kill_OK: POST /api/processes/12345/kill for running PID returns 200 with {\"status\":\"kill_accepted\"}",
+        "TestProcessHandler_Kill_404: POST for unknown PID returns 404 with {\"error\":\"process 99999 not found\"}",
+        "TestProcessHandler_Kill_409: POST for exited PID returns 409",
+        "TestProcessHandler_Kill_403: POST when EPERM returns 403 with {\"error\":\"permission denied: cannot signal process ...\"}",
+        "TestProcessHandler_Kill_InvalidPID: POST with pid=0, pid=-1, pid=abc returns 400",
+        "go test ./internal/process/ -run TestProcessHandler passes"
+      ],
+      "depends_on": ["pt-kill-service"],
+      "constraints": ["JSON responses with Content-Type: application/json", "Same router pattern as existing handlers in cmd/specworkflow/main.go"],
+      "files_scope": ["internal/process/handler.go", "internal/process/handler_test.go"],
+      "priority": "high",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "pt-server-wiring",
+      "task_name": "Wire ProcessTracker, ProcessStore, KillService, and handlers into server startup",
+      "goal": "Server main.go initializes SQLiteProcessStore, ProcessTracker, KillService, registers GET /api/processes and POST /api/processes/{pid}/kill routes, runs startup recovery before opening the HTTP listener, and passes tracker to runner constructors.",
+      "inputs": [
+        {"name": "all_process_components", "type": "Go packages", "constraints": "from pt-process-types through pt-http-handlers", "source": "internal/process/"},
+        {"name": "server_main", "type": "Go source", "constraints": "existing server setup", "source": "cmd/specworkflow/main.go"}
+      ],
+      "outputs": [
+        {"name": "modified_main", "type": "Go source", "constraints": "ProcessStore, ProcessTracker, KillService initialized; routes registered; recovery runs before listen", "destination": "cmd/specworkflow/main.go"},
+        {"name": "config_update", "type": "Go source", "constraints": "KillEscalationTimeout field added to config", "destination": "internal/specworkflow/config.go"}
+      ],
+      "acceptance": [
+        "Server starts successfully with ProcessStore, ProcessTracker, and KillService initialized",
+        "GET /api/processes is reachable and returns 200",
+        "POST /api/processes/99999/kill returns 404 (proves route is registered)",
+        "Startup recovery completes before HTTP listener opens (FR-005)",
+        "If startup recovery fails, server exits with fatal error (FR-005)",
+        "KillEscalationTimeout is configurable via YAML config with default 10s (FR-024)",
+        "ProcessTracker is passed to runner constructors with feature and role set",
+        "go build ./cmd/specworkflow/ succeeds"
+      ],
+      "depends_on": ["pt-http-handlers", "pt-runner-integration"],
+      "constraints": ["Recovery must complete before HTTP listener per FR-005", "Config uses existing YAML pattern"],
+      "files_scope": ["cmd/specworkflow/main.go", "internal/specworkflow/config.go", "config.yaml"],
+      "priority": "high",
+      "estimate": "small"
+    },
+    {
+      "task_id": "pt-running-agents-ui",
+      "task_name": "Build Running Agents sidebar tab with table, real-time updates, and kill button",
+      "goal": "A Running Agents tab in the sidebar (between Controls and Spec) displays a table with columns Feature, Role, PID, Start Time, Status, Action; populates initial state from GET /api/processes; updates rows in real time via WebSocket events; shows Kill button only on running rows with confirmation prompt and Killing... state.",
+      "inputs": [
+        {"name": "api_endpoints", "type": "HTTP endpoints", "constraints": "GET /api/processes, POST /api/processes/{pid}/kill", "source": "internal/process/handler.go"},
+        {"name": "websocket_events", "type": "JSON events", "constraints": "process_started, process_ended, process_lost per Dataset 3", "source": "WebSocket hub"}
+      ],
+      "outputs": [
+        {"name": "html_update", "type": "HTML", "constraints": "new sidebar tab with table markup", "destination": "static/index.html"},
+        {"name": "js_update", "type": "JavaScript", "constraints": "fetch, WebSocket event handlers, kill flow", "destination": "static/app.js"},
+        {"name": "css_update", "type": "CSS", "constraints": "table styling, monospace PID, status badges", "destination": "static/style.css"}
+      ],
+      "acceptance": [
+        "Running Agents tab appears in sidebar between Controls and Spec (FR-016)",
+        "Table has columns: Feature, Role, PID, Start Time, Status, Action (FR-017)",
+        "PID column is right-aligned with monospace font (FR-017)",
+        "Running rows are pinned to top of table; within each status group, sorted by started_at descending (FR-017)",
+        "Tab fetches GET /api/processes on every open/activation (FR-018)",
+        "New process_started WebSocket event adds a row without page reload (FR-018)",
+        "process_ended and process_lost events update existing rows in real time (FR-019)",
+        "Kill button shown only on status=running rows (FR-020)",
+        "Kill button shows confirmation prompt before sending request (FR-021)",
+        "Kill button becomes disabled with label 'Killing...' after request sent (FR-022)",
+        "On WebSocket reconnect while in Killing... state, tab re-fetches GET /api/processes (FR-022)",
+        "Empty state shows 'No agent processes recorded.' when no records exist (FR-023)",
+        "Kill cancel aborts without sending any request"
+      ],
+      "depends_on": ["pt-server-wiring"],
+      "constraints": ["No external JS frameworks; must use existing vanilla JS patterns", "Must not duplicate stdout/stderr streaming already in Messages tab"],
+      "files_scope": ["static/index.html", "static/app.js", "static/style.css"],
+      "priority": "high",
+      "estimate": "medium"
+    },
+    {
+      "task_id": "pt-integration-tests",
+      "task_name": "Write integration tests for full process lifecycle and kill flow",
+      "goal": "Integration tests verify the complete flow: runner start emits event, process record persists across store reopen, kill endpoint terminates a real subprocess, SIGKILL escalation fires for SIGTERM-ignoring process, and startup recovery marks stale records as lost.",
+      "inputs": [
+        {"name": "all_components", "type": "Go packages", "constraints": "fully wired system", "source": "internal/process/, internal/specworkflow/, internal/api/"}
+      ],
+      "outputs": [
+        {"name": "integration_tests", "type": "Go source", "constraints": "real SQLite, real subprocess, real HTTP handlers", "destination": "internal/process/integration_test.go"}
+      ],
+      "acceptance": [
+        "TestProcessStore_Integration: write record, close DB, reopen, query returns same record (TDD test 23)",
+        "TestKillFlow_Integration: start real subprocess, call kill endpoint, verify process is dead within 15 seconds (TDD test 24)",
+        "TestKillFlow_EscalationIntegration: start SIGTERM-ignoring subprocess, call kill, verify SIGKILL fires after ~10s (TDD test 25)",
+        "TestStartupRecovery_Integration: write running record, call startup recovery, verify status=lost; verify recovery failure causes error return (TDD test 26)",
+        "All tests use real SQLite in temp directory, not mocks",
+        "go test ./internal/process/ -run Integration passes"
+      ],
+      "depends_on": ["pt-server-wiring"],
+      "constraints": ["Tests must clean up temp files and subprocesses", "SIGKILL escalation test may need build tag for CI environments that restrict signals"],
+      "files_scope": ["internal/process/integration_test.go"],
+      "priority": "medium",
+      "estimate": "medium"
+    }
+  ]
+}

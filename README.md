@@ -367,6 +367,7 @@ The web dashboard provides real-time visibility into workflow execution. Multipl
 ### Tabs
 
 - **Controls** — Active workflow list, start new workflows (spec, code review, codedoc), upload source documents, assign documents to workflows, manage workspace
+- **Running Agents** — Live table of all agent subprocesses (Feature, Role, PID, Start Time, Status); real-time updates via WebSocket; Kill button sends SIGTERM → SIGKILL
 - **Spec** — View and diff spec versions as they evolve through rounds
 - **Issues** — Track findings with severity/status/lens filtering; shows round raised and round closed for each finding
 - **Convergence** — Monitor review/revision convergence metrics and round history
