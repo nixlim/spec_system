@@ -5,14 +5,20 @@
 package specworkflow
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -33,6 +39,81 @@ type GoalInput struct {
 	// CodePath is an optional path to the target code repository. When set,
 	// the discovery agent will explore the codebase to inform its analysis.
 	CodePath string
+}
+
+// ---------------------------------------------------------------------------
+// Feature name validation
+// ---------------------------------------------------------------------------
+
+// featureNamePattern matches valid feature names: alphanumeric, hyphens, underscores.
+var featureNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// ValidateFeatureName checks that the feature name contains only alphanumeric
+// characters, hyphens, and underscores. It returns an error for empty strings
+// or names containing colons, slashes, spaces, or other special characters.
+// This validation prevents corruption of the KV namespace which uses colons
+// as separators.
+func ValidateFeatureName(name string) error {
+	if name == "" {
+		return fmt.Errorf("feature name must not be empty")
+	}
+	if !featureNamePattern.MatchString(name) {
+		return fmt.Errorf("Invalid feature name %q: must match [a-zA-Z0-9_-]+", name)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem lock file
+// ---------------------------------------------------------------------------
+
+// lockFilePath returns the path for the workflow lock file.
+func workflowLockPath(workspaceDir, featureName string) string {
+	return filepath.Join(workspaceDir, featureName+".workflow.lock")
+}
+
+// acquireLock creates a lock file containing the current PID. If a lock file
+// already exists with a running PID, it returns an error. If the PID is stale
+// (process not running), the lock file is removed and a new one is created.
+func acquireLock(lockPath string) error {
+	data, err := os.ReadFile(lockPath)
+	if err == nil {
+		// Lock file exists — check if the PID is still running.
+		pidStr := strings.TrimSpace(string(data))
+		pid, parseErr := strconv.Atoi(pidStr)
+		if parseErr == nil && pid > 0 {
+			if isProcessRunning(pid) {
+				return fmt.Errorf("Another orchestrator process may be running for this feature (PID %d) — found lock file at %s. If no process is running, delete the lock file and retry.", pid, lockPath)
+			}
+			// Stale lock — PID is not running.
+			log.Printf("[orchestrator] WARNING: Stale lock file found (PID %d not running) — removing and continuing", pid)
+		}
+		// Remove stale or unparseable lock file.
+		_ = os.Remove(lockPath)
+	}
+
+	// Write new lock file with our PID.
+	currentPID := os.Getpid()
+	return os.WriteFile(lockPath, []byte(strconv.Itoa(currentPID)), 0o644)
+}
+
+// releaseLock removes the lock file. Called on clean exit only.
+func releaseLock(lockPath string) {
+	if err := os.Remove(lockPath); err != nil && !os.IsNotExist(err) {
+		log.Printf("[orchestrator] WARNING: failed to remove lock file %s: %v", lockPath, err)
+	}
+}
+
+// isProcessRunning checks if a process with the given PID exists and is running.
+func isProcessRunning(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	// On Unix, sending signal 0 checks if the process exists without
+	// actually sending a signal.
+	err = proc.Signal(syscall.Signal(0))
+	return err == nil
 }
 
 // ---------------------------------------------------------------------------
@@ -77,6 +158,9 @@ type OrchestratorConfig struct {
 	CostProvider CostProvider
 	// LookPathFunc is an optional override for exec.LookPath, used for testing.
 	LookPathFunc func(file string) (string, error)
+	// BeadsClient is an optional Beads integration client. When nil, all Beads
+	// operations are silently skipped (graceful degradation).
+	BeadsClient BeadsClientInterface
 }
 
 // ---------------------------------------------------------------------------
@@ -102,11 +186,14 @@ type Orchestrator struct {
 	codexDiscoveryRunner AgentRunner
 	codexDraftingRunner  AgentRunner
 	cancelled       atomic.Bool
+	runCtx          context.Context
+	runCancel       context.CancelFunc
 	mu              sync.Mutex
 	running         bool
 	workspaceDir    string
 	featureName     string
 	codePath        string
+	lockFilePath    string
 
 	// Gate channel for human gate responses.
 	gateCh chan GateResponse
@@ -121,6 +208,18 @@ type Orchestrator struct {
 	// issueHistory tracks per-finding status over rounds for staleness detection.
 	// Keys are finding IDs; values are the status recorded at the end of each round.
 	issueHistory map[string][]string
+
+	// beadsClient is the optional Beads integration client. When nil, all
+	// Beads operations are silently skipped (graceful degradation).
+	beadsClient BeadsClientInterface
+
+	// runEpicID caches the Beads run epic ID for comment posting.
+	runEpicID string
+
+	// activeGateBeadID is the Beads bead ID of the currently active gate proxy
+	// task, if any. Used by closeOpenGateProxies to clean up on error/escalation.
+	activeGateBeadID string
+	activeGateName   string
 
 	// activeAgents tracks currently dispatched agents by name with their status.
 	activeAgentsMu sync.RWMutex
@@ -157,10 +256,17 @@ func (o *Orchestrator) IsRunning() bool {
 	return o.running
 }
 
-// Cancel signals the orchestrator to stop at the next safe point. The
-// cancellation is checked before every agent dispatch.
+// Cancel signals the orchestrator to stop immediately. It sets a cancellation
+// flag (checked between phases) and cancels the run context, which kills any
+// currently-running agent subprocess via exec.CommandContext.
 func (o *Orchestrator) Cancel() {
 	o.cancelled.Store(true)
+	o.mu.Lock()
+	cancel := o.runCancel
+	o.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // AgentStatus represents a currently tracked agent and its status.
@@ -214,13 +320,23 @@ func (o *Orchestrator) RunWorkflow(goal GoalInput) error {
 		return fmt.Errorf("a workflow is already running")
 	}
 	o.running = true
+	runCtx, runCancel := context.WithCancel(context.Background())
+	o.runCtx = runCtx
+	o.runCancel = runCancel
 	o.mu.Unlock()
 
 	defer func() {
+		runCancel() // free context resources on any exit path
 		o.mu.Lock()
 		o.running = false
+		o.runCtx = nil
+		o.runCancel = nil
 		o.mu.Unlock()
 		o.logger.Close()
+		// Release filesystem lock on clean exit. The lock is intentionally
+		// NOT released on SIGTERM/crash so the next startup can detect and
+		// clean up the stale lock automatically.
+		releaseLock(o.lockFilePath)
 	}()
 
 	state := o.sm.State()
@@ -273,6 +389,9 @@ func (o *Orchestrator) RunWorkflow(goal GoalInput) error {
 
 		switch current {
 		case StateInit:
+			// Create Beads run epic before first state transition.
+			o.createRunEpic(state)
+
 			// Transition to DISCOVERY.
 			o.logTransition(StateInit, StateDiscovery)
 			if err := o.sm.Transition(StateDiscovery); err != nil {
@@ -369,8 +488,59 @@ func (o *Orchestrator) RunWorkflow(goal GoalInput) error {
 	}
 }
 
+// runnerFor returns an AgentRunner for the given role. For ClaudeRunner, it
+// always returns a clone with the run context and (if configured) a per-role
+// model override applied, so Cancel() kills the subprocess immediately.
+func (o *Orchestrator) runnerFor(role string) AgentRunner {
+	cr, ok := o.runner.(*ClaudeRunner)
+	if !ok {
+		return o.runner
+	}
+	clone := cr
+	if model := o.config.ClaudeModels.For(role); model != "" {
+		clone = cr.WithModel(model)
+	} else {
+		c := *cr
+		clone = &c
+	}
+	o.mu.Lock()
+	ctx := o.runCtx
+	o.mu.Unlock()
+	if ctx != nil {
+		clone.Ctx = ctx
+	}
+	return clone
+}
+
 // newOrchestrator contains the full construction logic for NewOrchestrator.
 func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
+	// Validate feature name before any Beads, KV, or filesystem operations.
+	if err := ValidateFeatureName(cfg.FeatureName); err != nil {
+		return nil, err
+	}
+
+	// Acquire filesystem lock to prevent concurrent orchestrator processes.
+	lockPath := workflowLockPath(cfg.WorkspaceDir, cfg.FeatureName)
+	if err := acquireLock(lockPath); err != nil {
+		return nil, err
+	}
+
+	// Wire Beads integration (graceful degradation — Beads is optional).
+	var beadsClient BeadsClientInterface
+	if cfg.BeadsClient != nil {
+		ctx := context.Background()
+		if err := cfg.BeadsClient.EnsureCustomTypesConfigured(ctx); err != nil {
+			if errors.Is(err, ErrBeadsUnavailable) {
+				log.Printf("[orchestrator] WARNING: bd not available — Beads integration disabled")
+			} else {
+				log.Printf("[orchestrator] WARNING: Beads custom type setup failed — Beads integration disabled: %v", err)
+			}
+		} else {
+			beadsClient = cfg.BeadsClient
+			log.Printf("[orchestrator] Beads integration enabled")
+		}
+	}
+
 	// Detect codex CLI availability when codex reviewers are enabled.
 	var codexRunner AgentRunner
 	var codexHoldoutRunner AgentRunner
@@ -475,8 +645,19 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 		MaxRounds:          cfg.Config.MaxRounds,
 	}
 
+	// orchPtr is captured by the onTransition closure and set after
+	// construction. This allows the persistence callback to invoke Beads
+	// KV writes without a circular dependency.
+	var orchPtr *Orchestrator
 	onTransition := func(state *WorkflowStateJSON) error {
-		return SaveState(specDir, state)
+		if err := SaveState(specDir, state); err != nil {
+			return err
+		}
+		// Write state snapshot and convergence round to Beads KV.
+		if orchPtr != nil {
+			orchPtr.writeBeadsStateSnapshot(state)
+		}
+		return nil
 	}
 
 	sm := NewStateMachine(ws, smConfig, onTransition)
@@ -519,12 +700,36 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 		codexHoldoutRunner:   codexHoldoutRunner,
 		codexDiscoveryRunner: codexDiscoveryRunner,
 		codexDraftingRunner:  codexDraftingRunner,
+		beadsClient:     beadsClient,
 		costProvider:    cfg.CostProvider,
 		workspaceDir:    cfg.WorkspaceDir,
 		featureName:     cfg.FeatureName,
+		lockFilePath:    lockPath,
 		gateCh:          make(chan GateResponse, 1),
 		issueHistory:    make(map[string][]string),
 		activeAgents:    make(map[string]string),
+	}
+
+	// Set the orchPtr so the onTransition persistence callback can invoke
+	// Beads KV writes now that the orchestrator is fully constructed.
+	orchPtr = orch
+
+	// Wire Beads status sync callback on the issue tracker so every
+	// TransitionIssue call propagates to Beads automatically.
+	if beadsClient != nil {
+		tracker.OnTransition = orch.updateBeadsIssueStatus
+
+		// On crash recovery, rebuild finding-to-bead-ID mappings from Beads
+		// so that status updates continue to propagate correctly (CD-88v.17).
+		if existingState != nil {
+			orch.rebuildIssueTrackerFromBeads(tracker, existingState.RunID)
+		}
+	}
+
+	// On crash recovery into REVIEWING, clean stale reviewer outputs that
+	// may be incomplete from the interrupted round (FR-028/MAJ-004).
+	if existingState != nil && existingState.State == StateReviewing {
+		cleanStaleReviewerOutputs(specDir, existingState.Round)
 	}
 
 	return orch, nil

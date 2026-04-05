@@ -393,3 +393,224 @@ func (r *e2eUnitRunner) Run(prompt string, outputPath string, timeoutSeconds int
 	os.WriteFile(outputPath, []byte(`{}`), 0o644)
 	return 0, "", 0.01, 100, nil
 }
+
+// ---------------------------------------------------------------------------
+// E2E: Full Beads integration — verifies gate proxies, comments, findings,
+// KV snapshots, and escalation cleanup (CD-88v.18)
+// ---------------------------------------------------------------------------
+
+func TestE2E_BeadsIntegration(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	workspace := t.TempDir()
+	feature := "beads-e2e"
+	specDir := filepath.Join(workspace, "specs", feature)
+
+	runner := newOrchMockRunner()
+	emitter := NewChannelEmitter(64)
+	mockBeads := &MockBeadsClient{
+		CreateEpicResult:    "epic-001",
+		CreateFindingResult: "finding-bead-001",
+		GateCreateResult:    "gate-bead-001",
+		KVStore:             make(map[string]string),
+	}
+
+	orch, err := NewOrchestrator(OrchestratorConfig{
+		WorkspaceDir: workspace,
+		FeatureName:  feature,
+		Config:       orchTestConfig(),
+		Runner:       runner,
+		Emitter:      emitter,
+		BeadsClient:  mockBeads,
+	})
+	if err != nil {
+		t.Fatalf("NewOrchestrator: %v", err)
+	}
+
+	// Inject dummy skills.
+	orch.skills = &SkillCache{
+		contents: map[string]string{
+			SpecTemplate:        "# Spec Template\nDummy.",
+			BDDTemplate:         "# BDD Template\nDummy.",
+			TestDatasetTemplate: "# Test Dataset Template\nDummy.",
+			ReviewConstitution:  "# Constitution\nDummy.",
+			ReportTemplate:      "# Report Template\nDummy.",
+		},
+		checksums: map[string]string{"plan_spec": "sha256:test", "grill_spec": "sha256:test"},
+		loaded:    true,
+	}
+	orch.promptBuilder = NewPromptBuilder(orch.skills, workspace, feature)
+
+	// Write spec files (spec-v0 for initial, spec-v1 for after revision, spec-final for taskify).
+	os.MkdirAll(specDir, 0o755)
+	os.WriteFile(filepath.Join(specDir, "spec-v0.md"), []byte("# Test Spec\n"), 0o644)
+	os.WriteFile(filepath.Join(specDir, "spec-v1.md"), []byte("# Test Spec v1\n"), 0o644)
+	os.WriteFile(filepath.Join(specDir, "spec-final.md"), []byte("# Final Spec\n"), 0o644)
+	os.MkdirAll(filepath.Join(workspace, ".tasks"), 0o755)
+
+	// Configure mock outputs.
+	runner.SetOutput("Discovery Agent", orchDiscoveryOutput())
+	runner.SetOutput("Drafter Agent", orchDrafterOutput(specDir))
+
+	critFindings := []Finding{
+		{ID: "CRIT-001", Description: "Critical security issue", Severity: SeverityCritical,
+			Impact: "High", Recommendation: "Fix it", Lens: "SEC", AffectedSection: "auth"},
+		{ID: "MAJ-001", Description: "Major consistency gap", Severity: SeverityMajor,
+			Impact: "Medium", Recommendation: "Align sections", Lens: "CON", AffectedSection: "api"},
+	}
+	runner.SetOutput("Reviewer Agent", orchReviewerOutputWith("reviewer", 1, critFindings))
+	runner.SetOutput("Reviser Agent", orchRevisionOutput(1))
+	runner.SetOutput("Judge Agent", orchJudgePass(1))
+
+	// Wrap with task runner for post-finalize taskify stages.
+	taskRunner := &e2eTaskReviewRunner{
+		base:         runner,
+		taskGraphDir: filepath.Join(workspace, ".tasks"),
+		featureName:  feature,
+	}
+	orch.runner = taskRunner
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- orch.RunWorkflow(GoalInput{
+			Title:       "Beads E2E Feature",
+			Description: "E2E test for full Beads integration",
+		})
+	}()
+
+	go func() {
+		// Gate 1: confirm discovery.
+		sendGateResponse(orch, GateResponse{Action: "confirm"})
+		// Gate 2: confirm draft.
+		sendGateResponse(orch, GateResponse{Action: "confirm"})
+		// Final gate: accept (skipped if no critical findings persist after judge pass).
+		// But we have critical findings, so final gate is triggered.
+		sendGateResponse(orch, GateResponse{Action: "accept"})
+		// Task human gate: approve.
+		sendGateResponse(orch, GateResponse{Action: "approve"})
+	}()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("RunWorkflow: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("RunWorkflow timed out")
+	}
+
+	finalState := orch.sm.State()
+	if finalState.State != StateComplete {
+		t.Errorf("expected COMPLETE, got %s", finalState.State)
+	}
+
+	// --- Verify Beads integration calls ---
+	calls := mockBeads.GetCalls()
+
+	// Verify run epic was created.
+	assertHasCall(t, calls, "CreateEpic")
+
+	// Verify epic ID was cached.
+	if orch.runEpicID != "epic-001" {
+		t.Errorf("runEpicID = %q, want epic-001", orch.runEpicID)
+	}
+
+	// Verify KV writes for run_id (UUID) and run_epic_id (epic bead ID).
+	assertHasKVSet(t, calls, feature+":run_id", "")
+	assertHasKVSet(t, calls, feature+":run_epic_id", "epic-001")
+
+	// Verify findings were created.
+	assertHasCall(t, calls, "CreateFinding")
+
+	// Verify state snapshot KV writes occurred (state key).
+	assertHasKVSet(t, calls, feature+":state", "")
+
+	// Verify gate proxies were created and closed.
+	assertHasCall(t, calls, "GateCreate")
+	assertHasCall(t, calls, "GateClose")
+
+	// Verify no open gate proxy remains.
+	if orch.activeGateBeadID != "" {
+		t.Errorf("activeGateBeadID should be empty after workflow, got %q", orch.activeGateBeadID)
+	}
+
+	// Verify judge comments were posted (CD-88v.16).
+	assertHasCall(t, calls, "Comment")
+
+	// Verify KV store has state snapshot.
+	if _, ok := mockBeads.KVStore[feature+":state_snapshot"]; !ok {
+		t.Error("state_snapshot not written to KV store")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Unit: parseCloseReason (CD-88v.10 close_reason parsing, MAJ-001)
+// ---------------------------------------------------------------------------
+
+func TestParseCloseReason(t *testing.T) {
+	tests := []struct {
+		name       string
+		raw        string
+		accept     string
+		reject     string
+		wantAction string
+		wantComm   string
+		wantOK     bool
+	}{
+		{"accept uppercase", "ACCEPT: looks good", "confirm", "correct", "confirm", "looks good", true},
+		{"accept lowercase", "accept: approved", "confirm", "correct", "confirm", "approved", true},
+		{"accept mixed case", "Accept: Fine", "approve", "reject", "approve", "Fine", true},
+		{"reject uppercase", "REJECT: needs work", "confirm", "correct", "correct", "needs work", true},
+		{"reject lowercase", "reject: bad", "accept", "reject", "reject", "bad", true},
+		{"bare closed", "Closed", "confirm", "correct", "", "", false},
+		{"empty string", "", "confirm", "correct", "", "", false},
+		{"whitespace only", "   \t  ", "confirm", "correct", "", "", false},
+		{"unrecognized", "MAYBE: dunno", "confirm", "correct", "", "", false},
+		{"newlines stripped", "ACCEPT:\r\nall good\n", "confirm", "correct", "confirm", "all good", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			action, comment, ok := parseCloseReason(tc.raw, tc.accept, tc.reject)
+			if ok != tc.wantOK {
+				t.Errorf("recognized = %v, want %v", ok, tc.wantOK)
+			}
+			if action != tc.wantAction {
+				t.Errorf("action = %q, want %q", action, tc.wantAction)
+			}
+			if comment != tc.wantComm {
+				t.Errorf("comment = %q, want %q", comment, tc.wantComm)
+			}
+		})
+	}
+}
+
+// assertHasCall checks that at least one call to the named method exists.
+func assertHasCall(t *testing.T, calls []MockCall, method string) {
+	t.Helper()
+	for _, c := range calls {
+		if c.Method == method {
+			return
+		}
+	}
+	t.Errorf("expected at least one %s call, found none", method)
+}
+
+// assertHasKVSet checks that at least one KVSet call with the given key exists.
+// If value is non-empty, it also checks the value matches.
+func assertHasKVSet(t *testing.T, calls []MockCall, key string, value string) {
+	t.Helper()
+	for _, c := range calls {
+		if c.Method == "KVSet" && len(c.Args) >= 3 {
+			if c.Args[1].(string) == key {
+				if value == "" || (len(c.Args) >= 3 && c.Args[2].(string) == value) {
+					return
+				}
+			}
+		}
+	}
+	if value != "" {
+		t.Errorf("expected KVSet(%q, %q) call, found none", key, value)
+	} else {
+		t.Errorf("expected KVSet(%q, ...) call, found none", key)
+	}
+}

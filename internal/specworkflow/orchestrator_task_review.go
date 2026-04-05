@@ -57,7 +57,7 @@ func (o *Orchestrator) handleTaskReview(state *WorkflowStateJSON, specDir string
 	o.emitter.Emit(NewAgentDispatchEvent("task-reviewer-claude", round))
 	go func() {
 		defer wg.Done()
-		runner := taggedRunner(o.runner, "task-reviewer-claude")
+		runner := taggedRunner(o.runnerFor("task_reviewer"), "task-reviewer-claude")
 		exitCode, stderr, cost, duration, runErr := runner.Run(prompt, claudeOutPath, timeout)
 		claudeResult = taskReviewResult{provider: "claude", outPath: claudeOutPath, cost: cost, duration: duration}
 		if runErr != nil {
@@ -282,7 +282,7 @@ func (o *Orchestrator) handleTaskRevision(state *WorkflowStateJSON, specDir stri
 	o.SetAgentStatus("task-revision-claude", "running")
 	o.emitter.Emit(NewAgentDispatchEvent("task-revision-claude", round))
 
-	cost, duration, runErr := o.dispatchAgent("task-revision-claude", prompt, taskGraphPath)
+	cost, duration, runErr := o.dispatchAgent("task-revision-claude", prompt, taskGraphPath, o.runnerFor("task_reviser"))
 
 	if runErr != nil {
 		o.SetAgentStatus("task-revision-claude", "failed")

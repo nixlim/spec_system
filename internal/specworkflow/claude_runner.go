@@ -26,6 +26,13 @@ type ClaudeRunner struct {
 	// Args contains additional CLI flags appended after the prompt flag.
 	// Typical values: ["--dangerously-skip-permissions", "--output-format", "json", "--verbose"]
 	Args []string
+	// Model is the Claude model passed via --model flag (e.g. "claude-opus-4-6").
+	// If empty, the claude CLI uses its own default model.
+	Model string
+	// Ctx is the parent context for subprocess execution. When cancelled, any
+	// running subprocess is killed immediately via exec.CommandContext. If nil,
+	// context.Background() is used as the parent.
+	Ctx context.Context
 	// Timeout is the maximum duration for a single agent invocation.
 	// If zero, defaults to 120 seconds.
 	Timeout time.Duration
@@ -82,6 +89,24 @@ func (r *ClaudeRunner) WithJSONSchema(schema string) *ClaudeRunner {
 	return &clone
 }
 
+// WithModel returns a copy of the runner with the given model set.
+// The original runner is not modified. Passing an empty string returns an
+// unmodified copy (no --model flag will be emitted).
+func (r *ClaudeRunner) WithModel(model string) *ClaudeRunner {
+	clone := *r
+	clone.Model = model
+	return &clone
+}
+
+// WithContext returns a copy of the runner with the given parent context set.
+// When the context is cancelled, any running subprocess is killed immediately.
+// The original runner is not modified.
+func (r *ClaudeRunner) WithContext(ctx context.Context) *ClaudeRunner {
+	clone := *r
+	clone.Ctx = ctx
+	return &clone
+}
+
 // ForJSONOnly returns a copy of the runner configured for pure JSON production:
 // --json-schema set, all tools disabled (--tools ""), so structured_output is
 // guaranteed to be populated. Use this for merge/combine agents that receive
@@ -108,6 +133,9 @@ func (r *ClaudeRunner) ForJSONOnly(schema string) *ClaudeRunner {
 func (r *ClaudeRunner) BuildCommand(ctx context.Context, prompt string) *exec.Cmd {
 	args := []string{"-p", prompt}
 	args = append(args, r.Args...)
+	if r.Model != "" {
+		args = append(args, "--model", r.Model)
+	}
 	if r.JSONSchema != "" {
 		args = append(args, "--json-schema", r.JSONSchema)
 	}
@@ -222,7 +250,11 @@ func (r *ClaudeRunner) Run(prompt string, outputPath string, timeoutSeconds int)
 		timeout = time.Duration(timeoutSeconds) * time.Second
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	parentCtx := r.Ctx
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parentCtx, timeout)
 	defer cancel()
 
 	cmd := r.BuildCommand(ctx, prompt)
@@ -462,8 +494,9 @@ func (r *ClaudeRunner) CloneForAgent(agentName string) AgentRunner {
 // environment variables are set so child Claude processes export
 // telemetry back to the embedded OTLP receiver. The featureName is
 // included as a workflow.feature resource attribute so the OTEL receiver
-// can partition telemetry by workflow.
-func DefaultClaudeRunner(workspaceDir string, otelPort int, featureName string) *ClaudeRunner {
+// can partition telemetry by workflow. If model is non-empty, it is
+// passed via the --model flag to the claude CLI.
+func DefaultClaudeRunner(workspaceDir string, otelPort int, featureName string, model string) *ClaudeRunner {
 	env := map[string]string{
 		"CLAUDE_CODE_MAX_TURNS":        "50",
 		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
@@ -489,6 +522,7 @@ func DefaultClaudeRunner(workspaceDir string, otelPort int, featureName string) 
 	return &ClaudeRunner{
 		Command:      "claude",
 		Args:         []string{"--dangerously-skip-permissions", "--output-format", "json", "--verbose"},
+		Model:        model,
 		Timeout:      1800 * time.Second,
 		WorkspaceDir: workspaceDir,
 		Env:          env,

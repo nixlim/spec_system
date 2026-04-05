@@ -6,6 +6,40 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// ClaudeModelConfig holds per-role model overrides for codedoc Claude agents.
+// An empty field falls back to Default; empty Default means the CLI picks its own default.
+type ClaudeModelConfig struct {
+	// Default is the fallback model for any role not explicitly overridden.
+	Default string `yaml:"default"`
+	// Reviewer is the model for the codedoc review agent.
+	Reviewer string `yaml:"reviewer"`
+	// Drafter is the model for the codedoc drafting agent.
+	Drafter string `yaml:"drafter"`
+	// Discovery is the model for the codedoc discovery agent.
+	Discovery string `yaml:"discovery"`
+	// Merge is the model for the discovery/drafting merge agent.
+	Merge string `yaml:"merge"`
+}
+
+// For returns the model for role, falling back to Default.
+func (m ClaudeModelConfig) For(role string) string {
+	var specific string
+	switch role {
+	case "reviewer":
+		specific = m.Reviewer
+	case "drafter":
+		specific = m.Drafter
+	case "discovery":
+		specific = m.Discovery
+	case "merge":
+		specific = m.Merge
+	}
+	if specific != "" {
+		return specific
+	}
+	return m.Default
+}
+
 // CodedocConfig holds tunable parameters that govern the code documentation
 // workflow, including round limits, cost budgets, timeout values, and
 // dual-provider settings. It is intended to be loaded from a YAML
@@ -71,6 +105,9 @@ type CodedocConfig struct {
 	// CodexModel is the model identifier for Codex agents.
 	// Default: "gpt-5.4"
 	CodexModel string `yaml:"codex_model"`
+
+	// ClaudeModels holds per-role model overrides for Claude agent invocations.
+	ClaudeModels ClaudeModelConfig `yaml:"claude_models"`
 
 	// DefaultMode is the default workflow mode: "full" or "incremental".
 	// Default: "full"

@@ -210,9 +210,9 @@ func (o *Orchestrator) handleSingleDiscovery(prompt string, state *WorkflowState
 	}
 
 	// Use --json-schema to enforce structured output when the runner supports it.
-	origRunner := o.runner
-	if cr, ok := o.runner.(*ClaudeRunner); ok {
-		o.runner = cr.WithJSONSchema(string(DiscoveryOutputSchema()))
+	discoveryRunner := o.runnerFor("discovery")
+	if cr, ok := discoveryRunner.(*ClaudeRunner); ok {
+		discoveryRunner = cr.WithJSONSchema(string(DiscoveryOutputSchema()))
 	}
 
 	var lastValidationErrors []string
@@ -222,14 +222,13 @@ func (o *Orchestrator) handleSingleDiscovery(prompt string, state *WorkflowState
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		currentPrompt := AppendValidationErrorsToPrompt(prompt, lastValidationErrors)
 
-		cost, duration, err := o.dispatchAgent("discovery", currentPrompt, outPath)
+		cost, duration, err := o.dispatchAgent("discovery", currentPrompt, outPath, discoveryRunner)
 		if err != nil {
 			if attempt < maxAttempts {
 				log.Printf("[orchestrator] discovery dispatch failed on attempt %d/%d: %v", attempt, maxAttempts, err)
 				lastValidationErrors = []string{fmt.Sprintf("agent dispatch failed: %v", err)}
 				continue
 			}
-			o.runner = origRunner
 			return o.handleAgentError("discovery", err, cost, duration)
 		}
 
@@ -241,7 +240,6 @@ func (o *Orchestrator) handleSingleDiscovery(prompt string, state *WorkflowState
 				o.emitter.Emit(NewAgentErrorEvent("discovery", "validation_failure", parseErr.Error(), attempt, maxAttempts))
 				continue
 			}
-			o.runner = origRunner
 			return parseErr
 		}
 
@@ -249,7 +247,6 @@ func (o *Orchestrator) handleSingleDiscovery(prompt string, state *WorkflowState
 		data = rawData
 		break
 	}
-	o.runner = origRunner // restore
 
 	log.Printf("[orchestrator] discovery output valid: %d actors, %d priorities, %d open questions",
 		len(discovery.Actors), len(discovery.Priorities), len(discovery.OpenQuestions))
@@ -285,8 +282,8 @@ func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJS
 	var wg sync.WaitGroup
 
 	// Build a schema-bound Claude runner for structured output.
-	var discoveryClaudeRunner AgentRunner = o.runner
-	if cr, ok := o.runner.(*ClaudeRunner); ok {
+	var discoveryClaudeRunner AgentRunner = o.runnerFor("discovery")
+	if cr, ok := discoveryClaudeRunner.(*ClaudeRunner); ok {
 		discoveryClaudeRunner = cr.WithJSONSchema(string(DiscoveryOutputSchema()))
 	}
 
@@ -509,8 +506,8 @@ func (o *Orchestrator) mergeDiscoveryWithAgent(claudeData, codexData []byte, out
 
 	// Use ForJSONOnly: disable tools and enforce --json-schema. The merge agent
 	// receives all data inline and only needs to produce JSON — no file access needed.
-	var mergeRunner AgentRunner = o.runner
-	if cr, ok := o.runner.(*ClaudeRunner); ok {
+	var mergeRunner AgentRunner = o.runnerFor("discovery")
+	if cr, ok := mergeRunner.(*ClaudeRunner); ok {
 		mergeRunner = cr.ForJSONOnly(string(DiscoveryOutputSchema()))
 	}
 
@@ -674,6 +671,9 @@ func parseCorrectionFile(specDir, filename string) *DiscoveryContext {
 // handleHumanGate1 waits for a human gate response and either confirms,
 // corrects, or cancels the discovery output.
 func (o *Orchestrator) handleHumanGate1(state *WorkflowStateJSON, specDir string) error {
+	// Create gate proxy in Beads (CD-88v.10).
+	o.openGateProxy("gate1", o.featureName+": gate-1 — Discovery review required")
+
 	gate1 := NewGate1Handler(state, o.emitter, o.config.MaxGateCorrections)
 
 	discoveryPath := filepath.Join(specDir, "discovery-output.json")
@@ -693,8 +693,11 @@ func (o *Orchestrator) handleHumanGate1(state *WorkflowStateJSON, specDir string
 		gate1.EnterGate(&disc)
 	}
 
-	// Wait for human response.
-	resp := <-o.gateCh
+	// Wait for human response — race gateCh against Beads gate polling (CD-88v.10).
+	resp := o.waitForGateResponse("confirm", "correct")
+	if resp.Action == gateActionCancelled {
+		return fmt.Errorf("workflow cancelled")
+	}
 
 	log.Printf("[orchestrator] gate 1 response received: action=%s", resp.Action)
 

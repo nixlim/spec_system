@@ -65,20 +65,19 @@ func (o *Orchestrator) handleDrafting(state *WorkflowStateJSON, specDir string) 
 
 	// Single-provider (Claude only) — current behavior.
 	// Use --json-schema to enforce structured output when the runner supports it.
-	origRunner := o.runner
-	if cr, ok := o.runner.(*ClaudeRunner); ok {
-		o.runner = cr.WithJSONSchema(string(DrafterOutputSchema()))
+	drafterRunner := o.runnerFor("drafter")
+	if cr, ok := drafterRunner.(*ClaudeRunner); ok {
+		drafterRunner = cr.WithJSONSchema(string(DrafterOutputSchema()))
 	}
-	err = o.handleSingleDrafting(state, specDir, prompt)
-	o.runner = origRunner // restore
+	err = o.handleSingleDrafting(state, specDir, prompt, drafterRunner)
 	return err
 }
 
 // handleSingleDrafting is the original single-provider drafting path.
-func (o *Orchestrator) handleSingleDrafting(state *WorkflowStateJSON, specDir, prompt string) error {
+func (o *Orchestrator) handleSingleDrafting(state *WorkflowStateJSON, specDir, prompt string, drafterRunner AgentRunner) error {
 	outPath := filepath.Join(specDir, "drafter-output.json")
 
-	cost, duration, err := o.dispatchAgent("drafter", prompt, outPath)
+	cost, duration, err := o.dispatchAgent("drafter", prompt, outPath, drafterRunner)
 	if err != nil {
 		return o.handleAgentError("drafter", err, cost, duration)
 	}
@@ -116,8 +115,8 @@ func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, pro
 	var claudeResult, codexResult drafterResult
 
 	// Build a schema-bound Claude runner for structured output.
-	var drafterClaudeRunner AgentRunner = o.runner
-	if cr, ok := o.runner.(*ClaudeRunner); ok {
+	var drafterClaudeRunner AgentRunner = o.runnerFor("drafter")
+	if cr, ok := drafterClaudeRunner.(*ClaudeRunner); ok {
 		drafterClaudeRunner = cr.WithJSONSchema(string(DrafterOutputSchema()))
 	}
 
@@ -241,7 +240,7 @@ func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, pro
 	combinedOutPath := filepath.Join(specDir, VersionedCombinedFilename("drafter-output", version, ".json"))
 	combinePrompt := buildCombinePrompt(claudeOutPath, codexOutPath, combinedOutPath)
 
-	combineRunner := taggedRunner(o.runner, "drafter-combine")
+	combineRunner := taggedRunner(o.runnerFor("drafter"), "drafter-combine")
 	combineExitCode, combineStderr, combineCost, _, combineErr := combineRunner.Run(combinePrompt, combinedOutPath, o.config.AgentTimeoutSeconds)
 	smState.CumulativeCostUSD += combineCost
 	smState.AgentInvocations++
@@ -407,6 +406,9 @@ func collectDrafterContext(specDir, workspaceDir string) []string {
 // handleHumanGate2 waits for a human gate response and either confirms,
 // resolves ambiguities, or cancels the draft.
 func (o *Orchestrator) handleHumanGate2(state *WorkflowStateJSON, specDir string) error {
+	// Create gate proxy in Beads (CD-88v.10).
+	o.openGateProxy("gate2", o.featureName+": gate-2 — Spec review required")
+
 	gate2 := NewGate2Handler(state, o.emitter, o.config.MaxGate2Redrafts)
 
 	drafterPath := filepath.Join(specDir, "drafter-output.json")
@@ -420,7 +422,11 @@ func (o *Orchestrator) handleHumanGate2(state *WorkflowStateJSON, specDir string
 	}
 	gate2.EnterGate(&drafter)
 
-	resp := <-o.gateCh
+	// Wait for human response — race gateCh against Beads gate polling (CD-88v.10).
+	resp := o.waitForGateResponse("confirm", "correct")
+	if resp.Action == gateActionCancelled {
+		return fmt.Errorf("workflow cancelled")
+	}
 
 	// Persist reviewer comment if provided. Corrupted comments file → escalate.
 	if err := persistComment(specDir, "HUMAN_GATE_2", resp.Action, resp.Comment); err != nil {

@@ -473,7 +473,11 @@ func (pb *PromptBuilder) BuildHoldoutPrompt(specPath, mergedFindingsPath string,
 // the spec-template, bdd-template, and test-dataset-template, and references
 // the current spec file and merged findings JSON. The holdout file path is
 // intentionally excluded to prevent information leakage.
-func (pb *PromptBuilder) BuildReviserPrompt(specPath, mergedFindingsPath string, round int) (string, error) {
+// BuildReviserPrompt constructs the prompt for the reviser agent.
+// judgeBlockPath is optional — when non-empty it points to a judge-round-N.json
+// whose verdict was BLOCK; the reviser is shown the rationale and unaddressed
+// findings so it knows exactly what was rejected in the previous revision.
+func (pb *PromptBuilder) BuildReviserPrompt(specPath, mergedFindingsPath string, round int, judgeBlockPath string) (string, error) {
 	specTemplate, err := pb.skills.GetSkillContent(SpecTemplate)
 	if err != nil {
 		return "", fmt.Errorf("loading spec template: %w", err)
@@ -520,6 +524,20 @@ func (pb *PromptBuilder) BuildReviserPrompt(specPath, mergedFindingsPath string,
 	// Merged findings reference.
 	b.WriteString("## Merged Findings\n\n")
 	fmt.Fprintf(&b, "Read the merged findings from: %s\n\n", mergedFindingsPath)
+
+	// Judge block feedback — only present when the previous revision was BLOCKed.
+	// The reviser must address every finding the judge flagged as unaddressed.
+	if judgeBlockPath != "" {
+		b.WriteString("## Judge Block Feedback\n\n")
+		b.WriteString("**IMPORTANT**: Your previous revision was BLOCKED by the judge — it did not adequately address the required findings.\n\n")
+		fmt.Fprintf(&b, "Read the judge's full feedback (verdict rationale, per-finding explanations, and structural delta) from: `%s`\n\n", judgeBlockPath)
+		b.WriteString("You MUST:\n")
+		b.WriteString("1. Read the judge output file listed above before making any changes\n")
+		b.WriteString("2. Identify every finding the judge marked as unaddressed or reopened\n")
+		b.WriteString("3. Address ALL of those findings in this revision — the judge will check again\n")
+		b.WriteString("4. Do NOT repeat changes the judge already rejected; approach those findings differently\n\n")
+		b.WriteString("A revision that fails to address the judge's BLOCK rationale will be BLOCKed again.\n\n")
+	}
 
 	// Output schema.
 	b.WriteString("## Output Schema\n\n")

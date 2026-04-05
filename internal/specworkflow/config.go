@@ -3,6 +3,7 @@ package specworkflow
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -18,6 +19,66 @@ type SkillPaths struct {
 	PlanSpec string `yaml:"plan_spec"`
 	// GrillSpec is the path to the grill-spec skill directory.
 	GrillSpec string `yaml:"grill_spec"`
+}
+
+// ---------------------------------------------------------------------------
+// ClaudeModelConfig
+// ---------------------------------------------------------------------------
+
+// ClaudeModelConfig holds per-role model overrides for Claude agent invocations.
+// Each field names the model passed via --model to the claude CLI. An empty
+// field falls back to Default; an empty Default means the CLI picks its own default.
+type ClaudeModelConfig struct {
+	// Default is the fallback model for any role not explicitly overridden.
+	Default string `yaml:"default"`
+	// Reviewer is the model for review-lens agents.
+	Reviewer string `yaml:"reviewer"`
+	// Holdout is the model for the holdout adversarial agent.
+	Holdout string `yaml:"holdout"`
+	// Reviser is the model for the spec revision agent.
+	Reviser string `yaml:"reviser"`
+	// Judge is the model for the convergence judge agent.
+	Judge string `yaml:"judge"`
+	// Discovery is the model for the discovery-phase agent.
+	Discovery string `yaml:"discovery"`
+	// Drafter is the model for the spec drafting agent.
+	Drafter string `yaml:"drafter"`
+	// Taskify is the model for the task-graph decomposition agent.
+	Taskify string `yaml:"taskify"`
+	// TaskReviewer is the model for the task-graph review agent.
+	TaskReviewer string `yaml:"task_reviewer"`
+	// TaskReviser is the model for the task-graph revision agent.
+	TaskReviser string `yaml:"task_reviser"`
+}
+
+// For returns the model configured for role, falling back to Default when
+// the role-specific field is empty. Returns "" if neither is set.
+func (m ClaudeModelConfig) For(role string) string {
+	var specific string
+	switch role {
+	case "reviewer":
+		specific = m.Reviewer
+	case "holdout":
+		specific = m.Holdout
+	case "reviser":
+		specific = m.Reviser
+	case "judge":
+		specific = m.Judge
+	case "discovery":
+		specific = m.Discovery
+	case "drafter":
+		specific = m.Drafter
+	case "taskify":
+		specific = m.Taskify
+	case "task_reviewer":
+		specific = m.TaskReviewer
+	case "task_reviser":
+		specific = m.TaskReviser
+	}
+	if specific != "" {
+		return specific
+	}
+	return m.Default
 }
 
 // ---------------------------------------------------------------------------
@@ -59,6 +120,9 @@ type SpecWorkflowConfig struct {
 	EnableCodexReviewers bool `yaml:"enable_codex_reviewers"`
 	// CodexModel is the model passed to codex CLI via -m flag.
 	CodexModel string `yaml:"codex_model"`
+	// ClaudeModels holds per-role model overrides for Claude agent invocations.
+	// Each role field names the --model value; an empty field falls back to Default.
+	ClaudeModels ClaudeModelConfig `yaml:"claude_models"`
 	// ReviewerTimeoutSeconds is the timeout for all reviewer agents (both
 	// claude and codex) in seconds.
 	ReviewerTimeoutSeconds int `yaml:"reviewer_timeout_seconds"`
@@ -80,6 +144,13 @@ type SpecWorkflowConfig struct {
 	// TaskReviewMaxRounds is the maximum number of task review/revision
 	// rounds before findings pass to the human gate regardless of severity.
 	TaskReviewMaxRounds int `yaml:"task_review_max_rounds"`
+	// BeadsGatePollInterval is how often the orchestrator polls Beads for
+	// gate closure. Zero uses the default (5s).
+	BeadsGatePollInterval time.Duration `yaml:"beads_gate_poll_interval"`
+	// BeadsGateTimeout is how long a gate may remain open before the
+	// orchestrator logs a warning. Zero uses the default (24h).
+	// The warning is advisory only — polling continues (US-3 AC-8).
+	BeadsGateTimeout time.Duration `yaml:"beads_gate_timeout"`
 	// SkillPaths holds the filesystem paths to skill directories.
 	SkillPaths SkillPaths `yaml:"skill_paths"`
 }

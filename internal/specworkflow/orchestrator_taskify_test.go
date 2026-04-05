@@ -1,6 +1,7 @@
 package specworkflow
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -480,6 +481,9 @@ func taskHumanGateOrchestrator(t *testing.T) (*Orchestrator, string) {
 	}
 	t.Cleanup(func() { logger.Close() })
 
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
 	o := &Orchestrator{
 		config:       cfg,
 		sm:           sm,
@@ -492,6 +496,8 @@ func taskHumanGateOrchestrator(t *testing.T) (*Orchestrator, string) {
 		issueHistory: make(map[string][]string),
 		activeAgents: make(map[string]string),
 		tracker:      NewIssueTracker(),
+		runCtx:       ctx,
+		runCancel:    cancel,
 	}
 	return o, specDir
 }

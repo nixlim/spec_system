@@ -2,6 +2,7 @@ package specworkflow
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -20,6 +21,9 @@ type CodexRunner struct {
 	// Model is the model to pass via -m flag (e.g. "gpt-5.4").
 	// If empty, the -m flag is omitted and codex uses its default model.
 	Model string
+	// Ctx is the parent context for subprocess execution. When cancelled, any
+	// running subprocess is killed immediately. If nil, context.Background() is used.
+	Ctx context.Context
 	// WorkspaceDir is the --cd directory for the codex subprocess.
 	WorkspaceDir string
 	// SchemaBytes is the JSON schema bytes written to a temp file for --output-schema.
@@ -110,13 +114,17 @@ func (r *CodexRunner) Run(prompt string, outputPath string, timeoutSeconds int) 
 		done <- waitResult{err: cmd.Wait()}
 	}()
 
+	parentCtx := r.Ctx
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
 	timeout := time.Duration(timeoutSeconds) * time.Second
-	select {
-	case <-time.After(timeout):
-		log.Printf("[codex-runner] TIMEOUT after %v, sending SIGTERM", timeout)
-		_ = cmd.Process.Signal(syscall.SIGTERM)
+	timeoutCtx, cancelTimeout := context.WithTimeout(parentCtx, timeout)
+	defer cancelTimeout()
 
-		// Wait up to 2 seconds for graceful shutdown.
+	killProcess := func(reason string) {
+		log.Printf("[codex-runner] %s, sending SIGTERM", reason)
+		_ = cmd.Process.Signal(syscall.SIGTERM)
 		select {
 		case <-done:
 			log.Printf("[codex-runner] process exited after SIGTERM")
@@ -125,9 +133,17 @@ func (r *CodexRunner) Run(prompt string, outputPath string, timeoutSeconds int) 
 			_ = cmd.Process.Kill()
 			<-done
 		}
+	}
 
+	select {
+	case <-timeoutCtx.Done():
 		elapsed := time.Since(startTime)
-		return 1, stderrBuf.String(), 0, elapsed.Milliseconds(), fmt.Errorf("codex process timed out after %v", timeout)
+		if timeoutCtx.Err() == context.DeadlineExceeded {
+			killProcess(fmt.Sprintf("TIMEOUT after %v", timeout))
+			return 1, stderrBuf.String(), 0, elapsed.Milliseconds(), fmt.Errorf("codex process timed out after %v", timeout)
+		}
+		killProcess("cancelled")
+		return 1, stderrBuf.String(), 0, elapsed.Milliseconds(), fmt.Errorf("codex process cancelled")
 
 	case res := <-done:
 		elapsed := time.Since(startTime)

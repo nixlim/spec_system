@@ -48,6 +48,7 @@ func TestIssueTransition_ValidTransitions(t *testing.T) {
 		{"addressed->reopened", StatusAddressed, StatusReopened},
 		{"verified->closed", StatusVerified, StatusClosed},
 		{"reopened->addressed", StatusReopened, StatusAddressed},
+		{"closed->reopened", StatusClosed, StatusReopened},
 	}
 
 	for _, tt := range tests {

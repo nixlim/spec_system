@@ -286,7 +286,7 @@ func TestTruncate(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDefaultClaudeRunner(t *testing.T) {
-	runner := DefaultClaudeRunner("/tmp/workspace", 0, "")
+	runner := DefaultClaudeRunner("/tmp/workspace", 0, "", "")
 
 	if runner.Command != "claude" {
 		t.Errorf("expected command 'claude', got %q", runner.Command)
@@ -320,8 +320,27 @@ func TestDefaultClaudeRunner(t *testing.T) {
 	}
 }
 
+func TestDefaultClaudeRunner_WithModel(t *testing.T) {
+	runner := DefaultClaudeRunner("/tmp/workspace", 0, "", "claude-opus-4-6")
+
+	// Model is stored in the Model field and appended to args at Run time.
+	if runner.Model != "claude-opus-4-6" {
+		t.Errorf("expected Model field claude-opus-4-6, got %q", runner.Model)
+	}
+}
+
+func TestDefaultClaudeRunner_NoModel(t *testing.T) {
+	runner := DefaultClaudeRunner("/tmp/workspace", 0, "", "")
+
+	for _, arg := range runner.Args {
+		if arg == "--model" {
+			t.Errorf("expected no --model flag when model is empty, got args: %v", runner.Args)
+		}
+	}
+}
+
 func TestDefaultClaudeRunner_WithOTELPort(t *testing.T) {
-	runner := DefaultClaudeRunner("/tmp/workspace", 4317, "my-feature")
+	runner := DefaultClaudeRunner("/tmp/workspace", 4317, "my-feature", "")
 
 	if runner.Env["OTEL_METRICS_EXPORTER"] != "otlp" {
 		t.Errorf("expected OTEL_METRICS_EXPORTER=otlp, got %q", runner.Env["OTEL_METRICS_EXPORTER"])
@@ -344,7 +363,7 @@ func TestDefaultClaudeRunner_WithOTELPort(t *testing.T) {
 }
 
 func TestDefaultClaudeRunner_WithOTELPort_NoFeature(t *testing.T) {
-	runner := DefaultClaudeRunner("/tmp/workspace", 4317, "")
+	runner := DefaultClaudeRunner("/tmp/workspace", 4317, "", "")
 
 	// OTEL vars should still be set.
 	if runner.Env["OTEL_METRICS_EXPORTER"] != "otlp" {

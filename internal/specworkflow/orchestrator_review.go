@@ -15,6 +15,9 @@ import (
 // findings, updates the issue tracker, and transitions to either REVISING
 // (if critical/major findings) or JUDGING (if none).
 func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string) error {
+	// Pour review-cycle molecule at round start (CD-88v.11).
+	o.pourReviewMolecule(state.Round)
+
 	// Check circuit breakers before dispatch.
 	if err := o.checkBreakersBefore(state); err != nil {
 		o.escalateFrom(StateReviewing)
@@ -70,7 +73,7 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 		TimeoutSeconds: o.config.ReviewerTimeoutSeconds,
 	}
 	round := state.Round
-	result, err := DispatchReviewers(o.runner, o.codexRunner, SpecReviewerLensGroups(), prompts, outputPaths, codexOutputPaths, dispatchCfg, func(d time.Duration) {},
+	result, err := DispatchReviewers(o.runnerFor("reviewer"), o.codexRunner, SpecReviewerLensGroups(), prompts, outputPaths, codexOutputPaths, dispatchCfg, func(d time.Duration) {},
 		func(r ReviewerResult) {
 			success := r.Error == nil
 			if success {
@@ -124,6 +127,15 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 	// Add findings to tracker.
 	o.tracker.AddFindings(merged.Findings)
 
+	// Create Beads finding issues (graceful degradation if unavailable).
+	if len(merged.Findings) == 0 {
+		// Spec §2.2 scenario 7: zero findings → annotate run epic with convergence.
+		o.postRunEpicComment("orchestrator",
+			fmt.Sprintf("Round %d: zero new findings — convergence", state.Round))
+	} else {
+		o.createBeadsFindings(merged.Findings)
+	}
+
 	// Update state findings summary.
 	state.FindingsSummary = o.tracker.GetFindingSummary()
 
@@ -138,6 +150,9 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 		o.escalateFrom(StateReviewing)
 		return nil
 	}
+
+	// Close review molecule step (CD-88v.11).
+	o.closeMoleculeStep(state.Round, "reviewing")
 
 	// If zero CRITICAL/MAJOR: skip to JUDGING directly.
 	if state.FindingsSummary.OpenCritical == 0 && state.FindingsSummary.OpenMajor == 0 {
@@ -186,7 +201,7 @@ func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specD
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		resultsCh <- o.runHoldoutProvider("claude", o.runner, specPath, mergedFindingsPath, state.Round, claudeJSONPath, claudeMDPath, timeout, maxAttempts)
+		resultsCh <- o.runHoldoutProvider("claude", o.runnerFor("holdout"), specPath, mergedFindingsPath, state.Round, claudeJSONPath, claudeMDPath, timeout, maxAttempts)
 	}()
 
 	// Codex holdout agent (when available).
@@ -368,11 +383,23 @@ func (o *Orchestrator) handleRevising(state *WorkflowStateJSON, specDir string) 
 	mergedPath := filepath.Join(specDir, fmt.Sprintf("merged-findings-round-%d.json", state.Round))
 	revisionInputPath := filepath.Join(specDir, fmt.Sprintf("merged-findings-spec-round-%d.json", state.Round))
 
-	if err := writeRevisionFindingsInput(mergedPath, revisionInputPath); err != nil {
+	if err := writeRevisionFindingsInput(mergedPath, revisionInputPath, o.tracker.TerminalIDs()); err != nil {
 		return fmt.Errorf("prepare revision findings: %w", err)
 	}
 
-	prompt, err := o.promptBuilder.BuildReviserPrompt(specPath, revisionInputPath, state.Round)
+	// If the previous judge BLOCKed this round, pass that file as feedback.
+	judgeBlockPath := ""
+	judgePath := filepath.Join(specDir, fmt.Sprintf("judge-round-%d.json", state.Round))
+	if data, err := os.ReadFile(judgePath); err == nil {
+		var jout struct {
+			Verdict string `json:"verdict"`
+		}
+		if json.Unmarshal(data, &jout) == nil && jout.Verdict == "BLOCK" {
+			judgeBlockPath = judgePath
+		}
+	}
+
+	prompt, err := o.promptBuilder.BuildReviserPrompt(specPath, revisionInputPath, state.Round, judgeBlockPath)
 	if err != nil {
 		return fmt.Errorf("build reviser prompt: %w", err)
 	}
@@ -391,7 +418,7 @@ func (o *Orchestrator) handleRevising(state *WorkflowStateJSON, specDir string) 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		currentPrompt := AppendValidationErrorsToPrompt(prompt, lastValidationErrors)
 
-		cost, duration, dispatchErr := o.dispatchAgent("reviser", currentPrompt, outPath)
+		cost, duration, dispatchErr := o.dispatchAgent("reviser", currentPrompt, outPath, o.runnerFor("reviser"))
 		if dispatchErr != nil {
 			if attempt < maxAttempts {
 				log.Printf("[orchestrator] reviser dispatch failed on attempt %d/%d: %v", attempt, maxAttempts, dispatchErr)
@@ -434,12 +461,20 @@ func (o *Orchestrator) handleRevising(state *WorkflowStateJSON, specDir string) 
 		}
 	}
 
+	// Post reviser comments on Beads findings (CD-88v.16).
+	for _, change := range revision.Changes {
+		o.postReviserComment(change.FindingID, state.Round, change.Description)
+	}
+
 	// Increment spec version.
 	state.CurrentSpecVersion = state.Round
 
 	// Emit spec version event.
 	specVersionPath := filepath.Join(specDir, fmt.Sprintf("spec-v%d.md", state.Round))
 	o.emitter.Emit(NewSpecVersionEvent(state.Round, state.Round, specVersionPath))
+
+	// Close revise molecule step (CD-88v.11).
+	o.closeMoleculeStep(state.Round, "revising")
 
 	o.logTransition(StateRevising, StateJudging)
 	if err := o.sm.Transition(StateJudging); err != nil {
@@ -448,7 +483,7 @@ func (o *Orchestrator) handleRevising(state *WorkflowStateJSON, specDir string) 
 	return nil
 }
 
-func writeRevisionFindingsInput(sourcePath, outputPath string) error {
+func writeRevisionFindingsInput(sourcePath, outputPath string, terminalIDs map[string]bool) error {
 	data, err := os.ReadFile(sourcePath)
 	if err != nil {
 		return err
@@ -464,6 +499,9 @@ func writeRevisionFindingsInput(sourcePath, outputPath string) error {
 	for _, finding := range merged.Findings {
 		if normalizeFindingTarget(finding.Target) == "holdout" {
 			continue
+		}
+		if terminalIDs[finding.ID] {
+			continue // already resolved — reviser must not re-address terminal findings
 		}
 		finding.Target = normalizeFindingTarget(finding.Target)
 		filteredFindings = append(filteredFindings, finding)
@@ -483,8 +521,18 @@ func writeRevisionFindingsInput(sourcePath, outputPath string) error {
 // convergence and authority limits, and routes to the next state.
 func (o *Orchestrator) handleJudging(state *WorkflowStateJSON, specDir string) error {
 	specPath := o.currentSpecPath(state)
-	issueTrackerPath := filepath.Join(specDir, fmt.Sprintf("merged-findings-round-%d.json", state.Round))
 	revisionPath := filepath.Join(specDir, fmt.Sprintf("revision-round-%d.json", state.Round))
+
+	// Write live tracker state so the judge sees current finding statuses, not
+	// the frozen "all open" snapshot produced by the merger at round start.
+	issueTrackerPath := filepath.Join(specDir, fmt.Sprintf("issue-tracker-round-%d.json", state.Round))
+	if liveState, err := json.Marshal(o.tracker.ExportLiveState(state.Round)); err == nil {
+		_ = os.WriteFile(issueTrackerPath, liveState, 0o644)
+	} else {
+		// Fall back to the frozen merged findings if marshal fails.
+		issueTrackerPath = filepath.Join(specDir, fmt.Sprintf("merged-findings-round-%d.json", state.Round))
+		log.Printf("[orchestrator] warning: failed to marshal live tracker state: %v — falling back to merged findings", err)
+	}
 
 	prompt, err := o.promptBuilder.BuildJudgePrompt(specPath, issueTrackerPath, revisionPath, state.Round)
 	if err != nil {
@@ -504,10 +552,11 @@ func (o *Orchestrator) handleJudging(state *WorkflowStateJSON, specDir string) e
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		currentPrompt := AppendValidationErrorsToPrompt(prompt, lastValidationErrors)
 
-		cost, duration, dispatchErr := o.dispatchAgent("judge", currentPrompt, outPath)
+		cost, duration, dispatchErr := o.dispatchAgent("judge", currentPrompt, outPath, o.runnerFor("judge"))
 		if dispatchErr != nil {
 			if attempt < maxAttempts {
 				log.Printf("[orchestrator] judge dispatch failed on attempt %d/%d: %v", attempt, maxAttempts, dispatchErr)
+				o.emitter.Emit(NewAgentErrorEvent("judge", detectErrorType(dispatchErr.Error()), dispatchErr.Error(), attempt, maxAttempts))
 				lastValidationErrors = []string{fmt.Sprintf("agent dispatch failed: %v", dispatchErr)}
 				continue
 			}
@@ -545,6 +594,11 @@ func (o *Orchestrator) handleJudging(state *WorkflowStateJSON, specDir string) e
 		}
 	}
 	o.tracker.CloseVerifiedFindings(state.Round)
+
+	// Post judge verdict comments on Beads findings (CD-88v.16).
+	for _, u := range judge.IssueUpdates {
+		o.postJudgeComment(u.FindingID, state.Round, u.NewStatus, u.Explanation)
+	}
 
 	// Update findings summary.
 	state.FindingsSummary = o.tracker.GetFindingSummary()
@@ -651,6 +705,9 @@ func (o *Orchestrator) handleJudging(state *WorkflowStateJSON, specDir string) e
 		return nil
 	}
 
+	// Close judge molecule step (CD-88v.11).
+	o.closeMoleculeStep(state.Round, "judging")
+
 	// Route based on final verdict.
 	switch verdictResult.FinalVerdict {
 	case VerdictPass:
@@ -672,7 +729,15 @@ func (o *Orchestrator) handleJudging(state *WorkflowStateJSON, specDir string) e
 			return fmt.Errorf("transition JUDGING -> REVIEWING: %w", err)
 		}
 	case VerdictBlock:
-		o.escalateFrom(StateJudging)
+		// The reviser underdelivered — loop back to REVISING rather than
+		// escalating. The judge's output file (judge-round-N.json) stays on
+		// disk; BuildReviserPrompt will pick it up as block feedback so the
+		// reviser knows exactly what was left unaddressed.
+		log.Printf("[orchestrator] judge BLOCK on round %d — returning to REVISING with judge feedback", state.Round)
+		o.logTransition(StateJudging, StateRevising)
+		if err := o.sm.Transition(StateRevising); err != nil {
+			return fmt.Errorf("transition JUDGING -> REVISING on BLOCK: %w", err)
+		}
 	}
 	return nil
 }
@@ -680,10 +745,17 @@ func (o *Orchestrator) handleJudging(state *WorkflowStateJSON, specDir string) e
 // handleHumanGateFinal presents the final spec for human review and handles
 // the accept/reject decision.
 func (o *Orchestrator) handleHumanGateFinal(state *WorkflowStateJSON, specDir string) error {
+	// Create gate proxy in Beads (CD-88v.10).
+	o.openGateProxy("gatefinal", o.featureName+": gate-final — Final approval required")
+
 	// Present final spec + critical resolutions.
 	o.emitter.Emit(NewGateRequestEvent("final_review", state.FeatureName, state))
 
-	resp := <-o.gateCh
+	// Wait for human response — race gateCh against Beads gate polling (CD-88v.10).
+	resp := o.waitForGateResponse("accept", "reject")
+	if resp.Action == gateActionCancelled {
+		return fmt.Errorf("workflow cancelled")
+	}
 
 	switch resp.Action {
 	case "accept":

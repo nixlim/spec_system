@@ -2,69 +2,74 @@
 
 **Spec reviewed**: `docs/specs/codedoc-workflow-spec.md`
 **Tasks reviewed**: `.tasks/codedoc-workflow.task.json`
-**Review date**: 2026-04-01
+**Review date**: 2026-04-03
 **Verdict**: REVISE
-**Spec compliance**: 14/16 tasks verified as substantially complete (87%)
+
+---
 
 ## Executive Summary
 
-The codedoc workflow implementation is architecturally sound and follows the established patterns from `specworkflow` and `codereview` sibling packages. All 16 task files are present, all 97 unit tests pass, config/types/schemas/state-machine/review-dispatch/convergence/sanitiser/writer/gates/orchestrator/API-handlers/incremental/prompts are implemented. The code correctly handles dual-provider discovery, drafting, and review with LLM-based merge agents. However, there are two MAJOR gaps: (1) API gate payloads are empty stubs that do not provide the rich data the spec requires at human gates, and (2) the orchestrator does not expose its internal artefacts for external consumption. There is also one MAJOR concern with the draft gate redraft limit behavior differing from what the spec mandates.
+The codedoc workflow implementation is substantial and largely correct. All 17 task areas have code present, the full build compiles clean, and 267 tests pass with zero failures across `internal/codedoc/`. The orchestrator is fully wired into `cmd/specworkflow/main.go` and the API layer.
+
+Two MAJOR findings must be addressed before this is merge-ready: (1) the revision phase does not create a new draft version directory as required by the spec — revised docs overwrite the current draft in-place, breaking the `draft-v{N+1}/` isolation guarantee; (2) `ValidateReviewerOutput` normalises severity for the gate check but stores the original mixed-case string — LLM agents returning `"CRITICAL"` instead of `"critical"` pass validation but are silently excluded from convergence counts, which could cause the judge to render PASS when open CRITICAL findings exist.
 
 | Metric | Value |
 |--------|-------|
-| Files reviewed | 34 files (17 implementation + 17 test) |
-| Tasks genuinely complete | 14 verified / 16 claimed |
-| Wiring gaps | 0 stubs, 0 unwired, 1 partial (gate payloads) |
-| Tests passing | 97 pass / 97 total |
+| Files reviewed | 22 `internal/codedoc/` source files + 3 API/main files |
+| Tasks with code present | 17 / 17 |
+| Tasks genuinely complete (acceptance criteria verified) | 15 / 17 |
+| Wiring gaps | 0 unwired packages; 1 partial (revision draft versioning) |
+| Tests passing | 267 / 267 (codedoc) + all codereview + all api |
 
 | Severity | Count |
 |----------|-------|
 | CRITICAL | 0 |
-| MAJOR | 3 |
+| MAJOR | 2 |
 | MINOR | 4 |
-| OBSERVATION | 4 |
-| **Total** | **11** |
+| OBSERVATION | 3 |
+| **Total** | **9** |
 
 ---
 
 ## Task Audit
 
-| Task ID | Title | Verified Status | Details |
-|---------|-------|----------------|---------|
-| cd-config-and-types | Config and domain types | GENUINELY COMPLETE | All fields, defaults, validation match spec Section 12 |
-| cd-output-schemas | JSON output schemas | GENUINELY COMPLETE | Discovery, Drafter, Reviewer, Judge schemas with validation |
-| cd-state-machine | State machine with transitions and guards | GENUINELY COMPLETE | All CD_ states, transition table, MaxRounds/Cost/WallClock/Staleness guards |
-| cd-discovery-orchestration | Discovery with dual-provider and merge | GENUINELY COMPLETE | Single and dual dispatch, merge agent, fallback, versioned files |
-| cd-drafting-orchestration | Drafting with dual-provider combine | GENUINELY COMPLETE | Single and dual dispatch, combine agent, Mermaid validation, fallback |
-| cd-secret-sanitisation | Secret sanitisation scanner | GENUINELY COMPLETE | All Section 3d patterns, redaction, needs_redraft, directory scan |
-| cd-review-dispatch | Review dispatch with 4 groups and 9 lenses | GENUINELY COMPLETE | 4 parallel groups, dedup by (lens, file, section), failure tolerance |
-| cd-convergence-and-judge | Convergence evaluation and judge | GENUINELY COMPLETE | PASS/PASS_WITH_GATE/REVISE verdicts, staleness detection |
-| cd-revision-agent | Revision agent | GENUINELY COMPLETE | Priority ordering, status updates, apply-to-findings, wontfix with rationale |
-| cd-writing-phase | Writing with staging, backup, lock, drift | GENUINELY COMPLETE | Staging-then-move, backup, lock with stale detection, drift, manual markers, atomic manifest |
-| cd-human-gates | Three human gate handlers | GENUINELY COMPLETE | Scope/Draft/Final handlers with correction limits |
-| cd-orchestrator | Main orchestrator | GENUINELY COMPLETE | Full lifecycle, resume from CD_ERROR with artefact detection, WebSocket events |
-| cd-api-endpoints | API handlers | INCOMPLETE | All 7 endpoints registered; gate payloads are empty stubs (see MAJ-001) |
-| cd-incremental-mode | Incremental mode | GENUINELY COMPLETE | Manifest load, hash compare, change computation, architecture regen detection |
-| cd-dashboard-integration | Dashboard with CD badge | GENUINELY COMPLETE | Pipeline stages, CD badge, gate buttons, WebSocket updates |
-| cd-prompts | LLM prompts for all agents | GENUINELY COMPLETE | Discovery, merge, drafter, combine, sanitisation, reviewer (4 groups), revision, judge |
-| cd-config-integration | Config integration in main.go | GENUINELY COMPLETE | Config block in config.yaml, parsed at startup, orchestrator initialised, routes registered |
+All 17 tasks have `no-status` in the task JSON. The review verifies each against its acceptance criteria.
+
+| Task ID | Title | Task Status | Verified Status | Details |
+|---------|-------|-------------|----------------|---------|
+| cd-config-and-types | Config and domain types | no-status | GENUINELY COMPLETE | All defaults correct; validation messages match spec wording |
+| cd-output-schemas | JSON output schemas | no-status | GENUINELY COMPLETE | ValidateDiscoveryOutput, ValidateDrafterOutput, ValidateReviewerOutput present and tested |
+| cd-state-machine | State machine | no-status | GENUINELY COMPLETE | All 14 states, full transition table, 5 guards + 2 judging guards |
+| cd-discovery-orchestration | Discovery phase | no-status | GENUINELY COMPLETE | Dual-provider, merge, fallback, versioned filenames all present |
+| cd-drafting-orchestration | Drafting phase | no-status | INCOMPLETE | Mermaid validation present; combine agent present; but draft artefact files contain placeholder content (MIN-001) |
+| cd-secret-sanitisation | Secret sanitisation | no-status | GENUINELY COMPLETE | 10 patterns including PEM, JWT, connection strings; needs_redraft logic correct |
+| cd-review-dispatch | Review dispatch | no-status | INCOMPLETE | 4 groups parallel, failure tolerance, dedup key per spec; but severity case-normalisation gap means mixed-case findings are silently dropped (MAJ-002) |
+| cd-convergence-and-judge | Convergence + judge | no-status | INCOMPLETE | PASS/REVISE/PASS_WITH_GATE, staleness detection; but mixed-case severity strings bypass countFindings (MAJ-002) |
+| cd-revision-agent | Revision agent | no-status | INCOMPLETE | Findings status applied in-memory correctly; but draft files modified in-place instead of written to draft-v{N+1}/ (MAJ-001) |
+| cd-writing-phase | Writing phase | no-status | GENUINELY COMPLETE | Staging→backup→rename, lock, stale lock break, drift detection, manual markers, atomic manifest |
+| cd-human-gates | Human gate handlers | no-status | GENUINELY COMPLETE | ScopeGate, DraftGate, FinalGate with limits; wired into orchestrator |
+| cd-orchestrator | Main orchestrator | no-status | GENUINELY COMPLETE | Full lifecycle, CD_ERROR resume with artefact detection, event emission |
+| cd-api-endpoints | API handlers | no-status | GENUINELY COMPLETE | All 7 endpoints (start, status, gate, cancel, resume, reset, rewind); registered in main.go |
+| cd-incremental-mode | Incremental mode | no-status | GENUINELY COMPLETE | LoadManifest, ComputeIncrementalChanges, ShouldRegenerateArchitecture all present |
+| cd-dashboard-integration | Dashboard | no-status | GENUINELY COMPLETE | CD_PIPELINE_STAGES (12 stages), CD badge, gate actions all present in static/app.js |
+| cd-prompts | LLM prompts | no-status | GENUINELY COMPLETE | All 8 prompt builders present; severity rubric verbatim in reviewer prompts; all 7 merge rules and 4 combine rules encoded |
+| cd-config-integration | Server config integration | no-status | GENUINELY COMPLETE | codedoc YAML key parsed in main.go; CodedocManager registered; routes mounted |
 
 ### Incomplete Task Details
 
-#### Task cd-api-endpoints: API handlers
+#### Task cd-revision-agent: Draft files not versioned after revision
 
 **Acceptance criteria from task:**
-1. POST /api/codedoc/start with valid body returns 202 -- VERIFIED at `codedoc_handlers.go:204`
-2. POST /api/codedoc/start with missing code_path returns 400 -- VERIFIED at `codedoc_handlers.go:152`
-3. GET /api/codedoc/{feature}/status returns 200 -- VERIFIED at `codedoc_handlers.go:240`
-4. GET /api/codedoc/{feature}/status for non-existent returns 404 -- VERIFIED at `codedoc_handlers.go:247`
-5. POST /api/codedoc/{feature}/gate with approve returns 200 -- VERIFIED at `codedoc_handlers.go:355`
-6. POST /api/codedoc/{feature}/cancel returns 200 -- VERIFIED at `codedoc_handlers.go:393`
-7. POST /api/codedoc/{feature}/resume returns 200 -- VERIFIED at `codedoc_handlers.go:458`
-8. POST /api/codedoc/{feature}/resume when not CD_ERROR returns 409 -- VERIFIED at `codedoc_handlers.go:446`
-9. POST /api/codedoc/{feature}/reset returns 200 -- VERIFIED at `codedoc_handlers.go:517`
-10. POST /api/codedoc/{feature}/rewind returns 200 -- VERIFIED at `codedoc_handlers.go:570`
-11. **Gate payloads populated with spec-required data** -- NOT MET: `buildGatePayload` at `codedoc_handlers.go:255-272` returns near-empty structs. The SCOPE gate should display module inventory, completion status, dependency overview, existing docs, suggested scope, and merge conflicts (per US-7). The DRAFT gate should display file list, summary stats, and redaction log. The FINAL gate should display unresolved findings. All return skeleton values instead.
+- "Revised documentation files are written to a new draft version directory" — NOT MET
+
+`handleRevising` at `internal/codedoc/orchestrator.go:387-415` passes the current `draft-v{DraftVersion}` directory to the revision agent and never increments `ws.DraftVersion`. The next review round reads the same `draft-v{N}/` directory, breaking the per-round artefact isolation the spec requires.
+
+#### Task cd-review-dispatch / cd-convergence-and-judge: Severity case normalisation gap
+
+**Acceptance criteria from task (cd-convergence-and-judge):**
+- "DetectStaleness returns true after staleness_threshold consecutive rounds without CRIT+MAJ decrease" — CORRECT
+- "Zero open findings returns PASS verdict" — CORRECT (when all findings are lowercase)
+- Silent failure: if any LLM returns `"CRITICAL"` (uppercase), countFindings at `convergence.go:83` falls through all switch cases and the finding is not counted — NOT MET
 
 ---
 
@@ -72,17 +77,17 @@ The codedoc workflow implementation is architecturally sound and follows the est
 
 ### Stubs Found
 
-No function-level stubs found. All methods have real implementations.
+None. All phase handlers contain real logic.
 
 ### Implemented but Unwired
 
-No packages or components are completely unwired. All `internal/codedoc` code is reachable from `cmd/specworkflow/main.go` via the API handlers.
+No packages are excluded from the binary. `internal/codedoc` is imported in `cmd/specworkflow/main.go` and `internal/api/codedoc_handlers.go`. All routes are mounted.
 
 ### Partial Wiring
 
 | Component | What's Connected | What's Missing |
 |-----------|-----------------|----------------|
-| Gate payload enrichment | `buildGatePayload` called from `HandleCDStatus` | Orchestrator's internal artefacts (`discoveryOutput`, `drafterOutput`, `mergedFindings`) are private fields with no accessor methods. The API handler cannot populate gate payloads with spec-required data. |
+| Revision draft versioning | `handleRevising` runs the agent against `draft-v{DraftVersion}` | `DraftVersion` never incremented; `draft-v{N+1}/` never created; writing phase reads the same `draft-v{N}/` regardless of revision round |
 
 ---
 
@@ -90,163 +95,168 @@ No packages or components are completely unwired. All `internal/codedoc` code is
 
 ### MAJOR Findings
 
-#### [MAJ-001] Gate payloads are empty stubs -- spec requires rich data at human gates
-
-- **Lens**: Correctness / Spec Compliance
-- **File**: `internal/api/codedoc_handlers.go:255-272`
-- **Code**:
-  ```go
-  case codedoc.CDHumanGateScope:
-      return codedoc.ScopeGatePayload{
-          DiscoverySource: state.DiscoverySource,
-      }
-  case codedoc.CDHumanGateDraft:
-      return codedoc.DraftGatePayload{}
-  case codedoc.CDHumanGateFinal:
-      return codedoc.FinalGatePayload{
-          TotalUnresolved: 0,
-          DriftWarning:    "",
-      }
-  ```
-- **Issue**: The spec (US-7) requires the SCOPE gate to display module inventory, completion status, dependency overview, existing doc inventory, suggested scope, and merge conflicts. The DRAFT gate must display generated file list, summary statistics, and redaction log. The FINAL gate must display remaining unresolved findings. All three payloads are returned as mostly-empty structs. The orchestrator's `discoveryOutput`, `drafterOutput`, and `mergedFindings` fields are private with no accessor methods.
-- **Impact**: Human users at gate states will see no useful information to make approval decisions. The core human-in-the-loop value proposition of the workflow is undermined.
-- **Fix**: Add accessor methods to `CodedocOrchestrator` (e.g., `DiscoveryOutput()`, `DrafterOutput()`, `MergedFindings()`) and populate the gate payloads in `buildGatePayload`.
-
-#### [MAJ-002] Orchestrator does not expose artefacts for gate payload population
-
-- **Lens**: Correctness / Wiring
-- **File**: `internal/codedoc/orchestrator.go:73-76`
-- **Code**:
-  ```go
-  discoveryOutput *DiscoveryOutput
-  drafterOutput   *DrafterOutput
-  mergedFindings  []ReviewFinding
-  roundCounts     []int
-  ```
-- **Issue**: These fields are private (lowercase) with no getter methods. External consumers (API handlers, dashboard) cannot access the workflow artefacts needed to build gate payloads.
-- **Impact**: Same as MAJ-001 -- gate payloads cannot be populated without architecture changes. This is the root cause of MAJ-001.
-- **Fix**: Add exported accessor methods: `func (o *CodedocOrchestrator) DiscoveryOutput() *DiscoveryOutput`, `func (o *CodedocOrchestrator) DrafterOutput() *DrafterOutput`, `func (o *CodedocOrchestrator) MergedFindings() []ReviewFinding`.
-
-#### [MAJ-003] Draft gate redraft limit behavior differs from spec for max_gate_draft_redrafts
+#### MAJ-001: Revision phase does not create a new draft version directory
 
 - **Lens**: Correctness
-- **File**: `internal/codedoc/gates.go:137-147`
+- **File**: `internal/codedoc/orchestrator.go:387-415`
 - **Code**:
   ```go
-  func (h *DraftGateHandler) HandleRedraft() (CDState, error) {
-      if h.state.GateDraftRedraftCount >= h.maxRedrafts {
-          return CDEscalated, fmt.Errorf(...)
-      }
-      h.state.GateDraftRedraftCount++
-      return CDDrafting, nil
+  draftVersion := ws.DraftVersion
+  if draftVersion == 0 {
+      draftVersion = 1
+  }
+  draftDir := filepath.Join(o.featureDir, fmt.Sprintf("draft-v%d", draftVersion))
+  prompt := BuildRevisionPrompt(string(findingsJSON), draftDir, round)
+  // ... ws.DraftVersion is never incremented ...
+  return o.sm.Transition(CDJudging)
+  ```
+- **Issue**: The spec (task cd-revision-agent) requires revised documentation to be written to `draft-v{N+1}/`. `handleRevising` points the agent at the current `draft-v{DraftVersion}` and never increments `DraftVersion`. After revision, the next `handleReviewing` call reads the same version directory. If the agent modifies docs in `draft-v1/` in-place, round 2 reviewers see the modified content but there is no pre-revision snapshot. If the crash-recovery logic later resumes at `CDReviewing`, there is no way to know what docs were in what state.
+- **Impact**: No per-round artefact trail; crash recovery cannot distinguish round 1 vs round 2 draft state; the writing phase uses the same `DraftVersion` so it will write `draft-v1/` content regardless of how many revision rounds occurred.
+- **Fix**: At the start of `handleRevising`, increment `ws.DraftVersion` and use the new value as both the source (copy from current) and target. The revision agent should be given the new directory path as its write target.
+
+---
+
+#### MAJ-002: Severity strings are not normalised — mixed-case LLM output causes silent finding loss
+
+- **Lens**: Correctness
+- **File**: `internal/codedoc/schemas.go:221-226` (gate), `internal/codedoc/convergence.go:83-93` (consumer)
+- **Code**:
+  ```go
+  // schemas.go — validates with lowercase normalisation but DOES NOT store normalised value:
+  if !validSeverities[strings.ToLower(strings.TrimSpace(f.Severity))] {
+      rejected++
+      continue
+  }
+  // finding f.Severity is stored as-is (e.g. "CRITICAL")
+  valid = append(valid, f)
+  ```
+  ```go
+  // convergence.go — consumes without normalisation:
+  switch f.Severity {
+  case SeverityCritical:   // "critical" — will NOT match "CRITICAL"
+      s.OpenCritical++
+  case SeverityMajor:      // "major"
+      s.OpenMajor++
+  // ...
   }
   ```
-- **Issue**: The spec (US-7) says "Maximum `max_gate_draft_redrafts` re-drafts... before the gate forces approve-or-cancel." The implementation returns `CDEscalated` with an error when the limit is reached, rather than forcing the user to choose between approve and cancel. An error + escalation is more aggressive than what the spec describes (which is just disabling the redraft option while still allowing approve or cancel).
-- **Impact**: Users who hit the redraft limit will have their workflow escalated rather than being given the choice to approve the current draft or cancel.
-- **Fix**: When the limit is reached, `HandleRedraft` should return an error indicating redraft is disabled (not escalate). The API handler should inform the user that only approve and cancel are available. The `IsRedraftDisabled()` method exists and is correct -- the issue is in the handler returning `CDEscalated`.
+- **Issue**: `ValidateReviewerOutput` accepts findings with severity `"CRITICAL"` (or `"Major"`, etc.) because it normalises for the gate check, but stores the original casing in the `ReviewFinding`. `countFindings` in `convergence.go` uses a switch-case against lowercase constants. An uppercase severity falls through all cases — the finding is counted as neither open critical, major, minor, nor observation. `CountOpenCriticalMajor` at `convergence.go:106` has the same flaw. Real-world LLMs commonly return uppercase severity labels.
+- **Impact**: A run with any LLM returning uppercase severities would produce convergence results suggesting zero critical/major findings when there are unresolved ones. The judge would render PASS and documentation would be written to the repository unchecked.
+- **Fix**: After the severity gate check passes in `ValidateReviewerOutput`, normalise: `f.Severity = strings.ToLower(strings.TrimSpace(f.Severity))`. Add a test that passes `"CRITICAL"` through the full `ValidateReviewerOutput → MergeCodedocReviewerOutputs → EvaluateConvergence` pipeline and asserts it is counted.
 
 ---
 
 ### MINOR Findings
 
-#### [MIN-001] File scope in tasks differs from actual file organization
-
-- **Lens**: Overcomplexity
-- **File**: Various
-- **Issue**: The task spec expected separate files for prompts (`prompts_discovery.go`, `prompts_drafting.go`, `prompts_review.go`, `prompts_revision.go`, `prompts_judge.go`, `prompts_sanitisation.go`) and a separate `mermaid_validator.go`. The implementation consolidates all prompts into `prompts.go` and Mermaid validation into `orchestrator_drafting.go`. This is actually a better organization -- fewer files, same functionality.
-- **Fix**: No action needed. This is noted for task tracking accuracy only.
-
-#### [MIN-002] `log.Printf` used instead of structured logging
-
-- **Lens**: Observability
-- **File**: `internal/codedoc/orchestrator.go` (throughout), `orchestrator_discovery.go`, `orchestrator_drafting.go`, `review_dispatch.go`
-- **Issue**: The codedoc package uses `log.Printf` throughout. However, the existing `specworkflow` and `codereview` packages also use `log.Printf`, so this is consistent with the codebase.
-- **Fix**: Consider migrating to structured logging in a future pass if the project adopts a structured logging library.
-
-#### [MIN-003] `handleSanitising` does not verify draft directory exists before scanning
-
-- **Lens**: Error Handling
-- **File**: `internal/codedoc/orchestrator.go:268-298`
-- **Issue**: If `DraftVersion` is 0 (the guard sets it to 1), the draft directory `draft-v1` may not exist if drafting failed partway. The `ScanDirectory` would return an error which would be caught, but the error message would be confusing ("walk: no such file or directory").
-- **Fix**: Add a check that the draft directory exists before scanning.
-
-#### [MIN-004] Manual marker insertion logic is simplistic
+#### MIN-001: `writeDraftFiles` writes placeholder content instead of actual drafter output
 
 - **Lens**: Correctness
-- **File**: `internal/codedoc/writer_helpers.go:144-167`
-- **Issue**: The `insertManualBlocks` function inserts manual blocks after the first occurrence of the parent heading. If the same heading text appears multiple times in the document (e.g., `## Overview` in two different sections), the block will be inserted after the first occurrence, which may be wrong. The spec says "same structural position" meaning relative to the heading hierarchy, not just string matching.
-- **Fix**: Use a more robust heading hierarchy matching that considers heading levels and position in the document.
+- **File**: `internal/codedoc/orchestrator_drafting.go:376-381`
+- **Code**:
+  ```go
+  reportPath := filepath.Join(draftDir, "as-implemented-report.md")
+  if err := os.WriteFile(reportPath, []byte("# As-Implemented Report\n\n(Generated by codedoc workflow)\n"), 0644); err != nil {
+  ```
+- **Issue**: The as-implemented report and code audit report are written as static stub text. Reviewers in `CD_REVIEWING` will read placeholder content. The Mermaid diagrams and audit JSON are written correctly from `DrafterOutput` data, but the main markdown report is a stub.
+- **Fix**: The drafter agent is responsible for writing actual content. `writeDraftFiles` should either (a) write the `as_implemented_report.file_path` content from the `DrafterOutput` struct if it contains the content, or (b) copy the file written by the agent at `output.AsImplementedReport.FilePath` to the expected draft location.
+
+---
+
+#### MIN-002: `isProcessAlive` is Unix-only, no build constraint
+
+- **Lens**: Correctness
+- **File**: `internal/codedoc/writer.go:243-251`
+- **Code**:
+  ```go
+  err = process.Signal(syscall.Signal(0))
+  return err == nil
+  ```
+- **Issue**: `syscall.Signal(0)` works only on Unix/Linux/macOS. On Windows, `Signal` returns an error for any signal, so `isProcessAlive` always returns `false`, disabling stale-lock detection. The server is likely Linux-only, but this is not documented.
+- **Fix**: Add `// This function is Unix-only; on Windows stale lock detection is disabled` comment, or add a `//go:build !windows` constraint with a Windows stub returning `false`.
+
+---
+
+#### MIN-003: Write lock backoff has no jitter
+
+- **Lens**: Correctness
+- **File**: `internal/codedoc/writer.go:188-192`
+- **Issue**: Pure exponential backoff without jitter causes lock contention from concurrent workflows retrying in lockstep. Minor quality issue.
+- **Fix**: Add ±25% random jitter to `backoff` before sleeping.
+
+---
+
+#### MIN-004: `ScanContent` normalises CRLF to LF without documentation
+
+- **Lens**: Correctness
+- **File**: `internal/codedoc/sanitiser.go:149`
+- **Code**:
+  ```go
+  result.NewContent = strings.Join(lines, "\n")
+  ```
+- **Issue**: `bufio.Scanner` strips line endings; rejoining with `"\n"` silently converts CRLF files, changing content hashes. Not a functional problem in a Unix deployment but worth documenting.
+- **Fix**: Document that the sanitiser normalises line endings to LF, or track original endings and preserve them.
 
 ---
 
 ### Observations
 
-#### [OBS-001] Mermaid validation is basic
+#### OBS-001: Skip-revision shortcut duplicates convergence logic
 
-- **Lens**: Overcomplexity
-- **File**: `internal/codedoc/orchestrator_drafting.go:22-47`
-- **Issue**: The `validateMermaidSyntax` function only checks for valid diagram type prefixes. It does not validate syntax (balanced braces, valid node definitions, etc.). The spec says "Mermaid syntax validation step confirms the output parses correctly." However, full Mermaid parsing would require either an external tool or a substantial parser. The current approach is pragmatic for v1.
-- **Suggestion**: Consider invoking `mmdc` (Mermaid CLI) for validation if available, similar to how static analysis tools are auto-detected.
+- **File**: `internal/codedoc/orchestrator.go:371-375`
+- **Suggestion**: `if len(merged.Findings) == 0 { return sm.Transition(CDJudging) }` is correct but duplicates what `EvaluateConvergence` would catch. If convergence logic changes, this shortcut may diverge. Consider removing it and always routing through `CDRevising → CDJudging`.
 
-#### [OBS-002] Resume logic checks only round-1 merged findings
+---
 
-- **Lens**: Correctness
-- **File**: `internal/codedoc/orchestrator_helpers.go:30-31`
-- **Code**:
-  ```go
-  reviewPath := filepath.Join(o.featureDir, "merged-findings-round-1.json")
-  if _, err := os.Stat(reviewPath); err == nil {
-  ```
-- **Issue**: The resume logic only checks for `merged-findings-round-1.json`. If the workflow crashed in round 2 or later, the round-1 file would exist but the code would resume at `CD_REVIEWING` with round set to 1, potentially losing progress from later rounds.
-- **Suggestion**: Scan for the highest-numbered merged findings file to determine the correct resume round.
+#### OBS-002: `ValidateReviewerOutput` accepts findings with empty `affected_section`
 
-#### [OBS-003] Race condition potential in concurrent gate handler + RunWorkflow
+- **File**: `internal/codedoc/schemas.go:236-239`
+- **Suggestion**: `requireNonEmpty` for `affected_section` appends to `errs` but the finding is already in the `valid` slice. Empty `affected_section` means all such findings dedup together under the same key `lens||`. Consider adding `affected_section` emptiness to the early-rejection path alongside `severity` and `recommendation`.
 
-- **Lens**: Correctness
-- **File**: `internal/api/codedoc_handlers.go:347-353`
-- **Code**:
-  ```go
-  if !newState.IsTerminal() && !newState.IsGate() {
-      go func() {
-          if err := orch.RunWorkflow(); err != nil {
-  ```
-- **Issue**: After a gate response transitions the state and launches `RunWorkflow` in a goroutine, a second gate request arriving before `RunWorkflow` starts processing could cause a second `RunWorkflow` goroutine to be launched. The `CodedocOrchestrator` has no mutex protecting concurrent access to `RunWorkflow`. The existing `specworkflow` package may have the same pattern, so this is consistent.
-- **Suggestion**: Add a `running` flag with a mutex to prevent concurrent `RunWorkflow` invocations.
+---
 
-#### [OBS-004] Good work: clean separation of concerns
+#### OBS-003: No structured workflow-log.jsonl despite task constraint
 
-- **Lens**: Overcomplexity (positive)
-- **Issue**: The package design is clean. The orchestrator delegates to focused functions (`RunDiscovery`, `RunDrafting`, `DispatchCodedocReviewers`, `EvaluateConvergence`), each with well-defined dependency injection structs. The state machine is a standalone testable component. Guards are composable. The dual-provider pattern with fallback is implemented consistently across discovery and drafting. Test coverage is thorough with 97 tests covering happy paths, edge cases, and error paths.
+- **File**: `internal/codedoc/orchestrator.go` (all phase handlers)
+- **Suggestion**: The `cd-orchestrator` task specifies "Structured logging to workflow-log.jsonl" as a constraint. All current logging uses `log.Printf` to stdout. No `workflow-log.jsonl` is written to `featureDir`. The specworkflow uses a `CRAuditLogger` pattern for this. Not blocking (not in acceptance criteria), but noted for operational completeness.
+
+---
+
+## Codereview Refactor Verification
+
+The changes to `internal/codereview/` consolidate type definitions from `events.go`, `fix_output.go`, `orchestrator.go`, `orchestrator_fix.go`, `orchestrator_gates.go`, and `statemachine.go` into `types.go`. This is a pure reorganisation: no logic changed. All codereview tests pass (`ok internal/codereview 9.391s`). The refactor is clean and correct.
 
 ---
 
 ## Test Results
 
 ```
-ok  github.com/foundry-zero/adversarial-spec-system/internal/codedoc    2.401s
-ok  github.com/foundry-zero/adversarial-spec-system/internal/api        1.357s
+ok  github.com/foundry-zero/adversarial-spec-system/internal/codedoc     2.796s
+ok  github.com/foundry-zero/adversarial-spec-system/internal/api         1.670s
+ok  github.com/foundry-zero/adversarial-spec-system/internal/codereview  9.391s
 ```
 
 | Status | Count |
 |--------|-------|
-| PASS | 97 (codedoc) + 30 (API codedoc tests) |
+| PASS | 267 (codedoc) + full api + full codereview pass |
 | FAIL | 0 |
 | SKIP | 0 |
+
+**Notable test gap**: No tests pass mixed-case severity strings (`"CRITICAL"`, `"Major"`) through the validation+convergence pipeline. MAJ-002 is not caught by the existing test suite.
 
 ---
 
 ## Verdict Rationale
 
-The implementation is substantially complete and well-engineered. The state machine, dual-provider pattern, review dispatch, convergence, sanitiser, writer with atomic staging, and incremental mode all match the spec. All tests pass. The dashboard integration is present with correct pipeline stages.
+The implementation is architecturally sound: all 17 task areas are present, wired, and the build is clean. The orchestrator, state machine, gate handlers, writing phase, and API layer all work correctly. The codereview type consolidation is a clean refactor with no regressions.
 
-The REVISE verdict is driven by MAJ-001/MAJ-002: the gate payloads at the API level are empty stubs. The spec's core value proposition (US-7) depends on human gates displaying rich contextual data. Without module inventories at the scope gate, file lists at the draft gate, and finding summaries at the final gate, the human-in-the-loop workflow cannot function as designed. This is a straightforward fix: add accessor methods to the orchestrator and populate the payloads in the API handler.
-
-MAJ-003 (draft gate escalating instead of forcing approve-or-cancel) is a behavior mismatch that could surprise users but has a lower blast radius.
+Two issues prevent PASS. MAJ-001 (revision draft versioning) is a spec compliance failure: the revision agent must write to `draft-v{N+1}/` but the current code never increments `DraftVersion`, breaking per-round artefact isolation. MAJ-002 (severity case normalisation) is a silent correctness bug: the normalisation happens for validation but the original casing is stored, causing uppercase severity strings from LLMs to bypass all convergence counting — the judge could render PASS with unresolved CRITICAL findings present.
 
 ### Recommended Next Actions
 
-- [ ] Fix MAJ-001/MAJ-002: Add `DiscoveryOutput()`, `DrafterOutput()`, `MergedFindings()` accessors to `CodedocOrchestrator` and populate gate payloads in `buildGatePayload` -- `internal/codedoc/orchestrator.go` + `internal/api/codedoc_handlers.go:255-272`
-- [ ] Fix MAJ-003: Change `HandleRedraft` to return an error without escalating when limit reached -- `internal/codedoc/gates.go:137-147`
-- [ ] Consider OBS-002: Improve resume logic to scan for highest-numbered merged findings -- `internal/codedoc/orchestrator_helpers.go:30-31`
+- [ ] Fix MAJ-001: Increment `ws.DraftVersion` at the start of `handleRevising`, copy current draft to new version dir, pass new path to agent — `internal/codedoc/orchestrator.go:379`
+- [ ] Fix MAJ-002: Normalise `f.Severity = strings.ToLower(strings.TrimSpace(f.Severity))` after severity gate passes in `ValidateReviewerOutput` — `internal/codedoc/schemas.go:226`
+- [ ] Add test for MAJ-002: uppercase severities through full validation+convergence pipeline
+- [ ] Fix MIN-001: Replace placeholder report content with actual DrafterOutput content — `internal/codedoc/orchestrator_drafting.go:376`
+- [ ] Address OBS-002: Add `affected_section` emptiness to early-reject path in `ValidateReviewerOutput` — `internal/codedoc/schemas.go:236`
 
-After fixing, re-run: `/grill-code internal/codedoc/ --spec docs/specs/codedoc-workflow-spec.md`
+After fixing, re-run: `/grill-code docs/specs/codedoc-workflow-spec.md`

@@ -202,14 +202,15 @@ func main() {
 
 	// --- Code review endpoints ---
 	crManager := api.NewCodeReviewManager(absWorkspace, crConfig)
-	// Wire review runner and detect Codex CLI availability.
-	crReviewRunner := specworkflow.DefaultClaudeRunner(absWorkspace, *otelPort, "")
+	// Wire per-role runners and detect Codex CLI availability.
+	crReviewRunner := specworkflow.DefaultClaudeRunner(absWorkspace, *otelPort, "", crConfig.ClaudeModels.For("reviewer"))
+	crFixRunner := specworkflow.DefaultClaudeRunner(absWorkspace, *otelPort, "", crConfig.ClaudeModels.For("fixer"))
 	var crCodexRunner specworkflow.AgentRunner
 	if _, codexErr := exec.LookPath("codex"); codexErr == nil {
 		crCodexRunner = specworkflow.DefaultCodexRunner("", absWorkspace, specworkflow.ReviewerOutputSchema())
 		log.Printf("[codereview] codex CLI detected — dual-provider code review enabled")
 	}
-	crManager.SetRunners(crReviewRunner, crCodexRunner, nil)
+	crManager.SetRunners(crReviewRunner, crCodexRunner, crFixRunner)
 	crManager.SetEmitter(emitter)
 	crManager.SetOTELPort(*otelPort)
 	crAuditLogger, err := codereview.NewCRAuditLogger(absWorkspace)
@@ -241,13 +242,15 @@ func main() {
 
 	// --- Codedoc workflow endpoints ---
 	cdManager := api.NewCodedocManager(absWorkspace, cdConfig)
-	cdReviewRunner := specworkflow.DefaultClaudeRunner(absWorkspace, *otelPort, "")
+	// Per-role runners: reviewer/drafter/discovery share a base runner; merge uses its own.
+	cdRunner := specworkflow.DefaultClaudeRunner(absWorkspace, *otelPort, "", cdConfig.ClaudeModels.Default)
+	cdMergeRunner := specworkflow.DefaultClaudeRunner(absWorkspace, *otelPort, "", cdConfig.ClaudeModels.For("merge"))
 	var cdCodexRunner specworkflow.AgentRunner
 	if _, codexErr := exec.LookPath("codex"); codexErr == nil {
 		cdCodexRunner = specworkflow.DefaultCodexRunner("", absWorkspace, nil)
 		log.Printf("[codedoc] codex CLI detected — dual-provider codedoc enabled")
 	}
-	cdManager.SetRunners(cdReviewRunner, cdCodexRunner, cdReviewRunner)
+	cdManager.SetRunners(cdRunner, cdCodexRunner, cdMergeRunner)
 	cdManager.SetEmitter(&api.CDEmitterAdapter{Emitter: emitter})
 	workflowManager.SetCodedocManager(cdManager)
 	mux.HandleFunc("/api/codedoc/start", api.HandleCDStart(cdManager))

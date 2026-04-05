@@ -325,4 +325,8 @@ type WorkflowStateJSON struct {
 	// TaskReviewRound is the per-stage round counter for task review.
 	// Persisted for crash recovery so max rounds enforcement survives restarts.
 	TaskReviewRound int `json:"task_review_round,omitempty"`
+	// RunID is a UUID generated at workflow start for run isolation.
+	// Stored in both workflow-state.json and KV ({feature}:run_id).
+	// On recovery, KV and file values are compared to confirm same run (FR-040–042).
+	RunID string `json:"run_id,omitempty"`
 }

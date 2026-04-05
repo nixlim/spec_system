@@ -428,6 +428,141 @@ func (r orchHoldoutRunner) Run(_ string, outputPath string, _ int) (int, string,
 }
 
 // ---------------------------------------------------------------------------
+// Feature name validation tests
+// ---------------------------------------------------------------------------
+
+func TestFeatureName_ColonRejected(t *testing.T) {
+	err := ValidateFeatureName("auth:login")
+	if err == nil {
+		t.Fatal("expected error for feature name with colon")
+	}
+	if !strings.Contains(err.Error(), "must match [a-zA-Z0-9_-]+") {
+		t.Fatalf("error should mention pattern, got: %v", err)
+	}
+}
+
+func TestFeatureName_SlashRejected(t *testing.T) {
+	err := ValidateFeatureName("auth/login")
+	if err == nil {
+		t.Fatal("expected error for feature name with slash")
+	}
+	if !strings.Contains(err.Error(), "must match [a-zA-Z0-9_-]+") {
+		t.Fatalf("error should mention pattern, got: %v", err)
+	}
+}
+
+func TestFeatureName_ValidNames(t *testing.T) {
+	valid := []string{"payment-disputes", "auth_flow", "MyFeature", "test123", "a", "A-b_c"}
+	for _, name := range valid {
+		if err := ValidateFeatureName(name); err != nil {
+			t.Errorf("ValidateFeatureName(%q) = %v, want nil", name, err)
+		}
+	}
+
+	invalid := []string{"", "has space", "auth:login", "auth/login", "hello@world", "semi;colon", "a.b"}
+	for _, name := range invalid {
+		if err := ValidateFeatureName(name); err == nil {
+			t.Errorf("ValidateFeatureName(%q) = nil, want error", name)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Lock file tests
+// ---------------------------------------------------------------------------
+
+func TestStartupLock_PreventsSecondProcess(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, "test.workflow.lock")
+
+	// Write a lock file with our own PID (which IS running).
+	currentPID := os.Getpid()
+	if err := os.WriteFile(lockPath, []byte(strconv.Itoa(currentPID)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Attempting to acquire the lock should fail.
+	err := acquireLock(lockPath)
+	if err == nil {
+		t.Fatal("expected error when lock file has a running PID")
+	}
+	if !strings.Contains(err.Error(), "Another orchestrator process may be running") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+	if !strings.Contains(err.Error(), strconv.Itoa(currentPID)) {
+		t.Fatalf("error should contain PID %d, got: %v", currentPID, err)
+	}
+}
+
+func TestStartupLock_StaleLockAutoRemoved(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, "test.workflow.lock")
+
+	// Write a lock file with a PID that is definitely not running.
+	// PID 2147483647 (max int32) is extremely unlikely to be a real process.
+	stalePID := 2147483647
+	if err := os.WriteFile(lockPath, []byte(strconv.Itoa(stalePID)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Acquiring the lock should succeed — stale lock is auto-removed.
+	if err := acquireLock(lockPath); err != nil {
+		t.Fatalf("acquireLock failed for stale PID: %v", err)
+	}
+
+	// Verify the lock file now contains our PID.
+	data, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("failed to read lock file: %v", err)
+	}
+	gotPID, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+	if gotPID != os.Getpid() {
+		t.Errorf("lock file PID = %d, want %d", gotPID, os.Getpid())
+	}
+}
+
+func TestStartupLock_ReleasedOnCleanExit(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, "test.workflow.lock")
+
+	// Acquire the lock.
+	if err := acquireLock(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	// Verify it exists.
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatal("lock file should exist after acquire")
+	}
+
+	// Release the lock.
+	releaseLock(lockPath)
+
+	// Verify it's gone.
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Error("lock file should be removed after release")
+	}
+}
+
+func TestStartupLock_NoLockFileAcquiresCleanly(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, "test.workflow.lock")
+
+	// No pre-existing lock file — acquire should succeed.
+	if err := acquireLock(lockPath); err != nil {
+		t.Fatalf("acquireLock failed: %v", err)
+	}
+
+	data, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("lock file not created: %v", err)
+	}
+	gotPID, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+	if gotPID != os.Getpid() {
+		t.Errorf("lock file PID = %d, want %d", gotPID, os.Getpid())
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -510,7 +645,7 @@ func TestWriteRevisionFindingsInput_ExcludesHoldoutTargets(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := writeRevisionFindingsInput(sourcePath, outputPath); err != nil {
+	if err := writeRevisionFindingsInput(sourcePath, outputPath, nil); err != nil {
 		t.Fatalf("writeRevisionFindingsInput: %v", err)
 	}
 

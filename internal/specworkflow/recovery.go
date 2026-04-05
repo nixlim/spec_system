@@ -195,6 +195,15 @@ func DetermineRecovery(err *AgentError, currentState WorkflowState, round, maxRo
 
 	// Judge failures.
 	if currentState == StateJudging {
+		// Hard failures (crash, timeout, rate-limit, context overflow) have no
+		// recoverable output — always escalate regardless of round count.
+		if err.Type == ErrCrash || err.Type == ErrTimeout || err.Type == ErrRateLimited || err.Type == ErrContextOverflow {
+			return RecoveryAction{
+				Action: ActionEscalate,
+				Reason: fmt.Sprintf("judge hard failure (%s) after %d retries; escalating to human", err.Type, err.MaxRetries),
+			}
+		}
+		// Soft failures (bad/missing output) — fall back to REVISE while rounds remain.
 		if round >= maxRounds {
 			return RecoveryAction{
 				Action: ActionEscalate,
@@ -203,7 +212,7 @@ func DetermineRecovery(err *AgentError, currentState WorkflowState, round, maxRo
 		}
 		return RecoveryAction{
 			Action: ActionDefaultRevise,
-			Reason: "judge failed before max rounds; defaulting to conservative REVISE verdict",
+			Reason: "judge produced invalid output; defaulting to conservative REVISE verdict",
 		}
 	}
 

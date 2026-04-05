@@ -45,6 +45,35 @@ type CodeReviewConfig struct {
 	// ReviewerTimeoutSeconds is the timeout for each reviewer agent subprocess.
 	// Default: 300
 	ReviewerTimeoutSeconds int `yaml:"reviewer_timeout_seconds"`
+
+	// ClaudeModels holds per-role model overrides for Claude agent invocations.
+	ClaudeModels ClaudeModelConfig `yaml:"claude_models"`
+}
+
+// ClaudeModelConfig holds per-role model overrides for code review Claude agents.
+// An empty field falls back to Default; empty Default means the CLI picks its own default.
+type ClaudeModelConfig struct {
+	// Default is the fallback model for any role not explicitly overridden.
+	Default string `yaml:"default"`
+	// Reviewer is the model for the code review agent.
+	Reviewer string `yaml:"reviewer"`
+	// Fixer is the model for the code fix agent.
+	Fixer string `yaml:"fixer"`
+}
+
+// For returns the model for role, falling back to Default.
+func (m ClaudeModelConfig) For(role string) string {
+	var specific string
+	switch role {
+	case "reviewer":
+		specific = m.Reviewer
+	case "fixer":
+		specific = m.Fixer
+	}
+	if specific != "" {
+		return specific
+	}
+	return m.Default
 }
 
 // validCommitModes is the set of allowed CommitMode values.

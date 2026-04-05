@@ -581,6 +581,7 @@
       var wfType = wf.workflow_type || "spec";
       var typeLabel = wfType === "code_review" ? "CR" : wfType === "codedoc" ? "CD" : "SPEC";
       var typeBadgeClass = "wsi-type-badge" + (wfType === "codedoc" ? " wsi-type-cd" : "");
+      nameSpan.appendChild(document.createTextNode(" "));
       nameSpan.appendChild(el("span", { className: typeBadgeClass, textContent: typeLabel }));
 
       // Notification badge — red dot for unselected workflows needing attention
@@ -602,6 +603,14 @@
           el("span", { className: "wsi-running-dot" }),
           document.createTextNode("running")
         ]));
+      } else {
+        var stateUp = state.toUpperCase();
+        var isTerminal = stateUp === "COMPLETE" || stateUp === "ESCALATED" || stateUp === "ERROR" ||
+          stateUp === "CR_COMPLETE" || stateUp === "CR_ESCALATED" ||
+          stateUp === "CD_COMPLETE" || stateUp === "CD_ESCALATED" || stateUp === "CD_ERROR";
+        if (!isTerminal && stateUp !== "IDLE") {
+          item.appendChild(el("span", { className: "wsi-not-running-indicator", textContent: "not running" }));
+        }
       }
 
       // Metrics: cost, elapsed time
@@ -1245,7 +1254,10 @@
       }
 
       // Restore active agents from server on page load / reconnect.
-      if (displayStatus.is_running && Object.keys(activeAgents).length === 0) {
+      // Do NOT restore for terminal states — they have no live agents.
+      var terminalStates = ["COMPLETE", "FINALIZED", "ESCALATED", "CR_COMPLETE", "CR_ESCALATED", "ERROR"];
+      var isTerminal = terminalStates.indexOf((displayStatus.state || "").toUpperCase()) !== -1;
+      if (displayStatus.is_running && !isTerminal && Object.keys(activeAgents).length === 0) {
         restoreActiveAgents(displayStatus.feature_name);
       }
 
@@ -1745,6 +1757,14 @@
             el("span", { className: "wsi-running-dot" }),
             document.createTextNode("agent running")
           ]));
+        } else {
+          var fStateUp = (f.state || "").toUpperCase();
+          var fIsTerminal = fStateUp === "COMPLETE" || fStateUp === "ESCALATED" || fStateUp === "ERROR" ||
+            fStateUp === "CR_COMPLETE" || fStateUp === "CR_ESCALATED" ||
+            fStateUp === "CD_COMPLETE" || fStateUp === "CD_ESCALATED" || fStateUp === "CD_ERROR";
+          if (!fIsTerminal && fStateUp !== "IDLE" && fStateUp !== "UNKNOWN" && fStateUp !== "") {
+            nameRow.appendChild(el("span", { className: "workflow-not-running-badge", textContent: "not running" }));
+          }
         }
 
         info.appendChild(nameRow);
@@ -1788,6 +1808,7 @@
         var actions = el("div", { className: "workflow-actions" });
 
         var stateUpper = (f.state || "").toUpperCase();
+        var wfType = f.workflow_type || "spec";
         var isTerminal = f.is_terminal;
         var isPaused = f.is_paused;
         var isGate = stateUpper.indexOf("HUMAN_GATE") !== -1 || stateUpper === "TASK_HUMAN_GATE";
@@ -1797,9 +1818,8 @@
           // Resume button — continues from where it left off
           if (stateUpper === "ESCALATED" || stateUpper === "ERROR" || isPaused) {
             var termResumeBtn = el("button", {
-              className: "btn btn-sm",
-              textContent: "Resume",
-              style: "background:#d4edda;color:#155724;border-color:#c3e6cb;"
+              className: "btn btn-success btn-sm",
+              textContent: "Resume"
             });
             termResumeBtn.addEventListener("click", (function (featureName) {
               return function () {
@@ -1882,9 +1902,8 @@
         if (isGate) {
           // Resume button for gate states — starts orchestrator and shows gate panel
           var resumeBtn = el("button", {
-            className: "btn btn-sm",
-            textContent: "Resume",
-            style: "background:#e8d5f5;color:#6f42c1;border-color:#d5b8eb;"
+            className: "btn btn-purple btn-sm",
+            textContent: "Resume"
           });
           resumeBtn.addEventListener("click", (function (featureName, stateStr) {
             return function () {
@@ -2019,9 +2038,8 @@
         // Restart button for active or gate states — stops and starts fresh.
         if (isActive || isGate) {
           var liveRestartBtn = el("button", {
-            className: "btn btn-sm",
-            textContent: "Restart",
-            style: "background:#fff3cd;color:#856404;border-color:#ffc107;"
+            className: "btn btn-warning btn-sm",
+            textContent: "Restart"
           });
           liveRestartBtn.addEventListener("click", (function (featureName) {
             return function () {
@@ -2069,9 +2087,8 @@
         // Finalize button — force-finish a stuck workflow
         if (!isTerminal && stateUpper !== "UNKNOWN") {
           var finalizeBtn = el("button", {
-            className: "btn btn-sm",
-            textContent: "Finalize",
-            style: "background:#d4edda;color:#155724;border-color:#c3e6cb;"
+            className: "btn btn-success btn-sm",
+            textContent: "Finalize"
           });
           finalizeBtn.addEventListener("click", (function (featureName) {
             return function () {
@@ -2155,9 +2172,8 @@
           rewindRow.appendChild(roundInput);
 
           var rewindBtn = el("button", {
-            className: "btn btn-sm",
-            textContent: "Rewind",
-            style: "background:#fff3cd;color:#856404;border-color:#ffc107;font-size:12px;"
+            className: "btn btn-warning btn-sm",
+            textContent: "Rewind"
           });
           rewindBtn.addEventListener("click", (function (featureName, selectEl, roundEl) {
             return function () {
@@ -4087,7 +4103,33 @@
   // Init
   // -----------------------------------------------------------------------
 
+  // -----------------------------------------------------------------------
+  // Theme toggle
+  // -----------------------------------------------------------------------
+
+  function initTheme() {
+    var btn = document.getElementById("btn-theme-toggle");
+    var saved = localStorage.getItem("theme");
+    if (saved === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+      btn.textContent = "Dark Mode";
+    }
+    btn.addEventListener("click", function () {
+      var current = document.documentElement.getAttribute("data-theme");
+      if (current === "light") {
+        document.documentElement.removeAttribute("data-theme");
+        localStorage.setItem("theme", "dark");
+        btn.textContent = "Light Mode";
+      } else {
+        document.documentElement.setAttribute("data-theme", "light");
+        localStorage.setItem("theme", "light");
+        btn.textContent = "Dark Mode";
+      }
+    });
+  }
+
   function init() {
+    initTheme();
     initTabs();
     initGoalForm();
     initUpload();

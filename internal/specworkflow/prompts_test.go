@@ -461,7 +461,7 @@ func TestPromptReviewerRoundTwoIncludesLatestHoldoutPath(t *testing.T) {
 
 func TestPromptReviserNonEmpty(t *testing.T) {
 	pb := newTestPromptBuilder(t)
-	prompt, err := pb.BuildReviserPrompt("/tmp/spec-v0.md", "/tmp/merged.json", 1)
+	prompt, err := pb.BuildReviserPrompt("/tmp/spec-v0.md", "/tmp/merged.json", 1, "")
 	if err != nil {
 		t.Fatalf("BuildReviserPrompt error: %v", err)
 	}
@@ -472,7 +472,7 @@ func TestPromptReviserNonEmpty(t *testing.T) {
 
 func TestPromptReviserDoesNotIncludeHoldout(t *testing.T) {
 	pb := newTestPromptBuilder(t)
-	prompt, err := pb.BuildReviserPrompt("/tmp/spec-v0.md", "/tmp/merged.json", 1)
+	prompt, err := pb.BuildReviserPrompt("/tmp/spec-v0.md", "/tmp/merged.json", 1, "")
 	if err != nil {
 		t.Fatalf("BuildReviserPrompt error: %v", err)
 	}
@@ -486,7 +486,7 @@ func TestPromptReviserDoesNotIncludeHoldout(t *testing.T) {
 
 func TestPromptReviserEmbedsTemplates(t *testing.T) {
 	pb := newTestPromptBuilder(t)
-	prompt, err := pb.BuildReviserPrompt("/tmp/spec-v0.md", "/tmp/merged.json", 2)
+	prompt, err := pb.BuildReviserPrompt("/tmp/spec-v0.md", "/tmp/merged.json", 2, "")
 	if err != nil {
 		t.Fatalf("BuildReviserPrompt error: %v", err)
 	}
@@ -503,7 +503,7 @@ func TestPromptReviserEmbedsTemplates(t *testing.T) {
 
 func TestPromptReviserOutputPaths(t *testing.T) {
 	pb := newTestPromptBuilder(t)
-	prompt, err := pb.BuildReviserPrompt("/tmp/spec-v0.md", "/tmp/merged.json", 2)
+	prompt, err := pb.BuildReviserPrompt("/tmp/spec-v0.md", "/tmp/merged.json", 2, "")
 	if err != nil {
 		t.Fatalf("BuildReviserPrompt error: %v", err)
 	}

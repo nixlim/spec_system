@@ -53,7 +53,7 @@ func (o *Orchestrator) handleTaskify(state *WorkflowStateJSON, specDir string) e
 		o.emitter.Emit(NewAgentDispatchEvent("taskify", state.Round))
 
 		// Dispatch agent.
-		cost, duration, runErr := o.dispatchAgent("taskify", prompt, taskGraphPath)
+		cost, duration, runErr := o.dispatchAgent("taskify", prompt, taskGraphPath, o.runnerFor("taskify"))
 		if runErr != nil {
 			log.Printf("[orchestrator] taskify agent failed on attempt %d: %v", attempt, runErr)
 			lastValidationErrors = []string{fmt.Sprintf("agent dispatch failed: %v", runErr)}
@@ -91,7 +91,8 @@ func (o *Orchestrator) handleTaskify(state *WorkflowStateJSON, specDir string) e
 			attempt, maxRetries))
 	}
 
-	// All retries exhausted — escalate.
+	// All retries exhausted — post Beads notification and escalate (CD-88v.15).
+	o.postTaskvalExhaustion(lastValidationErrors)
 	reason := fmt.Sprintf("taskify failed after %d attempts: %s", maxRetries, strings.Join(lastValidationErrors, "; "))
 	log.Printf("[orchestrator] %s", reason)
 	o.escalateFrom(StateTaskify)
@@ -141,13 +142,19 @@ func loadHumanComments(specDir string) (string, error) {
 func (o *Orchestrator) handleTaskHumanGate(state *WorkflowStateJSON, specDir string) error {
 	taskGraphPath := filepath.Join(o.workspaceDir, ".tasks", o.featureName+".task.json")
 
+	// Create gate proxy in Beads (CD-88v.10).
+	o.openGateProxy("taskgate", o.featureName+": gate-taskify — Taskify review required")
+
 	// Emit gate request event.
 	o.emitter.Emit(NewGateRequestEvent("task_human_gate", "task_approval", map[string]string{
 		"task_graph_path": taskGraphPath,
 	}))
 
-	// Wait for human response.
-	resp := <-o.gateCh
+	// Wait for human response — race gateCh against Beads gate polling (CD-88v.10).
+	resp := o.waitForGateResponse("approve", "correct")
+	if resp.Action == gateActionCancelled {
+		return fmt.Errorf("workflow cancelled")
+	}
 
 	log.Printf("[orchestrator] task human gate response: action=%s", resp.Action)
 
@@ -275,11 +282,37 @@ func buildTaskifyPrompt(specContent, humanComments string, validationErrors []st
 	b.WriteString("## Output Requirements\n")
 	fmt.Fprintf(&b, "Write a JSON file to: .tasks/%s.task.json\n", featureName)
 	b.WriteString("The file MUST conform to the TaskGraphFile JSON Schema at .tasks/task-graph-schema.json.\n\n")
-	b.WriteString("Key requirements:\n")
-	b.WriteString("- version (string, required)\n")
-	b.WriteString("- tasks (array, non-empty)\n")
-	b.WriteString("- Each task: task_id (kebab-case), task_name, goal, inputs, outputs, acceptance (non-empty), depends_on, constraints, files_scope, priority (critical|high|medium|low), estimate (small|medium|large)\n")
-	b.WriteString("- depends_on must form a valid DAG: no cycles, no self-references, all references must point to existing task IDs\n")
+
+	b.WriteString("### Top-level fields\n")
+	b.WriteString("- `version` (string, required): schema version, e.g. \"0.1.0\"\n")
+	b.WriteString("- `tasks` (array, non-empty, required): list of task nodes\n\n")
+
+	b.WriteString("### Required fields per task node (STRUCTURED_TEMPLATE_SPEC §3.1)\n")
+	b.WriteString("Every task MUST include all 6 required fields:\n\n")
+	b.WriteString("1. `task_id` (string): Kebab-case, globally unique. Pattern: ^[a-z0-9]+(-[a-z0-9]+)*$. Max 60 chars.\n")
+	b.WriteString("2. `task_name` (string): Short imperative phrase starting with a verb. Max 80 chars.\n")
+	b.WriteString("3. `goal` (string): Single sentence describing a testable outcome.\n")
+	b.WriteString("   - MUST NOT contain the words \"try\", \"explore\", \"investigate\", or \"look into\" (these indicate underspecified tasks).\n")
+	b.WriteString("4. `inputs` (list<InputSpec>): Each entry: {name, type, constraints, source}.\n")
+	b.WriteString("5. `outputs` (list<OutputSpec>): Each entry: {name, type, constraints, destination}.\n")
+	b.WriteString("6. `acceptance` (list<string>, non-empty): Testable assertions. Each must be independently verifiable.\n\n")
+
+	b.WriteString("### Contextual fields\n")
+	b.WriteString("- `depends_on`: list of task_id references forming a valid DAG (no cycles, no self-references, all refs must exist).\n")
+	b.WriteString("  If a task has NO dependencies, write: {\"status\": \"N/A\", \"reason\": \"<justification>\"} — NOT an empty array.\n")
+	b.WriteString("- `constraints`: list of hard rules or architectural boundaries.\n")
+	b.WriteString("- `files_scope`: list of file paths or globs the task will create or modify.\n\n")
+
+	b.WriteString("### Optional fields\n")
+	b.WriteString("- `priority`: one of \"critical\", \"high\", \"medium\", \"low\"\n")
+	b.WriteString("- `estimate`: one of \"trivial\", \"small\", \"medium\", \"large\", \"unknown\"\n\n")
+
+	b.WriteString("### Type vocabulary (STRUCTURED_TEMPLATE_SPEC §4)\n")
+	b.WriteString("Use these types for `inputs[].type` and `outputs[].type` — NOT Go or TypeScript types:\n")
+	b.WriteString("- Primitives: string, int, i32, i64, float, f64, bool, bytes\n")
+	b.WriteString("- Compound: list<T>, map<K,V>, option<T>, union(A,B,C), tuple(T1,T2)\n")
+	b.WriteString("- Refined: int(1..100), float(> 0), string(len: 1..2000), string(pattern: \"...\"), list<T>(len: 1..50)\n")
+	b.WriteString("- Domain: filepath, url, uuid, datetime, exit_code\n")
 
 	return b.String()
 }

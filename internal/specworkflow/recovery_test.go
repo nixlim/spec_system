@@ -182,7 +182,9 @@ func TestRecovery_DetermineRecovery_SchemaViolation(t *testing.T) {
 	}
 }
 
-func TestRecovery_DetermineRecovery_JudgeDefaultRevise(t *testing.T) {
+func TestRecovery_DetermineRecovery_JudgeCrashEscalates(t *testing.T) {
+	// Hard failures (crash) on the judge always escalate regardless of round —
+	// there is no valid output to fall back on.
 	err := &AgentError{
 		Type:       ErrCrash,
 		Agent:      "judge",
@@ -190,8 +192,23 @@ func TestRecovery_DetermineRecovery_JudgeDefaultRevise(t *testing.T) {
 		MaxRetries: 3,
 	}
 	action := DetermineRecovery(err, StateJudging, 1, 3)
+	if action.Action != ActionEscalate {
+		t.Errorf("DetermineRecovery crash in JUDGING = %q, want %q", action.Action, ActionEscalate)
+	}
+}
+
+func TestRecovery_DetermineRecovery_JudgeSoftFailureDefaultRevise(t *testing.T) {
+	// Soft failures (invalid/missing output) on the judge use default REVISE
+	// while rounds remain, because there may be partial output to work with.
+	err := &AgentError{
+		Type:       ErrInvalidJSON,
+		Agent:      "judge",
+		RetryCount: 3,
+		MaxRetries: 3,
+	}
+	action := DetermineRecovery(err, StateJudging, 1, 3)
 	if action.Action != ActionDefaultRevise {
-		t.Errorf("DetermineRecovery for JUDGING not at max rounds = %q, want %q", action.Action, ActionDefaultRevise)
+		t.Errorf("DetermineRecovery invalid_json in JUDGING not at max rounds = %q, want %q", action.Action, ActionDefaultRevise)
 	}
 }
 
@@ -269,8 +286,8 @@ func TestRecovery_DetermineRecovery_RateLimitedRetryThenEscalate(t *testing.T) {
 
 	err.RetryCount = 3
 	action = DetermineRecovery(err, StateJudging, 2, 3)
-	if action.Action != ActionDefaultRevise {
-		t.Errorf("rate_limited exhausted in JUDGING not at max = %q, want %q", action.Action, ActionDefaultRevise)
+	if action.Action != ActionEscalate {
+		t.Errorf("rate_limited exhausted in JUDGING = %q, want %q (hard failure always escalates)", action.Action, ActionEscalate)
 	}
 }
 

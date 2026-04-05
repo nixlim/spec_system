@@ -6,6 +6,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -21,6 +22,21 @@ import (
 	"github.com/foundry-zero/adversarial-spec-system/internal/codereview"
 	"github.com/foundry-zero/adversarial-spec-system/internal/specworkflow"
 )
+
+// newBeadsClientOrNil creates a BeadsClient for the given workspace. If bd is
+// not on PATH (ErrBeadsUnavailable), it logs a warning and returns nil so the
+// orchestrator runs with Beads integration disabled (graceful degradation).
+func newBeadsClientOrNil(workspaceDir string) (specworkflow.BeadsClientInterface, error) {
+	client, err := specworkflow.NewBeadsClient(workspaceDir)
+	if err != nil {
+		if errors.Is(err, specworkflow.ErrBeadsUnavailable) {
+			log.Printf("[workflow] WARNING: bd not on PATH — Beads integration disabled")
+			return nil, nil
+		}
+		return nil, fmt.Errorf("beads client: %w", err)
+	}
+	return client, nil
+}
 
 // isTerminalWorkflowState reports whether the given workflow state is terminal
 // (COMPLETE or ESCALATED), meaning a new workflow can safely be started.
@@ -341,13 +357,18 @@ func (m *WorkflowManager) ResumeFromGate(featureName string) (*specworkflow.Orch
 	// Wrap the shared emitter so events carry this workflow's feature name.
 	// Use per-workflow source docs for isolation.
 	sourcePaths := discoverWorkflowSourceDocs(m.workspaceDir, featureName)
+	beadsClient, beadsErr := newBeadsClientOrNil(m.workspaceDir)
+	if beadsErr != nil {
+		return nil, fmt.Errorf("create orchestrator: %w", beadsErr)
+	}
 	orchConfig := specworkflow.OrchestratorConfig{
 		WorkspaceDir:   m.workspaceDir,
 		FeatureName:    featureName,
 		SourceDocPaths: sourcePaths,
 		Config:         m.config,
-		Runner:         specworkflow.DefaultClaudeRunner(m.workspaceDir, m.otelPort, featureName),
+		Runner:         specworkflow.DefaultClaudeRunner(m.workspaceDir, m.otelPort, featureName, m.config.ClaudeModels.Default),
 		Emitter:        specworkflow.NewFeatureEmitter(m.emitter, featureName),
+		BeadsClient:    beadsClient,
 	}
 	// Wire cost provider if metrics store is available.
 	if m.metricsStore != nil {
@@ -513,13 +534,20 @@ func HandleStartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 		// Wrap the shared emitter so events from this workflow carry its
 		// feature name — enabling client-side filtering when multiple
 		// workflows run concurrently.
+		beadsClient, beadsErr := newBeadsClientOrNil(wsDir)
+		if beadsErr != nil {
+			manager.mu.Unlock()
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create beads client: %v", beadsErr))
+			return
+		}
 		orchConfig := specworkflow.OrchestratorConfig{
 			WorkspaceDir:   wsDir,
 			FeatureName:    req.FeatureName,
 			SourceDocPaths: sourcePaths,
 			Config:         manager.config,
-			Runner:         specworkflow.DefaultClaudeRunner(wsDir, manager.otelPort, req.FeatureName),
+			Runner:         specworkflow.DefaultClaudeRunner(wsDir, manager.otelPort, req.FeatureName, manager.config.ClaudeModels.Default),
 			Emitter:        specworkflow.NewFeatureEmitter(manager.emitter, req.FeatureName),
+			BeadsClient:    beadsClient,
 		}
 
 		// Wire cost provider if metrics store is available.
@@ -1055,7 +1083,11 @@ func buildStatusObject(manager *WorkflowManager, state *specworkflow.WorkflowSta
 	if startTime, parseErr := time.Parse(time.RFC3339, state.StartedAt); parseErr == nil {
 		if paused || isTerminalWorkflowState(state.State) {
 			if endTime, endErr := time.Parse(time.RFC3339, state.UpdatedAt); endErr == nil {
-				wallClockSec = endTime.Sub(startTime).Seconds()
+				if d := endTime.Sub(startTime).Seconds(); d >= 0 {
+					wallClockSec = d
+				} else {
+					wallClockSec = time.Since(startTime).Seconds()
+				}
 			} else {
 				wallClockSec = time.Since(startTime).Seconds()
 			}
@@ -1288,13 +1320,19 @@ func HandleResumeWorkflow(manager *WorkflowManager) http.HandlerFunc {
 		sourcePaths := discoverWorkflowSourceDocs(manager.workspaceDir, req.FeatureName)
 
 		// Wrap the shared emitter so events carry this workflow's feature name.
+		beadsClient, beadsErr := newBeadsClientOrNil(manager.workspaceDir)
+		if beadsErr != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create beads client: %v", beadsErr))
+			return
+		}
 		orchConfig := specworkflow.OrchestratorConfig{
 			WorkspaceDir:   manager.workspaceDir,
 			FeatureName:    req.FeatureName,
 			SourceDocPaths: sourcePaths,
 			Config:         manager.config,
-			Runner:         specworkflow.DefaultClaudeRunner(manager.workspaceDir, manager.otelPort, req.FeatureName),
+			Runner:         specworkflow.DefaultClaudeRunner(manager.workspaceDir, manager.otelPort, req.FeatureName, manager.config.ClaudeModels.Default),
 			Emitter:        specworkflow.NewFeatureEmitter(manager.emitter, req.FeatureName),
+			BeadsClient:    beadsClient,
 		}
 		if manager.metricsStore != nil {
 			orchConfig.CostProvider = NewMetricsCostProvider(manager.metricsStore, req.FeatureName)
@@ -1341,6 +1379,21 @@ func determineResumeState(state *specworkflow.WorkflowStateJSON, workspaceDir, f
 	round := state.Round
 	if round < 1 {
 		round = 1
+	}
+
+	// If the persisted state is a non-terminal, non-idle active workflow state,
+	// trust it — the user or a manual rewind has set it deliberately.
+	// Artefact-based inference is only a fallback for ESCALATED/COMPLETE/unknown.
+	switch specworkflow.WorkflowState(state.State) {
+	case specworkflow.StateRevising,
+		specworkflow.StateReviewing,
+		specworkflow.StateJudging,
+		specworkflow.StateDrafting,
+		specworkflow.StateDiscovery,
+		specworkflow.StateHumanGate1,
+		specworkflow.StateHumanGate2,
+		specworkflow.StateHumanGateFinal:
+		return specworkflow.WorkflowState(state.State)
 	}
 
 	// If drafter output exists, we're past drafting. Check how far into
@@ -1988,7 +2041,7 @@ func HandleReplayPhase(manager *WorkflowManager) http.HandlerFunc {
 		case "discovery_merge":
 			round := state.Gate1CorrectionCount + 1
 			// Discovery merge requires an agent runner.
-			runner := specworkflow.DefaultClaudeRunner(workspace, manager.otelPort, req.FeatureName)
+			runner := specworkflow.DefaultClaudeRunner(workspace, manager.otelPort, req.FeatureName, manager.config.ClaudeModels.Default)
 			timeout := manager.config.AgentTimeoutSeconds
 			if timeout == 0 {
 				timeout = 120
@@ -1997,7 +2050,7 @@ func HandleReplayPhase(manager *WorkflowManager) http.HandlerFunc {
 
 		case "drafting_combine":
 			version := state.Gate2RedraftCount + 1
-			runner := specworkflow.DefaultClaudeRunner(workspace, manager.otelPort, req.FeatureName)
+			runner := specworkflow.DefaultClaudeRunner(workspace, manager.otelPort, req.FeatureName, manager.config.ClaudeModels.Default)
 			timeout := manager.config.AgentTimeoutSeconds
 			if timeout == 0 {
 				timeout = 120
@@ -2500,7 +2553,11 @@ func buildCRUnifiedStatusObject(state *codereview.CodeReviewStateJSON, paused bo
 	if startTime, parseErr := time.Parse(time.RFC3339, state.StartedAt); parseErr == nil {
 		if paused || state.State.IsTerminal() {
 			if endTime, endErr := time.Parse(time.RFC3339, state.UpdatedAt); endErr == nil {
-				wallClockSec = endTime.Sub(startTime).Seconds()
+				if d := endTime.Sub(startTime).Seconds(); d >= 0 {
+					wallClockSec = d
+				} else {
+					wallClockSec = time.Since(startTime).Seconds()
+				}
 			} else {
 				wallClockSec = time.Since(startTime).Seconds()
 			}
@@ -2565,7 +2622,11 @@ func buildCDUnifiedStatusObject(state *codedoc.CDStateJSON, paused bool) map[str
 	if startTime, parseErr := time.Parse(time.RFC3339, state.StartedAt); parseErr == nil {
 		if paused || state.State.IsTerminal() {
 			if endTime, endErr := time.Parse(time.RFC3339, state.UpdatedAt); endErr == nil {
-				wallClockSec = endTime.Sub(startTime).Seconds()
+				if d := endTime.Sub(startTime).Seconds(); d >= 0 {
+					wallClockSec = d
+				} else {
+					wallClockSec = time.Since(startTime).Seconds()
+				}
 			} else {
 				wallClockSec = time.Since(startTime).Seconds()
 			}

@@ -6,7 +6,7 @@
 # ===========================================================================
 
 # Maximum number of review/revise iterations allowed.
-max_rounds: 5
+max_rounds: 10
 
 # Minimum number of review/revise iterations required before accepting a spec.
 min_rounds: 2
@@ -56,6 +56,20 @@ enable_codex_drafting: true
 # Model for codex agents (reviewers, holdout, discovery, drafting — passed as -m flag).
 codex_model: "gpt-5.4"
 
+# Per-role model overrides for Claude agents. Each role falls back to `default`
+# if not set; an empty `default` means the claude CLI picks its own model.
+claude_models:
+  default: "claude-sonnet-4-6"
+  reviewer: "claude-sonnet-4-6"
+  holdout: "claude-sonnet-4-6"
+  reviser: "claude-opus-4-6"
+  judge: "claude-opus-4-6"
+  discovery: "claude-sonnet-4-6"
+  drafter: "claude-opus-4-6"
+  taskify: "claude-opus-4-6"
+  task_reviewer: "claude-sonnet-4-6"
+  task_reviser: "claude-opus-4-6"
+
 # Timeout for all reviewer agents in seconds (both Claude and Codex).
 reviewer_timeout_seconds: 900
 
@@ -97,6 +111,12 @@ code_review:
 
   # Timeout for each reviewer agent subprocess in seconds.
   reviewer_timeout_seconds: 300
+
+  # Per-role model overrides for Claude agents.
+  claude_models:
+    default: "claude-sonnet-4-6"
+    reviewer: "claude-sonnet-4-6"
+    fixer: "claude-opus-4-6"
 
 # ===========================================================================
 # Code Documentation Workflow Configuration
@@ -147,6 +167,14 @@ codedoc:
 
   # Codex model.
   codex_model: "gpt-5.4"
+
+  # Per-role model overrides for Claude agents.
+  claude_models:
+    default: "claude-sonnet-4-6"
+    reviewer: "claude-sonnet-4-6"
+    drafter: "claude-opus-4-6"
+    discovery: "claude-sonnet-4-6"
+    merge: "claude-sonnet-4-6"
 
   # Default mode: full or incremental.
   default_mode: "full"

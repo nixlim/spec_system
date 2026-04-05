@@ -83,10 +83,10 @@ func loadSkillsFromConfig(cfg OrchestratorConfig) (*SkillCache, error) {
 }
 
 // dispatchAgent dispatches a named agent with the given prompt and output
-// path. It checks cancellation before dispatch, logs the invocation, and
-// accumulates cost in the workflow state. Returns the cost, duration, and
-// any error.
-func (o *Orchestrator) dispatchAgent(agentName, prompt, outputPath string) (costUSD float64, durationMS int64, err error) {
+// path using the provided runner. It checks cancellation before dispatch, logs
+// the invocation, and accumulates cost in the workflow state. Returns the cost,
+// duration, and any error.
+func (o *Orchestrator) dispatchAgent(agentName, prompt, outputPath string, runner AgentRunner) (costUSD float64, durationMS int64, err error) {
 	if o.cancelled.Load() {
 		return 0, 0, fmt.Errorf("workflow cancelled before dispatching %s", agentName)
 	}
@@ -99,7 +99,7 @@ func (o *Orchestrator) dispatchAgent(agentName, prompt, outputPath string) (cost
 	// Emit agent dispatch event.
 	o.emitter.Emit(NewAgentDispatchEvent(agentName, state.Round))
 
-	exitCode, stderr, cost, duration, runErr := o.runner.Run(prompt, outputPath, o.config.AgentTimeoutSeconds)
+	exitCode, stderr, cost, duration, runErr := runner.Run(prompt, outputPath, o.config.AgentTimeoutSeconds)
 	state.AgentInvocations++
 	state.CumulativeCostUSD += cost
 
@@ -174,9 +174,16 @@ func (o *Orchestrator) handleAgentError(agentName string, err error, cost float6
 		return nil
 
 	case ActionDefaultRevise:
-		// Judge failed but we're not at max rounds — use a conservative REVISE.
-		log.Printf("judge failed: using default REVISE verdict (round %d/%d)",
-			o.sm.State().Round, o.config.MaxRounds)
+		// Judge produced invalid output; apply a conservative REVISE verdict by
+		// incrementing the round and transitioning directly to REVIEWING.
+		// We must NOT fall through to ProcessVerdict — judge is zero-valued
+		// (VerdictPass = 0) which would produce a false PASS.
+		ws := o.sm.State()
+		log.Printf("judge failed: applying default REVISE verdict (round %d -> %d)", ws.Round, ws.Round+1)
+		ws.Round++
+		if transErr := o.sm.Transition(StateReviewing); transErr != nil {
+			return fmt.Errorf("default revise transition JUDGING -> REVIEWING: %w", transErr)
+		}
 		return nil
 
 	case ActionEscalate:
@@ -307,7 +314,9 @@ func findingsToMerged(findings []Finding, agent string, round int) []MergedFindi
 // escalateFrom transitions to ESCALATED from the current state. If the
 // direct transition is not valid (e.g. from REVIEWING or REVISING), it
 // goes through ERROR first using the universal any->ERROR rule.
+// Closes any open gate proxies before escalating (CD-88v.14).
 func (o *Orchestrator) escalateFrom(from WorkflowState) {
+	o.closeOpenGateProxies(from.String())
 	if isValidTransition(from, StateEscalated) {
 		o.logTransition(from, StateEscalated)
 		if err := o.sm.Transition(StateEscalated); err != nil {

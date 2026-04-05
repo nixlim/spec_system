@@ -38,15 +38,17 @@ const (
 // Transition table (declarative)
 // ---------------------------------------------------------------------------
 
-// validTransitions defines the allowed status transitions. Terminal statuses
-// (closed, dismissed, acknowledged) have no outgoing transitions.
+// validTransitions defines the allowed status transitions. Dismissed and
+// acknowledged are fully terminal. Closed is effectively terminal for open-
+// finding counts but CAN transition to reopened — the judge may determine in
+// a later round that a previously verified fix was insufficient.
 var validTransitions = map[IssueStatus]map[IssueStatus]bool{
 	StatusRaised:    {StatusAddressed: true, StatusDismissed: true, StatusAcknowledged: true},
 	StatusAddressed: {StatusVerified: true, StatusReopened: true},
 	StatusVerified:  {StatusClosed: true},
 	StatusReopened:  {StatusAddressed: true},
-	// Terminal statuses — no outgoing transitions.
-	StatusClosed:       {},
+	// closed can be reopened when a later round shows the fix was insufficient.
+	StatusClosed:       {StatusReopened: true},
 	StatusDismissed:    {},
 	StatusAcknowledged: {},
 }
@@ -111,6 +113,10 @@ type TrackedIssue struct {
 // IssueTracker
 // ---------------------------------------------------------------------------
 
+// TransitionCallback is called after a successful issue status transition.
+// It receives the finding ID and the new status. Errors are non-fatal.
+type TransitionCallback func(findingID string, newStatus IssueStatus)
+
 // IssueTracker maintains the lifecycle state of all tracked findings across
 // review rounds. It enforces the declarative transition table and records a
 // full audit trail of status changes.
@@ -119,6 +125,9 @@ type IssueTracker struct {
 	Issues map[string]*TrackedIssue
 	// History maps finding IDs to their ordered list of status changes.
 	History map[string][]StatusChange
+	// OnTransition is an optional callback invoked after each successful
+	// status transition. Used by the orchestrator to sync status to Beads.
+	OnTransition TransitionCallback
 }
 
 // NewIssueTracker returns an initialised IssueTracker with empty maps.
@@ -171,6 +180,10 @@ func (t *IssueTracker) TransitionIssue(findingID string, newStatus IssueStatus, 
 	issue.Status = newStatus
 	issue.StatusHistory = append(issue.StatusHistory, change)
 	t.History[findingID] = append(t.History[findingID], change)
+
+	if t.OnTransition != nil {
+		t.OnTransition(findingID, newStatus)
+	}
 
 	return nil
 }
@@ -227,6 +240,19 @@ func (t *IssueTracker) CloseVerifiedFindings(round int) {
 	}
 }
 
+// TerminalIDs returns the set of finding IDs that are currently in a terminal
+// status (closed, dismissed, acknowledged). Used to filter revision inputs so
+// the reviser only receives open findings.
+func (t *IssueTracker) TerminalIDs() map[string]bool {
+	ids := make(map[string]bool)
+	for id, issue := range t.Issues {
+		if IsTerminal(issue.Status) {
+			ids[id] = true
+		}
+	}
+	return ids
+}
+
 // AcknowledgeMinorFindings transitions all findings with severity MINOR or
 // OBSERVATION that are currently in StatusRaised to StatusAcknowledged.
 func (t *IssueTracker) AcknowledgeMinorFindings(round int) {
@@ -269,6 +295,30 @@ func (t *IssueTracker) GetFindingsByStatus(status IssueStatus) []TrackedIssue {
 		return result[i].Finding.ID < result[j].Finding.ID
 	})
 	return result
+}
+
+// ExportLiveState returns a MergedFindings struct whose findings have their
+// Status fields updated to reflect the tracker's current state. This is used
+// to give the judge an accurate view of which findings are still open rather
+// than the frozen snapshot written by the merger at the start of the round.
+func (t *IssueTracker) ExportLiveState(round int) MergedFindings {
+	findings := make([]MergedFinding, 0, len(t.Issues))
+	for _, issue := range t.Issues {
+		f := issue.Finding
+		f.Status = string(issue.Status)
+		findings = append(findings, f)
+	}
+	// Sort by ID for deterministic output.
+	sort.Slice(findings, func(i, j int) bool {
+		return findings[i].ID < findings[j].ID
+	})
+	return MergedFindings{
+		SchemaVersion:   "1.0",
+		Round:           round,
+		TotalFindings:   len(findings),
+		TotalAfterDedup: len(findings),
+		Findings:        findings,
+	}
 }
 
 // GetFindingSummary returns a FindingsSummary with aggregate counts of
