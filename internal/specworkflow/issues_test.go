@@ -293,6 +293,74 @@ func TestIssueApplyJudgeUpdates_SkipsMissingFindings(t *testing.T) {
 	}
 }
 
+func TestIssueApplyJudgeUpdates_NormalisesOpenToReopened(t *testing.T) {
+	tracker := trackerWithFindings(makeMergedFinding("F-001", SeverityCritical))
+
+	// Walk F-001 to closed (the state observed in the bug: judge tries to
+	// reopen a closed finding using the colloquial status "open").
+	_ = tracker.TransitionIssue("F-001", StatusAddressed, 1, "revised")
+	_ = tracker.TransitionIssue("F-001", StatusVerified, 2, "verified")
+	_ = tracker.TransitionIssue("F-001", StatusClosed, 2, "auto-closed")
+
+	judge := &JudgeOutput{
+		SchemaVersion: "1.0",
+		Agent:         "judge",
+		Round:         3,
+		Verdict:       VerdictRevise,
+		Rationale:     "fix was incomplete",
+		IssueUpdates: []IssueUpdate{
+			// Judge uses "open" — the colloquial term that was causing silent drops.
+			{FindingID: "F-001", NewStatus: "open", Explanation: "fix was reverted"},
+		},
+	}
+
+	warnings, err := tracker.ApplyJudgeUpdates(judge, 3)
+	if err != nil {
+		t.Fatalf("ApplyJudgeUpdates: %v", err)
+	}
+	// Expect exactly one warning noting the normalisation.
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 normalisation warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "open") || !strings.Contains(warnings[0], "reopened") {
+		t.Errorf("warning should mention normalisation from 'open' to 'reopened', got: %s", warnings[0])
+	}
+	// Finding must be reopened, not still closed.
+	if tracker.Issues["F-001"].Status != StatusReopened {
+		t.Errorf("F-001: got %s, want %s", tracker.Issues["F-001"].Status, StatusReopened)
+	}
+}
+
+func TestIssueApplyJudgeUpdates_SkipsUnknownStatus(t *testing.T) {
+	tracker := trackerWithFindings(makeMergedFinding("F-001", SeverityCritical))
+
+	judge := &JudgeOutput{
+		SchemaVersion: "1.0",
+		Agent:         "judge",
+		Round:         1,
+		Verdict:       VerdictRevise,
+		Rationale:     "test",
+		IssueUpdates: []IssueUpdate{
+			{FindingID: "F-001", NewStatus: "pending", Explanation: "made-up status"},
+		},
+	}
+
+	warnings, err := tracker.ApplyJudgeUpdates(judge, 1)
+	if err != nil {
+		t.Fatalf("ApplyJudgeUpdates: %v", err)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning for unknown status, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "pending") {
+		t.Errorf("warning should mention the unknown status 'pending', got: %s", warnings[0])
+	}
+	// Finding must stay at its original status.
+	if tracker.Issues["F-001"].Status != StatusRaised {
+		t.Errorf("F-001: got %s, want %s (should be unchanged)", tracker.Issues["F-001"].Status, StatusRaised)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // CloseVerifiedFindings
 // ---------------------------------------------------------------------------

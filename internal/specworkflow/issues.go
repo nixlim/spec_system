@@ -214,6 +214,26 @@ func (t *IssueTracker) ApplyRevisionChanges(revision *RevisionOutput, round int)
 	return warnings, nil
 }
 
+// normalizeJudgeStatus maps colloquial status terms from judge output to the
+// canonical IssueStatus vocabulary. Returns the canonical status and true on
+// success, or the original string and false if the term is unrecognised.
+//
+// The judge LLM occasionally writes "open" instead of "reopened". Rather than
+// silently dropping the update (which was the pre-fix behaviour), we map it to
+// the intended canonical status and log a warning so the mismatch is visible.
+func normalizeJudgeStatus(raw string) (IssueStatus, bool) {
+	switch IssueStatus(raw) {
+	case StatusVerified, StatusReopened, StatusDismissed, StatusAcknowledged:
+		return IssueStatus(raw), true
+	}
+	// Colloquial aliases that the judge uses instead of the canonical vocabulary.
+	switch raw {
+	case "open":
+		return StatusReopened, true
+	}
+	return IssueStatus(raw), false
+}
+
 // ApplyJudgeUpdates processes a JudgeOutput and transitions each finding to
 // its new status (verified, reopened, or dismissed). Findings referenced in
 // the judge output but not present in the tracker are collected as warnings.
@@ -221,13 +241,25 @@ func (t *IssueTracker) ApplyRevisionChanges(revision *RevisionOutput, round int)
 // than halting — one invalid transition should not prevent other valid
 // transitions from being applied (especially important during replay after
 // rewind where findings may already be in terminal states).
+//
+// Before applying each update the raw new_status is normalised via
+// normalizeJudgeStatus. Any unrecognised status is skipped with a warning
+// rather than forwarded as an invalid IssueStatus — this prevents the
+// tracker's transition table from seeing status values it cannot reason about.
 func (t *IssueTracker) ApplyJudgeUpdates(judge *JudgeOutput, round int) (warnings []string, err error) {
 	for _, update := range judge.IssueUpdates {
 		if _, ok := t.Issues[update.FindingID]; !ok {
 			warnings = append(warnings, fmt.Sprintf("finding %q from judge not found in tracker, skipping", update.FindingID))
 			continue
 		}
-		newStatus := IssueStatus(update.NewStatus)
+		newStatus, ok := normalizeJudgeStatus(update.NewStatus)
+		if !ok {
+			warnings = append(warnings, fmt.Sprintf("finding %q: unrecognised judge status %q, skipping", update.FindingID, update.NewStatus))
+			continue
+		}
+		if IssueStatus(update.NewStatus) != newStatus {
+			warnings = append(warnings, fmt.Sprintf("finding %q: normalised judge status %q -> %q", update.FindingID, update.NewStatus, newStatus))
+		}
 		if err := t.TransitionIssue(update.FindingID, newStatus, round, update.Explanation); err != nil {
 			warnings = append(warnings, fmt.Sprintf("applying judge update for %q: %v", update.FindingID, err))
 		}

@@ -183,8 +183,9 @@ func main() {
 		log.Printf("[process-tracker] marked PID %d as lost (feature=%s, role=%s)", rec.PID, rec.Feature, rec.Role)
 	}
 
-	// Wire process tracker into workflow manager so runners get it.
+	// Wire process tracker and kill service into workflow manager.
 	workflowManager.SetProcessTracker(processTracker)
+	workflowManager.SetKillService(killService)
 
 	// Start WebSocket broadcast goroutine.
 	go wsHub.StartBroadcasting(emitter)
@@ -367,6 +368,7 @@ func main() {
 	mux.HandleFunc("/api/spec/issues/", api.HandleGetIssue(specConfig))
 	mux.HandleFunc("/api/spec/convergence", api.HandleGetConvergence(specConfig))
 	mux.HandleFunc("/api/spec/cancel", api.HandleCancelWorkflow(specConfig))
+	mux.HandleFunc("/api/spec/tasks", api.HandleGetTasks(specConfig))
 
 	// Legacy endpoints (keep for backward compatibility).
 	mux.HandleFunc("/api/issues", api.HandleGetIssues(specConfig))
@@ -438,6 +440,7 @@ func main() {
 	fmt.Printf("  GET  /api/spec/issues/ID       Get issue details\n")
 	fmt.Printf("  GET  /api/spec/convergence     Convergence metrics\n")
 	fmt.Printf("  POST /api/spec/cancel          Cancel workflow (legacy)\n")
+	fmt.Printf("  GET  /api/spec/tasks           Task graph for feature\n")
 	fmt.Printf("\nListening on %s...\n", addr)
 
 	if err := http.ListenAndServe(addr, mux); err != nil {

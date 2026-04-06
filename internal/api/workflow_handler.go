@@ -66,6 +66,7 @@ type WorkflowManager struct {
 	crManager          *CodeReviewManager
 	cdManager          *CodedocManager
 	processTracker     *process.ProcessTracker
+	killService        *process.KillService
 	mu                 sync.RWMutex
 }
 
@@ -120,6 +121,14 @@ func (m *WorkflowManager) SetProcessTracker(tracker *process.ProcessTracker) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.processTracker = tracker
+}
+
+// SetKillService configures the kill service used to terminate in-flight agent
+// subprocesses during rewind operations.
+func (m *WorkflowManager) SetKillService(svc *process.KillService) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.killService = svc
 }
 
 // SetOTELReceiver configures the OTEL receiver reference so the status
@@ -1604,14 +1613,31 @@ func HandleRewindWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			req.Round = 1
 		}
 
-		// Cancel any running orchestrator for this feature.
+		// Cancel any running orchestrator for this feature and kill its
+		// in-flight agent subprocesses. The orchestrator's Cancel() sets the
+		// cancellation flag (stops the loop from dispatching new agents) but
+		// does not terminate the subprocess that is already running. Without
+		// an explicit kill, the old agent continues writing to the output file
+		// concurrently with the new run that the rewind will start, causing
+		// non-deterministic output and duplicate dispatches in the log.
 		manager.mu.Lock()
+		killSvc := manager.killService
 		if orch, ok := manager.orchestrators[req.FeatureName]; ok && orch != nil {
 			orch.Cancel()
 			delete(manager.orchestrators, req.FeatureName)
-			time.Sleep(500 * time.Millisecond)
 		}
 		manager.mu.Unlock()
+
+		if killSvc != nil {
+			n := killSvc.KillAllForFeature(r.Context(), req.FeatureName)
+			if n > 0 {
+				log.Printf("[workflow] rewind %q: sent kill signal to %d in-flight process(es)", req.FeatureName, n)
+				// Brief wait so the OS has time to deliver SIGTERM before we
+				// write the new state to disk. The kill goroutines handle
+				// SIGKILL escalation asynchronously.
+				time.Sleep(200 * time.Millisecond)
+			}
+		}
 
 		// Load current state from disk.
 		specDir := filepath.Join(manager.workspaceDir, "specs", req.FeatureName)

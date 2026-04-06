@@ -151,6 +151,23 @@ func (k *KillService) doKill(ctx context.Context, pid int) error {
 	}
 }
 
+// KillAllForFeature sends SIGTERM (escalating to SIGKILL) to every process
+// currently running for the given feature. Each kill is dispatched in its own
+// goroutine so that slow-dying processes do not block the caller. Returns the
+// number of processes signalled. Callers that need to wait for all processes
+// to exit should poll the tracker or add a barrier externally.
+func (k *KillService) KillAllForFeature(ctx context.Context, feature string) int {
+	records := k.tracker.ListFiltered(feature, StatusRunning, 0)
+	for _, rec := range records {
+		go func(pid int) {
+			if err := k.Kill(ctx, pid); err != nil {
+				log.Printf("[kill-service] KillAllForFeature(%s): PID %d: %v", feature, pid, err)
+			}
+		}(rec.PID)
+	}
+	return len(records)
+}
+
 // Shutdown cancels all pending SIGTERM escalation timers and immediately
 // sends SIGKILL to every process still tracked as running. This is called
 // during graceful server shutdown to ensure no agent subprocesses outlive
