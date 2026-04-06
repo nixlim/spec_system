@@ -2,6 +2,7 @@ package specworkflow
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -420,6 +421,9 @@ func (o *Orchestrator) handleRevising(state *WorkflowStateJSON, specDir string) 
 
 		cost, duration, dispatchErr := o.dispatchAgent("reviser", currentPrompt, outPath, o.runnerFor("reviser"))
 		if dispatchErr != nil {
+			if errors.Is(dispatchErr, ErrProcessKilled) {
+				return o.handleAgentError("reviser", dispatchErr, cost, duration)
+			}
 			if attempt < maxAttempts {
 				log.Printf("[orchestrator] reviser dispatch failed on attempt %d/%d: %v", attempt, maxAttempts, dispatchErr)
 				lastValidationErrors = []string{fmt.Sprintf("agent dispatch failed: %v", dispatchErr)}

@@ -2,6 +2,7 @@ package specworkflow
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -68,6 +69,9 @@ func RunWithValidation(cfg ValidateAndRetryConfig) (*ValidateAndRetryResult, err
 		result.TotalDuration += duration
 
 		if runErr != nil {
+			if errors.Is(runErr, ErrProcessKilled) {
+				return result, fmt.Errorf("agent %s killed by user: %w", cfg.AgentName, ErrProcessKilled)
+			}
 			log.Printf("[json-validation] %s dispatch failed on attempt %d: %v", cfg.AgentName, attempt, runErr)
 			lastErrors = []string{fmt.Sprintf("agent dispatch failed: %v", runErr)}
 			continue

@@ -5,6 +5,7 @@ package specworkflow
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -15,7 +16,14 @@ import (
 // Error type constants
 // ---------------------------------------------------------------------------
 
+// ErrProcessKilled is a sentinel returned by runners when the process was
+// intentionally killed via the kill API. Callers use errors.Is to detect it
+// and skip retry logic.
+var ErrProcessKilled = errors.New("process killed by user")
+
 const (
+	// ErrKilled indicates the agent process was intentionally killed by the user.
+	ErrKilled = "killed"
 	// ErrTimeout indicates the agent exceeded its time limit.
 	ErrTimeout = "timeout"
 	// ErrCrash indicates the agent process exited with a non-zero code.
@@ -177,6 +185,14 @@ type RecoveryAction struct {
 // DetermineRecovery decides the recovery strategy for a failed agent based on
 // the error, current workflow state, current round, and maximum rounds allowed.
 func DetermineRecovery(err *AgentError, currentState WorkflowState, round, maxRounds int) RecoveryAction {
+	// Intentional kills are never retried — the user made an explicit decision.
+	if err.Type == ErrKilled {
+		return RecoveryAction{
+			Action: ActionEscalate,
+			Reason: "agent was killed by user request; not retrying",
+		}
+	}
+
 	// If retries remain, always retry first.
 	if ShouldRetry(err) {
 		return RecoveryAction{

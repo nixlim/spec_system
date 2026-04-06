@@ -7,6 +7,7 @@ package specworkflow
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -334,12 +335,19 @@ func runReviewerWithRetries(
 
 		// Infrastructure error from the runner itself.
 		if runErr != nil {
+			errType := ErrCrash
+			if errors.Is(runErr, ErrProcessKilled) {
+				errType = ErrKilled
+			}
 			result.Error = &AgentError{
-				Type:       ErrCrash,
+				Type:       errType,
 				Agent:      agentName,
 				Detail:     runErr.Error(),
 				RetryCount: attempt,
 				MaxRetries: config.MaxRetries,
+			}
+			if errType == ErrKilled {
+				break // user killed this agent — do not retry
 			}
 			continue
 		}

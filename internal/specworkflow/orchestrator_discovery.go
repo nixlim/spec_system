@@ -2,6 +2,7 @@ package specworkflow
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -224,6 +225,9 @@ func (o *Orchestrator) handleSingleDiscovery(prompt string, state *WorkflowState
 
 		cost, duration, err := o.dispatchAgent("discovery", currentPrompt, outPath, discoveryRunner)
 		if err != nil {
+			if errors.Is(err, ErrProcessKilled) {
+				return o.handleAgentError("discovery", err, cost, duration)
+			}
 			if attempt < maxAttempts {
 				log.Printf("[orchestrator] discovery dispatch failed on attempt %d/%d: %v", attempt, maxAttempts, err)
 				lastValidationErrors = []string{fmt.Sprintf("agent dispatch failed: %v", err)}

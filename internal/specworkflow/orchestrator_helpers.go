@@ -1,6 +1,7 @@
 package specworkflow
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -112,7 +113,8 @@ func (o *Orchestrator) dispatchAgent(agentName, prompt, outputPath string, runne
 		o.logger.LogAgentError(agentName, errType, runErr.Error())
 		o.emitter.Emit(NewAgentCompleteEvent(agentName, state.Round, false, duration, cost))
 		o.emitter.Emit(NewAgentErrorEvent(agentName, errType, runErr.Error(), 0, o.config.MaxRetries))
-		return cost, duration, fmt.Errorf("agent %s failed: %s — %s", agentName, errType, runErr.Error())
+		// Wrap with %w so callers can use errors.Is(err, ErrProcessKilled).
+		return cost, duration, fmt.Errorf("agent %s failed: %s — %w", agentName, errType, runErr)
 	}
 
 	// Detect failure type.
@@ -205,6 +207,9 @@ func (o *Orchestrator) handleAgentError(agentName string, err error, cost float6
 // It inspects the error message for timeout indicators (from context
 // deadline exceeded) before falling back to ErrCrash.
 func classifyRunError(err error) string {
+	if errors.Is(err, ErrProcessKilled) {
+		return ErrKilled
+	}
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "timed out") || strings.Contains(msg, "deadline exceeded") {
 		return ErrTimeout
@@ -222,7 +227,7 @@ func classifyRunError(err error) string {
 // Falls back to ErrCrash if no known type is found.
 func detectErrorType(errMsg string) string {
 	knownTypes := []string{
-		ErrSchemaViolation, ErrInvalidJSON, ErrMissingOutput,
+		ErrKilled, ErrSchemaViolation, ErrInvalidJSON, ErrMissingOutput,
 		ErrTimeout, ErrContextOverflow, ErrRateLimited,
 	}
 	for _, t := range knownTypes {

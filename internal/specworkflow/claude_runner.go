@@ -362,6 +362,12 @@ func (r *ClaudeRunner) Run(prompt string, outputPath string, timeoutSeconds int)
 	// Record process end with tracker (if available).
 	if r.Tracker != nil {
 		r.Tracker.RecordEnd(cmd.Process.Pid, code)
+		// If the user explicitly killed this process, return a sentinel that
+		// suppresses retry logic throughout the call stack.
+		if r.Tracker.IsKillRequested(cmd.Process.Pid) {
+			log.Printf("[claude-runner] PID %d was killed by user request — not retrying", cmd.Process.Pid)
+			return code, stderrStr, 0, 0, fmt.Errorf("agent killed by user: %w", ErrProcessKilled)
+		}
 	}
 
 	// Parse the JSON output.
