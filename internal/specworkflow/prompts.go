@@ -6,6 +6,16 @@ import (
 	"strings"
 )
 
+// loadPromptComments loads human-comments.json from specDir and returns a
+// formatted <human_feedback> block, or empty string if none.
+func loadPromptComments(specDir string) string {
+	comments, err := LoadComments(specDir)
+	if err != nil || len(comments) == 0 {
+		return ""
+	}
+	return BuildHumanFeedbackBlock(comments)
+}
+
 // contextCharLimit is the character count threshold beyond which a context
 // limit warning is emitted. At ~3.5 chars/token this corresponds to ~120k
 // tokens, which is well within the 200k context window but leaves headroom.
@@ -409,6 +419,11 @@ func (pb *PromptBuilder) BuildReviewerPrompt(lensGroup string, round int, specPa
 		b.WriteString("If a finding is about the holdout scenarios or their coverage, set `target` to `holdout`.\n\n")
 	}
 
+	// Human feedback from gate rejections — must be addressed.
+	if feedback := loadPromptComments(pb.specDir()); feedback != "" {
+		b.WriteString(feedback)
+	}
+
 	// Output schema.
 	b.WriteString("## Output Schema\n\n")
 	b.WriteString("You MUST produce valid JSON conforming to the ReviewerOutput schema:\n")
@@ -548,6 +563,11 @@ func (pb *PromptBuilder) BuildReviserPrompt(specPath, mergedFindingsPath string,
 	b.WriteString("- revised_spec_file (string, required): path to the revised spec\n")
 	b.WriteString("- changes (array of Change): finding_id, action (revised|dismissed), description, sections_modified\n")
 	b.WriteString("- dismissal_requests (array of DismissalRequest): finding_id, rationale\n\n")
+
+	// Human feedback from gate rejections — must be addressed.
+	if feedback := loadPromptComments(pb.specDir()); feedback != "" {
+		b.WriteString(feedback)
+	}
 
 	// Output paths.
 	revisedSpecPath := filepath.Join(pb.specDir(), fmt.Sprintf("spec-v%d.md", round))

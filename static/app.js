@@ -38,6 +38,9 @@
   // Gate state
   var gate1CorrectionCount = 0;
   var gate2AnswerDisabled = false;
+  // Prevents gate panel re-render immediately after a submit while waiting
+  // for the orchestrator to transition away from the gate state.
+  var gatePanelSubmitting = false;
 
   // Notification badges for unselected workflows at gate states.
   // Maps featureName -> true when a workflow needs operator attention.
@@ -851,7 +854,8 @@
             updateWorkflowStatus(statuses[i]);
             // If at a gate state and no panel is showing, render it now.
             // This covers page-load and non-running gate workflows.
-            if (!$(".gate-panel")) {
+            // Skip if gatePanelSubmitting — we just cleared it intentionally.
+            if (!$(".gate-panel") && !gatePanelSubmitting) {
               refreshGatePanelsForFeature(selectedFeature);
             }
             break;
@@ -3616,10 +3620,18 @@
       });
     }
 
-    panel.querySelector("#final-gate-accept").addEventListener("click", function () {
+    function submitFinalGate(action) {
+      var acceptBtn = panel.querySelector("#final-gate-accept");
+      var rejectBtn = panel.querySelector("#final-gate-reject");
       var comment = (panel.querySelector("#final-gate-comment") || {}).value || "";
-      var payload = { action: "accept" };
+      var payload = { action: action };
       if (comment.trim()) payload.comment = comment.trim();
+
+      // Disable buttons and lock re-render while waiting for transition.
+      if (acceptBtn) acceptBtn.disabled = true;
+      if (rejectBtn) rejectBtn.disabled = true;
+      gatePanelSubmitting = true;
+
       fetchJSON("/api/tasks/" + encodeURIComponent(featureName) + "/approve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3627,25 +3639,22 @@
       }).then(function () {
         clearChildren(container);
         refreshWorkflowStatusList();
+        // Clear the lock after enough time for the state to transition.
+        setTimeout(function () { gatePanelSubmitting = false; }, 10000);
       }).catch(function (err) {
-        alert("Final gate accept failed: " + (err.message || err));
+        gatePanelSubmitting = false;
+        if (acceptBtn) acceptBtn.disabled = false;
+        if (rejectBtn) rejectBtn.disabled = false;
+        alert("Final gate " + action + " failed: " + (err.message || err));
       });
+    }
+
+    panel.querySelector("#final-gate-accept").addEventListener("click", function () {
+      submitFinalGate("accept");
     });
 
     panel.querySelector("#final-gate-reject").addEventListener("click", function () {
-      var comment = (panel.querySelector("#final-gate-comment") || {}).value || "";
-      var payload = { action: "reject" };
-      if (comment.trim()) payload.comment = comment.trim();
-      fetchJSON("/api/tasks/" + encodeURIComponent(featureName) + "/approve", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      }).then(function () {
-        clearChildren(container);
-        refreshWorkflowStatusList();
-      }).catch(function (err) {
-        alert("Final gate reject failed: " + (err.message || err));
-      });
+      submitFinalGate("reject");
     });
   }
 
