@@ -3576,7 +3576,7 @@
       var specText = typeof specData === "string" ? specData : (specData.content || JSON.stringify(specData, null, 2));
       content += '<div class="gate-section">';
       content += '<div class="gate-section-label">' + escapeHtml(specFileName) + '</div>';
-      content += '<pre style="max-height:500px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5;padding:12px;background:var(--color-bg-secondary,#1a1a1a);border:1px solid var(--color-border);border-radius:4px;">' + escapeHtml(specText) + '</pre>';
+      content += '<pre style="max-height:500px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5;padding:12px;background:var(--color-surface-3);color:var(--color-text);border:1px solid var(--color-border);border-radius:4px;">' + escapeHtml(specText) + '</pre>';
       content += '</div>';
     } else {
       content += '<div class="gate-section"><div class="gate-section-value" style="color:var(--color-text-muted);">No spec file found.</div></div>';
