@@ -3569,14 +3569,16 @@
     clearChildren(container);
 
     var panel = el("div", { className: "gate-panel" });
-    var header = '<h3><span class="gate-badge">Final Gate</span> Spec Review — ' + escapeHtml(featureName) + '</h3>';
+    var header = '<h3><span class="gate-badge">Final Gate</span> Spec Review — ' + escapeHtml(featureName) +
+      (specData ? ' <button id="final-gate-copy" class="btn btn-sm" style="margin-left:8px;">Copy</button>' : '') +
+      '</h3>';
     var content = "";
 
     if (specData) {
       var specText = typeof specData === "string" ? specData : (specData.content || JSON.stringify(specData, null, 2));
       content += '<div class="gate-section">';
       content += '<div class="gate-section-label">' + escapeHtml(specFileName) + '</div>';
-      content += '<pre style="max-height:500px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5;padding:12px;background:var(--color-surface-3);color:var(--color-text);border:1px solid var(--color-border);border-radius:4px;">' + escapeHtml(specText) + '</pre>';
+      content += '<pre id="final-gate-pre" style="max-height:500px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5;padding:12px;background:var(--color-surface-3);color:var(--color-text);border:1px solid var(--color-border);border-radius:4px;">' + escapeHtml(specText) + '</pre>';
       content += '</div>';
     } else {
       content += '<div class="gate-section"><div class="gate-section-value" style="color:var(--color-text-muted);">No spec file found.</div></div>';
@@ -3594,6 +3596,24 @@
 
     panel.innerHTML = header + content;
     container.appendChild(panel);
+
+    var copyBtn = panel.querySelector("#final-gate-copy");
+    if (copyBtn) {
+      copyBtn.addEventListener("click", function () {
+        var pre = panel.querySelector("#final-gate-pre");
+        var text = pre ? pre.textContent : "";
+        navigator.clipboard.writeText(text).then(function () {
+          copyBtn.textContent = "Copied!";
+          setTimeout(function () { copyBtn.textContent = "Copy"; }, 2000);
+        }).catch(function () {
+          // Fallback: select the text
+          var range = document.createRange();
+          range.selectNodeContents(pre);
+          window.getSelection().removeAllRanges();
+          window.getSelection().addRange(range);
+        });
+      });
+    }
 
     panel.querySelector("#final-gate-accept").addEventListener("click", function () {
       var comment = (panel.querySelector("#final-gate-comment") || {}).value || "";
