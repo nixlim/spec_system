@@ -22,9 +22,10 @@ func (o *Orchestrator) handleFinalized(state *WorkflowStateJSON, specDir string)
 	WriteDebateTrail(finConfig, o.tracker, state.Round)
 
 	// Assemble full final spec (spec content + holdouts + convergence
-	// summary + accepted risks + debate trail).
+	// summary + accepted risks + debate trail). This is a prerequisite for
+	// TASKIFY — if it fails the workflow must not advance.
 	if err := AssembleFinalSpec(finConfig, state, o.tracker); err != nil {
-		log.Printf("warning: AssembleFinalSpec failed: %v", err)
+		return fmt.Errorf("assemble final spec: %w", err)
 	}
 
 	// Save state before transitioning to taskify.

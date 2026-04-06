@@ -25,8 +25,18 @@ func (o *Orchestrator) handleTaskify(state *WorkflowStateJSON, specDir string) e
 		return fmt.Errorf("create .tasks directory: %w", err)
 	}
 
-	// Read spec-final.md content for the prompt.
+	// Read spec-final.md content for the prompt. If it is missing (e.g. a
+	// prior run failed to write it), attempt to assemble it now before
+	// proceeding so the workflow can self-recover.
 	specFinalPath := filepath.Join(specDir, "spec-final.md")
+	if _, statErr := os.Stat(specFinalPath); os.IsNotExist(statErr) {
+		log.Printf("[orchestrator] spec-final.md missing — attempting late assembly")
+		finConfig := FinalizeConfig{WorkspaceDir: o.workspaceDir, FeatureName: o.featureName}
+		if asmErr := AssembleFinalSpec(finConfig, state, o.tracker); asmErr != nil {
+			return fmt.Errorf("spec-final.md missing and late assembly failed: %w", asmErr)
+		}
+		log.Printf("[orchestrator] late assembly of spec-final.md succeeded")
+	}
 	specContent, err := os.ReadFile(specFinalPath)
 	if err != nil {
 		return fmt.Errorf("read spec-final.md: %w", err)

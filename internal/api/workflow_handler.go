@@ -1411,7 +1411,13 @@ func determineResumeState(state *specworkflow.WorkflowStateJSON, workspaceDir, f
 		specworkflow.StateDiscovery,
 		specworkflow.StateHumanGate1,
 		specworkflow.StateHumanGate2,
-		specworkflow.StateHumanGateFinal:
+		specworkflow.StateHumanGateFinal,
+		specworkflow.StateFinalized,
+		specworkflow.StateTaskify,
+		specworkflow.StateTaskReview,
+		specworkflow.StateTaskRevision,
+		specworkflow.StateTaskHumanGate,
+		specworkflow.StateTasksApproved:
 		return specworkflow.WorkflowState(state.State)
 	}
 
