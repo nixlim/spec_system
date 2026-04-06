@@ -3569,9 +3569,10 @@
     clearChildren(container);
 
     var panel = el("div", { className: "gate-panel" });
-    var header = '<h3><span class="gate-badge">Final Gate</span> Spec Review — ' + escapeHtml(featureName) +
-      (specData ? ' <button id="final-gate-copy" class="btn btn-sm" style="margin-left:8px;">Copy</button>' : '') +
-      '</h3>';
+    var header = '<div style="display:flex;justify-content:space-between;align-items:center;">' +
+      '<h3><span class="gate-badge">Final Gate</span> Spec Review — ' + escapeHtml(featureName) + '</h3>' +
+      (specData ? '<button id="final-gate-copy" class="btn btn-sm">Copy</button>' : '') +
+      '</div>';
     var content = "";
 
     if (specData) {
