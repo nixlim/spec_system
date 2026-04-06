@@ -1831,9 +1831,20 @@ func HandleListFeatures(workspaceDir string, manager ...*WorkflowManager) http.H
 				fi.IsTerminal = isTerminalWorkflowState(state.State) || state.State == specworkflow.StateError
 
 				// Check if the orchestrator is actively running for this feature.
+				// If so, use its live in-memory state so the card doesn't show a
+				// stale disk state (e.g. FINALIZED when actually in TASKIFY).
 				orchestratorRunning := false
 				if len(manager) > 0 && manager[0] != nil {
 					orchestratorRunning = manager[0].IsFeatureRunning(featureName)
+					if orch := manager[0].GetOrchestrator(featureName); orch != nil {
+						if liveState := orch.State(); liveState != nil {
+							fi.State = liveState.State.String()
+							fi.Round = liveState.Round
+							fi.UpdatedAt = liveState.UpdatedAt
+							fi.CostUSD = liveState.CumulativeCostUSD
+							fi.IsTerminal = isTerminalWorkflowState(liveState.State) || liveState.State == specworkflow.StateError
+						}
+					}
 				}
 				fi.IsRunning = orchestratorRunning
 
