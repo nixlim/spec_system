@@ -26,6 +26,7 @@
         <li><button class="nav-tab" data-tab="issues">Issues</button></li>
         <li><button class="nav-tab" data-tab="convergence">Convergence</button></li>
         <li><button class="nav-tab" data-tab="messages">Messages</button></li>
+        <li><button class="nav-tab" data-tab="workspace">Workspace</button></li>
       </ul>
       <div class="sidebar-footer">
         <button id="btn-theme-toggle" class="btn btn-sm btn-theme">Light Mode</button>
@@ -350,6 +351,31 @@
         </div>
         <div id="messages-container" class="messages-log">
           <!-- Message entries rendered here -->
+        </div>
+      </section>
+
+      <!-- Workspace Tab -->
+      <section id="tab-workspace" class="tab-panel">
+        <h2>Workspace Files</h2>
+        <div id="workspace-empty" class="card" style="display:none">
+          <p class="workflow-empty">No workflow selected.</p>
+        </div>
+        <table id="workspace-file-table" class="table card" style="display:none">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Size</th>
+              <th>Modified</th>
+            </tr>
+          </thead>
+          <tbody id="workspace-file-body"></tbody>
+        </table>
+        <div id="workspace-file-viewer" class="card workspace-file-viewer" style="display:none">
+          <div class="workspace-viewer-header">
+            <span id="workspace-viewer-filename" class="workspace-viewer-title"></span>
+            <button id="workspace-viewer-close" class="btn btn-sm">Close</button>
+          </div>
+          <pre id="workspace-viewer-content" class="workspace-viewer-content"></pre>
         </div>
       </section>
 

@@ -1968,6 +1968,7 @@ code {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  margin-right: 6px;
 }
 
 .msg-source {
@@ -2089,4 +2090,46 @@ code {
 .pid-cell {
   font-family: var(--font-mono);
   text-align: left;
+}
+
+/* --- Workspace Tab --- */
+
+.workspace-file-name {
+  color: var(--color-primary);
+  cursor: pointer;
+}
+
+.workspace-file-row:hover .workspace-file-name {
+  text-decoration: underline;
+}
+
+.workspace-file-viewer {
+  margin-top: 16px;
+}
+
+.workspace-viewer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.workspace-viewer-title {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.workspace-viewer-content {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 500px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--color-border);
 }

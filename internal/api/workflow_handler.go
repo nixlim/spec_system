@@ -1952,6 +1952,8 @@ func HandleFeatureFiles(workspaceDir string, manager ...*WorkflowManager) http.H
 			serveJSONFile(w, filepath.Join(specDir, "discovery-output.json"))
 		case subPath == "state":
 			serveJSONFile(w, filepath.Join(specDir, "workflow-state.json"))
+		case subPath == "files":
+			serveFeatureFileList(w, specDir)
 		case strings.HasPrefix(subPath, "files/"):
 			filename := subPath[len("files/"):]
 			if filename == "" || strings.Contains(filename, "/") || strings.Contains(filename, "..") {
@@ -1987,6 +1989,43 @@ func serveJSONFile(w http.ResponseWriter, filePath string) {
 		// Not valid JSON — return as a content wrapper.
 		writeJSON(w, http.StatusOK, map[string]string{"content": string(data)})
 	}
+}
+
+// serveFeatureFileList reads a directory and returns a JSON array of file
+// metadata objects: [{name, size, modified}]. Subdirectories are omitted.
+func serveFeatureFileList(w http.ResponseWriter, specDir string) {
+	entries, err := os.ReadDir(specDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeJSON(w, http.StatusOK, []interface{}{})
+			return
+		}
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to read directory: %v", err))
+		return
+	}
+
+	type fileEntry struct {
+		Name     string `json:"name"`
+		Size     int64  `json:"size"`
+		Modified string `json:"modified"`
+	}
+
+	files := make([]fileEntry, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, fileEntry{
+			Name:     e.Name(),
+			Size:     info.Size(),
+			Modified: info.ModTime().UTC().Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, files)
 }
 
 // ---------------------------------------------------------------------------
