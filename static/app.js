@@ -849,6 +849,11 @@
         for (var i = 0; i < statuses.length; i++) {
           if (statuses[i].feature_name === selectedFeature) {
             updateWorkflowStatus(statuses[i]);
+            // If at a gate state and no panel is showing, render it now.
+            // This covers page-load and non-running gate workflows.
+            if (!$(".gate-panel")) {
+              refreshGatePanelsForFeature(selectedFeature);
+            }
             break;
           }
         }
@@ -1317,6 +1322,8 @@
                 showCRFixesGatePanel(feature, crStatus);
               }
             }).catch(function () {});
+          } else if (state === "HUMAN_GATE_FINAL" && feature) {
+            refreshGatePanelsForFeature(feature);
           }
         }
       }
@@ -1985,6 +1992,8 @@
                   fetchJSON("/api/workspace/features/" + encodeURIComponent(featureName) + "/files/drafter-output.json").then(function (drafter) {
                     showGate2Panel({ gate_type: "ambiguity_resolution", data: drafter, task_id: featureName });
                   });
+                } else if (stateStr.indexOf("HUMAN_GATE_FINAL") !== -1) {
+                  refreshGatePanelsForFeature(featureName);
                 }
               }).catch(function (err) {
                 // If 409, orchestrator may already be running — just show the gate panel.
@@ -2955,6 +2964,8 @@
       });
     } else if (data.gate_type === "task_human_gate") {
       showTaskGatePanel(data);
+    } else if (data.gate_type === "final_review") {
+      refreshGatePanelsForFeature(feature);
     }
   }
 
