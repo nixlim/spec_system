@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "agent",
+    "round",
+    "scenario_count",
+    "categories",
+    "holdout_file"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string" },
+    "agent": { "type": "string" },
+    "round": { "type": "integer", "minimum": 1 },
+    "scenario_count": { "type": "integer", "minimum": 1 },
+    "categories": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "holdout_file": { "type": "string" }
+  }
+}

@@ -89,10 +89,14 @@ func BuildDiscoveryPrompt(codePath, mode string) string {
 	b.WriteString("Set completion_status.status to 'complete' if the full inventory was produced.\n")
 	b.WriteString("Set it to 'partial' with a reason if discovery timed out or was truncated.\n\n")
 
-	b.WriteString("## Output Format\n\n")
-	b.WriteString("Produce a single JSON object conforming to the Discovery Output Schema:\n\n")
+	b.WriteString("## Output Requirements\n\n")
 	b.WriteString("Required fields: schema_version, agent, mode, completion_status, tools_used, languages, frameworks, modules, entry_points, dependency_graph, existing_docs, test_coverage_overview, suggested_scope.\n")
-	b.WriteString("Optional fields: incremental_changes (only for incremental mode), merge_log (only after dual-provider merge).\n")
+	b.WriteString("Optional fields: incremental_changes (incremental mode only), merge_log (dual-provider merge only).\n\n")
+	b.WriteString("Write your JSON draft to `/tmp/codedoc-discovery-draft.json`, then validate:\n\n")
+	b.WriteString("```bash\noutvalid --schema workflow-templates/codedoc/discovery-output.schema.json \\\n")
+	b.WriteString("         --input /tmp/codedoc-discovery-draft.json \\\n")
+	b.WriteString("         --writeTo <destination-path>\n```\n\n")
+	b.WriteString("If validation fails, read the numbered errors, fix your draft, and retry (max 3 attempts).\n")
 
 	return b.String()
 }
@@ -128,9 +132,14 @@ func BuildDiscoveryMergePrompt(claudeJSON, codexJSON string) string {
 	b.WriteString(codexJSON)
 	b.WriteString("\n</codex_discovery>\n\n")
 
-	b.WriteString("## Output Format\n\n")
-	b.WriteString("Produce a single merged JSON object conforming to the Discovery Output Schema, with merge_log populated.\n")
-	b.WriteString("The merge_log must include: claude_modules, codex_modules, merged_modules, conflicts (array), and dedup_count.\n")
+	b.WriteString("## Output Requirements\n\n")
+	b.WriteString("Produce a merged JSON object conforming to the Discovery Output Schema, with merge_log populated.\n")
+	b.WriteString("The merge_log must include: claude_modules, codex_modules, merged_modules, conflicts (array), dedup_count, and strategy.\n\n")
+	b.WriteString("Write your JSON draft to `/tmp/codedoc-discovery-merge-draft.json`, then validate:\n\n")
+	b.WriteString("```bash\noutvalid --schema workflow-templates/codedoc/discovery-output.schema.json \\\n")
+	b.WriteString("         --input /tmp/codedoc-discovery-merge-draft.json \\\n")
+	b.WriteString("         --writeTo <destination-path>\n```\n\n")
+	b.WriteString("If validation fails, read the numbered errors, fix your draft, and retry (max 3 attempts).\n")
 
 	return b.String()
 }
@@ -167,9 +176,13 @@ func BuildDrafterPrompt(discoveryJSON, codePath string) string {
 	b.WriteString("   Each finding must include: id, type, severity, file_path, line_number, symbol, description, evidence.\n\n")
 	b.WriteString("4. **Doc updates**: Identify existing documentation files that need updating and specify which sections changed.\n\n")
 
-	b.WriteString("## Output Format\n\n")
-	b.WriteString("Produce a single JSON object conforming to the Drafter Output Schema:\n")
-	b.WriteString("Required fields: schema_version, agent, as_implemented_report, architecture_diagrams, code_audit, doc_updates, structural_summary.\n")
+	b.WriteString("## Output Requirements\n\n")
+	b.WriteString("Required fields: schema_version, agent, as_implemented_report, architecture_diagrams, code_audit, doc_updates, structural_summary.\n\n")
+	b.WriteString("Write your JSON draft to `/tmp/codedoc-drafter-draft.json`, then validate:\n\n")
+	b.WriteString("```bash\noutvalid --schema workflow-templates/codedoc/drafter-output.schema.json \\\n")
+	b.WriteString("         --input /tmp/codedoc-drafter-draft.json \\\n")
+	b.WriteString("         --writeTo <destination-path>\n```\n\n")
+	b.WriteString("If validation fails, read the numbered errors, fix your draft, and retry (max 3 attempts).\n")
 
 	return b.String()
 }
@@ -206,8 +219,13 @@ func BuildDrafterCombinePrompt(claudeJSON, codexJSON, discoveryJSON string) stri
 	b.WriteString(discoveryJSON)
 	b.WriteString("\n</discovery>\n\n")
 
-	b.WriteString("## Output Format\n\n")
-	b.WriteString("Produce a single combined JSON object conforming to the Drafter Output Schema.\n")
+	b.WriteString("## Output Requirements\n\n")
+	b.WriteString("Produce a combined JSON object conforming to the Drafter Output Schema.\n\n")
+	b.WriteString("Write your JSON draft to `/tmp/codedoc-drafter-combine-draft.json`, then validate:\n\n")
+	b.WriteString("```bash\noutvalid --schema workflow-templates/codedoc/drafter-output.schema.json \\\n")
+	b.WriteString("         --input /tmp/codedoc-drafter-combine-draft.json \\\n")
+	b.WriteString("         --writeTo <destination-path>\n```\n\n")
+	b.WriteString("If validation fails, read the numbered errors, fix your draft, and retry (max 3 attempts).\n")
 
 	return b.String()
 }
@@ -292,13 +310,16 @@ func BuildReviewerPrompt(lensGroup, draftDir string, round int) string {
 		b.WriteString("**SEC (Sensitive Data)**: Does any documentation output contain secrets, credentials, API keys, tokens, connection strings, passwords, or PII from source code? Does any code example embed real configuration values? This is a second layer of defence after the automated sanitisation step.\n\n")
 	}
 
-	b.WriteString("## Output Format\n\n")
-	b.WriteString("Produce a ReviewerOutput JSON with:\n")
+	b.WriteString("## Output Requirements\n\n")
+	b.WriteString("Field reference:\n")
 	b.WriteString("- schema_version, agent, round, lenses_applied\n")
-	b.WriteString("- findings[]: each with id, description, severity, status (\"open\"), impact, recommendation, lens, affected_section, affected_file\n")
+	b.WriteString("- findings[]: id (format: <LENS>-<NNN>), description, severity (critical|major|minor|observation), status (\"open\"), impact, recommendation, lens, affected_section, affected_file\n")
 	b.WriteString("- structural_integrity: performed (bool), checks[] with name, passed (bool), details\n\n")
-	b.WriteString("Finding IDs should use the format: <LENS>-<NNN> (e.g., ACC-001, ARC-002).\n")
-	b.WriteString("Set status to \"open\" for all new findings.\n")
+	b.WriteString("Write your JSON draft to `/tmp/codedoc-reviewer-draft.json`, then validate:\n\n")
+	b.WriteString("```bash\noutvalid --schema workflow-templates/codedoc/reviewer-output.schema.json \\\n")
+	b.WriteString("         --input /tmp/codedoc-reviewer-draft.json \\\n")
+	b.WriteString("         --writeTo <destination-path>\n```\n\n")
+	b.WriteString("If validation fails, read the numbered errors, fix your draft, and retry (max 3 attempts).\n")
 
 	return b.String()
 }
@@ -369,13 +390,18 @@ func BuildJudgePrompt(findingsJSON string, round int) string {
 	b.WriteString("- You may dismiss at most 3 findings per round.\n")
 	b.WriteString("- If cumulative downgrades + dismissals exceed 5 across all rounds, the workflow escalates.\n\n")
 
-	b.WriteString("## Output Format\n\n")
-	b.WriteString("Produce a JudgeOutput JSON with:\n")
+	b.WriteString("## Output Requirements\n\n")
+	b.WriteString("Field reference:\n")
 	b.WriteString("- schema_version, agent, round\n")
 	b.WriteString("- verdict (PASS, REVISE, or BLOCK)\n")
-	b.WriteString("- rationale: explanation of the verdict\n")
-	b.WriteString("- issue_updates[]: each with finding_id, new_status, reason\n")
-	b.WriteString("- downgrades[]: each with finding_id, old_severity, new_severity, reason_code\n")
+	b.WriteString("- rationale (string)\n")
+	b.WriteString("- issue_updates[]: finding_id, new_status (open|resolved|wontfix), reason\n")
+	b.WriteString("- downgrades[]: finding_id, old_severity, new_severity (critical|major|minor|observation), reason_code\n\n")
+	b.WriteString("Write your JSON draft to `/tmp/codedoc-judge-draft.json`, then validate:\n\n")
+	b.WriteString("```bash\noutvalid --schema workflow-templates/codedoc/judge-output.schema.json \\\n")
+	b.WriteString("         --input /tmp/codedoc-judge-draft.json \\\n")
+	b.WriteString("         --writeTo <destination-path>\n```\n\n")
+	b.WriteString("If validation fails, read the numbered errors, fix your draft, and retry (max 3 attempts).\n")
 
 	return b.String()
 }

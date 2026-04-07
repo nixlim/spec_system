@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "agent",
+    "round",
+    "verdict",
+    "rationale",
+    "issue_updates",
+    "downgrades",
+    "structural_delta"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string" },
+    "agent": { "type": "string" },
+    "round": { "type": "integer", "minimum": 1 },
+    "verdict": { "type": "string", "enum": ["PASS", "REVISE", "BLOCK"] },
+    "rationale": { "type": "string" },
+    "issue_updates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["finding_id", "new_status", "explanation"],
+        "additionalProperties": false,
+        "properties": {
+          "finding_id": { "type": "string" },
+          "new_status": { "type": "string", "enum": ["verified", "reopened", "dismissed"] },
+          "explanation": { "type": "string" }
+        }
+      }
+    },
+    "downgrades": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["finding_id", "from_severity", "to_severity", "reason_code", "reason_detail"],
+        "additionalProperties": false,
+        "properties": {
+          "finding_id": { "type": "string" },
+          "from_severity": { "type": "string", "enum": ["CRITICAL", "MAJOR", "MINOR", "OBSERVATION"] },
+          "to_severity": { "type": "string", "enum": ["CRITICAL", "MAJOR", "MINOR", "OBSERVATION"] },
+          "reason_code": {
+            "type": "string",
+            "enum": ["DUPLICATE_OF", "OUT_OF_SCOPE", "CONTRADICTED_BY_REQUIREMENT", "REVIEWER_ERROR"]
+          },
+          "reason_detail": { "type": "string" }
+        }
+      }
+    },
+    "structural_delta": {
+      "type": "object",
+      "required": ["regressions_found", "details"],
+      "additionalProperties": false,
+      "properties": {
+        "regressions_found": { "type": "boolean" },
+        "details": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

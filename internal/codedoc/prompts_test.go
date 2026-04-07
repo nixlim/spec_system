@@ -117,8 +117,8 @@ func TestPromptsDrafterContainsDiscoveryInput(t *testing.T) {
 
 func TestPromptsDrafterRequiresJSONOutput(t *testing.T) {
 	p := BuildDrafterPrompt("{}", "/repo")
-	if !strings.Contains(p, "Drafter Output Schema") {
-		t.Error("drafter prompt should reference Drafter Output Schema")
+	if !strings.Contains(p, "codedoc/drafter-output.schema.json") {
+		t.Error("drafter prompt should reference codedoc/drafter-output.schema.json")
 	}
 }
 
@@ -247,8 +247,8 @@ func TestPromptsReviewerAuditSecurityLenses(t *testing.T) {
 
 func TestPromptsReviewerOutputFormatRequiresJSON(t *testing.T) {
 	p := BuildReviewerPrompt("accuracy", "/drafts", 1)
-	if !strings.Contains(p, "ReviewerOutput") {
-		t.Error("reviewer prompt should reference ReviewerOutput JSON format")
+	if !strings.Contains(p, "codedoc/reviewer-output.schema.json") {
+		t.Error("reviewer prompt should reference codedoc/reviewer-output.schema.json")
 	}
 	if !strings.Contains(p, "finding") {
 		t.Error("reviewer prompt should describe findings in output")
@@ -311,8 +311,8 @@ func TestPromptsJudgeAuthorityLimits(t *testing.T) {
 
 func TestPromptsJudgeRequiresJSONOutput(t *testing.T) {
 	p := BuildJudgePrompt("[]", 1)
-	if !strings.Contains(p, "JudgeOutput") {
-		t.Error("judge prompt should reference JudgeOutput JSON format")
+	if !strings.Contains(p, "codedoc/judge-output.schema.json") {
+		t.Error("judge prompt should reference codedoc/judge-output.schema.json")
 	}
 }
 

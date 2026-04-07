@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "agent",
+    "round",
+    "revised_spec_file",
+    "changes",
+    "dismissal_requests"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string" },
+    "agent": { "type": "string" },
+    "round": { "type": "integer", "minimum": 1 },
+    "revised_spec_file": { "type": "string" },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["finding_id", "action", "description", "sections_modified"],
+        "additionalProperties": false,
+        "properties": {
+          "finding_id": { "type": "string" },
+          "action": { "type": "string", "enum": ["revised", "dismissed"] },
+          "description": { "type": "string" },
+          "sections_modified": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "dismissal_requests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["finding_id", "rationale"],
+        "additionalProperties": false,
+        "properties": {
+          "finding_id": { "type": "string" },
+          "rationale": { "type": "string" }
+        }
+      }
+    }
+  }
+}

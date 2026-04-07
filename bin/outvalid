@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# outvalid — Validate agent JSON output against a JSON schema and write to disk.
+#
+# Usage:
+#   outvalid --schema <schema.json> --input <agent-output.json> [--writeTo <path>]
+#   echo '<json>' | outvalid --schema <schema.json> [--writeTo <path>]
+#
+# Options:
+#   --schema <path>     Path to JSON Schema file (required)
+#   --input <path>      Agent output file to validate (alternative to stdin)
+#   --writeTo <path>    Write validated JSON here if valid (creates parent dirs)
+#   --version           Print version and exit
+#   --help, -h          Print this help and exit
+#
+# Exit codes:
+#   0  — Validation passed (file written if --writeTo given)
+#   1  — Validation failed (errors printed to stdout for agent self-correction)
+#   2  — Usage / environment error
+#
+# Requires: check-jsonschema (pip3 install check-jsonschema), jq
+#
+# Examples:
+#   outvalid --schema workflow-templates/specworkflow/reviewer-output.schema.json \
+#            --input /tmp/review.json \
+#            --writeTo workspace/round-1/reviewer.json
+#   echo '<json>' | outvalid --schema workflow-templates/specworkflow/reviewer-output.schema.json
+
+set -euo pipefail
+
+readonly PROG="outvalid"
+readonly OUTVALID_VERSION="0.1.0"
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+usage() {
+  cat <<'EOF'
+outvalid — Validate agent JSON output against a JSON schema
+
+USAGE
+  outvalid --schema <schema.json> --input <agent-output.json> [--writeTo <path>]
+  echo '<json>' | outvalid --schema <schema.json> [--writeTo <path>]
+
+OPTIONS
+  --schema <path>     Path to JSON Schema file (required)
+  --input <path>      Agent output file to validate (alternative to stdin)
+  --writeTo <path>    Write validated JSON here if valid (creates parent dirs)
+  --version           Print version and exit
+  --help, -h          Print this help and exit
+
+EXIT CODES
+  0  Validation passed
+  1  Validation failed — fix the errors shown and retry
+  2  Usage / environment error
+EOF
+}
+
+# ── Argument parsing ──────────────────────────────────────────────────────────
+
+SCHEMA_PATH=""
+WRITE_TO=""
+INPUT_FILE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --schema)
+      [[ $# -lt 2 || -z "$2" ]] && { echo "ERROR: --schema requires a path" >&2; exit 2; }
+      SCHEMA_PATH="$2"; shift 2 ;;
+    --schema=*)
+      SCHEMA_PATH="${1#--schema=}"; shift ;;
+    --input)
+      [[ $# -lt 2 || -z "$2" ]] && { echo "ERROR: --input requires a path" >&2; exit 2; }
+      INPUT_FILE="$2"; shift 2 ;;
+    --input=*)
+      INPUT_FILE="${1#--input=}"; shift ;;
+    --writeTo)
+      [[ $# -lt 2 || -z "$2" ]] && { echo "ERROR: --writeTo requires a path" >&2; exit 2; }
+      WRITE_TO="$2"; shift 2 ;;
+    --writeTo=*)
+      WRITE_TO="${1#--writeTo=}"; shift ;;
+    --version)
+      echo "$PROG $OUTVALID_VERSION"; exit 0 ;;
+    --help|-h)
+      usage; exit 0 ;;
+    -*)
+      echo "ERROR: Unknown option: $1" >&2
+      echo "Run '$PROG --help' for usage." >&2
+      exit 2 ;;
+    *)
+      # Positional fallback: treat as --input for ergonomics
+      [[ -n "$INPUT_FILE" ]] && { echo "ERROR: Multiple input files given." >&2; exit 2; }
+      INPUT_FILE="$1"; shift ;;
+  esac
+done
+
+# ── Validate arguments ────────────────────────────────────────────────────────
+
+if [[ -z "$SCHEMA_PATH" ]]; then
+  echo "ERROR: --schema <path> is required." >&2
+  echo "Run '$PROG --help' for usage." >&2
+  exit 2
+fi
+
+if [[ ! -f "$SCHEMA_PATH" ]]; then
+  echo "ERROR: Schema file not found: $SCHEMA_PATH" >&2
+  exit 2
+fi
+
+# ── Prerequisites ─────────────────────────────────────────────────────────────
+
+if ! command -v check-jsonschema >/dev/null 2>&1; then
+  echo "ERROR: check-jsonschema is required but not found on PATH." >&2
+  echo "  Install: pip3 install check-jsonschema" >&2
+  exit 2
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "ERROR: jq is required but not found on PATH." >&2
+  echo "  Install: brew install jq  (macOS)  or  apt-get install jq  (Linux)" >&2
+  exit 2
+fi
+
+# ── Read input into a temp file ───────────────────────────────────────────────
+
+TMPFILE=$(mktemp /tmp/outvalid.XXXXXX.json)
+trap 'rm -f "$TMPFILE"' EXIT
+
+if [[ -n "$INPUT_FILE" ]]; then
+  [[ ! -f "$INPUT_FILE" ]] && { echo "ERROR: Input file not found: $INPUT_FILE" >&2; exit 2; }
+  cp "$INPUT_FILE" "$TMPFILE"
+else
+  if [[ -t 0 ]]; then
+    echo "ERROR: No input file given and stdin is a terminal." >&2
+    echo "  Usage: $PROG --schema <schema> --output <path> <file.json>" >&2
+    echo "         echo '<json>' | $PROG --schema <schema> --output <path>" >&2
+    exit 2
+  fi
+  cat > "$TMPFILE"
+fi
+
+# ── JSON parse check (fast-fail with a clear message before schema validation) ─
+
+if ! jq . "$TMPFILE" >/dev/null 2>&1; then
+  PARSE_MSG=$(jq . "$TMPFILE" 2>&1 || true)
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "OUTVALID: FAILED — input is not valid JSON"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  echo "  Parse error: $PARSE_MSG"
+  echo ""
+  echo "  Ensure output is a single complete JSON object."
+  echo "  Do NOT wrap it in markdown fences (\`\`\`json ... \`\`\`)."
+  echo ""
+  exit 1
+fi
+
+# ── Schema validation via check-jsonschema ────────────────────────────────────
+
+VALIDATION_JSON=$(check-jsonschema --schemafile "$SCHEMA_PATH" -o json "$TMPFILE" 2>&1) \
+  && VALIDATION_STATUS=0 || VALIDATION_STATUS=$?
+
+if [[ $VALIDATION_STATUS -ne 0 ]]; then
+  ERROR_COUNT=$(echo "$VALIDATION_JSON" | jq '.errors | length' 2>/dev/null || echo "?")
+
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "OUTVALID: FAILED — $ERROR_COUNT schema error(s) found"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  echo "Fix ALL errors below, then re-run outvalid:"
+  echo ""
+
+  echo "$VALIDATION_JSON" | jq -r '
+    .errors | to_entries[] |
+    "  [\(.key + 1)] path: \(.value.data_path // "(root)")\n       \(.value.message // (.value | tostring))\n"
+  ' 2>/dev/null || echo "$VALIDATION_JSON"
+
+  echo "Schema: $SCHEMA_PATH"
+  echo ""
+  exit 1
+fi
+
+# ── Write output file ─────────────────────────────────────────────────────────
+
+if [[ -n "$WRITE_TO" ]]; then
+  mkdir -p "$(dirname "$WRITE_TO")"
+  jq '.' "$TMPFILE" > "$WRITE_TO"
+  echo "OUTVALID: OK — validation passed. Written to: $WRITE_TO"
+else
+  echo "OUTVALID: OK — validation passed. (No --writeTo given; file not written.)"
+fi
+
+exit 0

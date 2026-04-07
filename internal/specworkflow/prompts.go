@@ -60,6 +60,25 @@ func NewPromptBuilder(skills *SkillCache, workspaceDir, featureName string) *Pro
 	}
 }
 
+// projectRoot returns the project root by walking up one level from workspaceDir.
+func (pb *PromptBuilder) projectRoot() string {
+	return filepath.Dir(filepath.Clean(pb.workspaceDir))
+}
+
+// outvalidBlock returns the outvalid validate-and-write instruction for a prompt.
+// schemaRelPath is relative to workflow-templates/ (e.g. "specworkflow/reviewer-output.schema.json").
+func (pb *PromptBuilder) outvalidBlock(schemaRelPath, draftPath, writeTo string) string {
+	schemaPath := filepath.Join(pb.projectRoot(), "workflow-templates", schemaRelPath)
+	var b strings.Builder
+	b.WriteString("### Validate and write\n\n")
+	fmt.Fprintf(&b, "1. Write your JSON to: `%s`\n", draftPath)
+	b.WriteString("2. Run:\n\n")
+	fmt.Fprintf(&b, "```bash\noutvalid --schema %s \\\n         --input %s \\\n         --writeTo %s\n```\n\n",
+		schemaPath, draftPath, writeTo)
+	b.WriteString("If validation fails: read the numbered errors, fix your draft, and retry (max 3 attempts).\n")
+	return b.String()
+}
+
 // specDir returns the directory under workspaceDir where spec artefacts for
 // this feature are stored.
 func (pb *PromptBuilder) specDir() string {
@@ -244,33 +263,25 @@ func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string, codePath 
 		}
 	}
 
-	// Output schema.
-	b.WriteString("## Output Schema\n\n")
-	b.WriteString("You MUST produce valid JSON conforming to the DiscoveryOutput schema:\n")
-	b.WriteString("- schema_version (string, required)\n")
-	b.WriteString("- agent (string, required): set to \"discovery\"\n")
-	b.WriteString("- actors (array of Actor, required, non-empty): each with name, type (human|system|external), description\n")
-	b.WriteString("- problem_statement (string, required)\n")
-	b.WriteString("- scope (object, required): in_scope (non-empty array), out_of_scope (array)\n")
-	b.WriteString("- constraints (array of string)\n")
-	b.WriteString("- integration_points (array of IntegrationPoint): system, description, direction (inbound|outbound|bidirectional)\n")
-	b.WriteString("- priorities (array of Priority): item, priority (P0-P4), rationale\n")
-	b.WriteString("- assumptions (array of Assumption): assumption, confidence (high|medium|low), question_for_user (optional)\n")
-	b.WriteString("- open_questions (array of string)\n\n")
-
-	// Output instructions — tell the agent to write the JSON file directly.
+	// Output schema + outvalid instruction.
 	outPath := filepath.Join(pb.specDir(), "discovery-output.json")
-	b.WriteString("## CRITICAL: Output Requirements\n\n")
-	b.WriteString("After reading all source documents (and codebase if provided), you MUST write a SINGLE ")
-	b.WriteString("valid JSON object to the file path below using the Write tool.\n\n")
-	fmt.Fprintf(&b, "**Output file path**: `%s`\n\n", outPath)
-	b.WriteString("Rules:\n")
-	b.WriteString("- The file content MUST start with `{` and end with `}` — pure JSON, nothing else\n")
-	b.WriteString("- Do NOT write markdown, commentary, or any non-JSON content to this file\n")
-	b.WriteString("- Do NOT wrap the JSON in markdown code fences (```)\n")
-	b.WriteString("- The JSON MUST conform EXACTLY to the DiscoveryOutput schema described above\n")
-	b.WriteString("- Write the JSON file FIRST, then provide a brief text summary after\n")
-	b.WriteString("- If you are running low on turns, SKIP the summary — the JSON file is what matters\n")
+	draftPath := outPath + ".draft.json"
+
+	b.WriteString("## Output Requirements\n\n")
+	b.WriteString("### Field reference\n\n")
+	b.WriteString("- schema_version (string): set to \"1.0\"\n")
+	b.WriteString("- agent (string): set to \"discovery\"\n")
+	b.WriteString("- actors (array, non-empty): each with name, type (human|system|external), description\n")
+	b.WriteString("- problem_statement (string)\n")
+	b.WriteString("- scope: in_scope (non-empty array of strings), out_of_scope (array of strings)\n")
+	b.WriteString("- constraints (array of string)\n")
+	b.WriteString("- integration_points (array): system, description, direction (inbound|outbound|bidirectional)\n")
+	b.WriteString("- priorities (array): item, priority (P0–P4), rationale\n")
+	b.WriteString("- assumptions (array): assumption, confidence (high|medium|low), question_for_user (string or null)\n")
+	b.WriteString("- open_questions (array of string)\n\n")
+	b.WriteString(pb.outvalidBlock("specworkflow/discovery-output.schema.json", draftPath, outPath))
+	b.WriteString("Write the JSON draft FIRST, then provide a brief text summary.\n")
+	b.WriteString("If you are running low on turns, SKIP the summary — the validated JSON file is what matters.\n")
 
 	return b.String(), nil
 }
@@ -342,27 +353,25 @@ func (pb *PromptBuilder) BuildDrafterPrompt(confirmedReqsPath string, userAnswer
 		b.WriteString("\n")
 	}
 
-	// Output schema.
-	b.WriteString("## Output Schema\n\n")
-	b.WriteString("You MUST produce valid JSON conforming to the DrafterOutput schema:\n")
-	b.WriteString("- schema_version (string, required)\n")
-	b.WriteString("- agent (string, required): set to \"drafter\"\n")
-	b.WriteString("- spec_file (string, required): path to the generated spec markdown\n")
-	b.WriteString("- holdout_file (string, required): path to the holdout test-data file\n")
-	b.WriteString("- ambiguity_warnings (array of AmbiguityWarning): id (AMB-W-NNN), section, ambiguity, agent_assumption, question_for_user\n")
-	b.WriteString("- structural_summary (object): user_story_count, bdd_scenario_count, fr_count, test_count\n\n")
-
 	// Output paths.
 	specPath := filepath.Join(pb.specDir(), "spec-v0.md")
 	holdoutPath := filepath.Join(pb.specDir(), pb.featureName+"-holdouts.md")
 	outputJSONPath := filepath.Join(pb.specDir(), "drafter-output.json")
-	b.WriteString("## Output Files\n\n")
-	fmt.Fprintf(&b, "1. Write the specification to: %s (use the Write tool)\n", specPath)
-	fmt.Fprintf(&b, "2. Write the holdout test data to: %s (use the Write tool)\n", holdoutPath)
-	fmt.Fprintf(&b, "3. DrafterOutput JSON: %s — produce the JSON as your final text response ", outputJSONPath)
-	b.WriteString("OR write it via the Write tool. ")
-	b.WriteString("Your final text response should be the DrafterOutput JSON object. ")
-	b.WriteString("The system will validate it against the schema.\n")
+	draftPath := outputJSONPath + ".draft.json"
+
+	b.WriteString("## Output Requirements\n\n")
+	b.WriteString("### Field reference\n\n")
+	b.WriteString("- schema_version (string): set to \"1.0\"\n")
+	b.WriteString("- agent (string): set to \"drafter\"\n")
+	b.WriteString("- spec_file (string): path to the generated spec markdown\n")
+	b.WriteString("- holdout_file (string): path to the holdout test-data file\n")
+	b.WriteString("- ambiguity_warnings (array): id (AMB-W-NNN), section, ambiguity, agent_assumption, question_for_user\n")
+	b.WriteString("- structural_summary: user_story_count, bdd_scenario_count, fr_count, test_count (all integers)\n\n")
+	b.WriteString("### Output files\n\n")
+	fmt.Fprintf(&b, "1. Write the specification to: `%s`\n", specPath)
+	fmt.Fprintf(&b, "2. Write the holdout test data to: `%s`\n", holdoutPath)
+	fmt.Fprintf(&b, "3. Write the DrafterOutput JSON draft to: `%s`\n\n", draftPath)
+	b.WriteString(pb.outvalidBlock("specworkflow/drafter-output.schema.json", draftPath, outputJSONPath))
 
 	return b.String(), nil
 }
@@ -424,24 +433,23 @@ func (pb *PromptBuilder) BuildReviewerPrompt(lensGroup string, round int, specPa
 		b.WriteString(feedback)
 	}
 
-	// Output schema.
-	b.WriteString("## Output Schema\n\n")
-	b.WriteString("You MUST produce valid JSON conforming to the ReviewerOutput schema:\n")
-	b.WriteString("- schema_version (string, required)\n")
-	b.WriteString("- agent (string, required): set to \"reviewer\"\n")
-	fmt.Fprintf(&b, "- round (int, required): set to %d\n", round)
-	b.WriteString("- lenses_applied (array of string, required, non-empty)\n")
-	b.WriteString("- findings (array of Finding): id, description, severity, impact, recommendation, lens, affected_section, target (spec|holdout), constitution_principle (optional)\n")
-	b.WriteString("- structural_integrity (object): performed (bool), checks (array of IntegrityCheck)\n")
-	b.WriteString("- markdown_report_file (string, required)\n\n")
-
 	// Output path — use override if provided, otherwise default.
 	outPath := filepath.Join(pb.specDir(), fmt.Sprintf("review-%s-round-%d.json", letter, round))
 	if len(outputPath) > 0 && outputPath[0] != "" {
 		outPath = outputPath[0]
 	}
-	b.WriteString("## Output File\n\n")
-	fmt.Fprintf(&b, "Write your JSON output to: %s\n", outPath)
+	draftPath := outPath + ".draft.json"
+
+	b.WriteString("## Output Requirements\n\n")
+	b.WriteString("### Field reference\n\n")
+	b.WriteString("- schema_version (string): set to \"1.0\"\n")
+	b.WriteString("- agent (string): set to \"reviewer\"\n")
+	fmt.Fprintf(&b, "- round (int): set to %d\n", round)
+	b.WriteString("- lenses_applied (array of string, non-empty)\n")
+	b.WriteString("- findings (array): id, description, severity (CRITICAL|MAJOR|MINOR|OBSERVATION), impact, recommendation, lens, affected_section, constitution_principle (string or null)\n")
+	b.WriteString("- structural_integrity: performed (bool), checks[] with check, result (PASS|FAIL), detail (string or null)\n")
+	b.WriteString("- markdown_report_file (string): path to the markdown report\n\n")
+	b.WriteString(pb.outvalidBlock("specworkflow/reviewer-output.schema.json", draftPath, outPath))
 
 	return b.String(), nil
 }
@@ -462,24 +470,22 @@ func (pb *PromptBuilder) BuildHoldoutPrompt(specPath, mergedFindingsPath string,
 	fmt.Fprintf(&b, "Read the current specification from: %s\n", specPath)
 	fmt.Fprintf(&b, "Read the merged findings from: %s\n\n", mergedFindingsPath)
 
-	b.WriteString("## Output Schema\n\n")
-	b.WriteString("You MUST produce valid JSON conforming to the HoldoutOutput schema:\n")
-	b.WriteString("- schema_version (string, required)\n")
-	b.WriteString("- agent (string, required)\n")
-	fmt.Fprintf(&b, "- round (int, required): set to %d\n", round)
-	b.WriteString("- scenario_count (int, required, > 0)\n")
-	b.WriteString("- categories (array of string, required, non-empty)\n")
-	b.WriteString("- holdout_file (string, required): MUST exactly match the markdown output path below\n\n")
+	draftPath := outputJSONPath + ".draft.json"
 
-	b.WriteString("## Output Files\n\n")
-	fmt.Fprintf(&b, "1. Write the holdout markdown to: %s\n", holdoutMDPath)
-	fmt.Fprintf(&b, "2. Write the HoldoutOutput JSON to: %s\n\n", outputJSONPath)
-
-	b.WriteString("Rules:\n")
-	b.WriteString("- The JSON must be pure JSON with no markdown fences or commentary\n")
-	b.WriteString("- The holdout_file field must exactly equal the markdown path above\n")
-	b.WriteString("- The markdown file must exist before you finish\n")
-	b.WriteString("- The markdown should contain the full holdout scenarios, not just headings\n")
+	b.WriteString("## Output Requirements\n\n")
+	b.WriteString("### Field reference\n\n")
+	b.WriteString("- schema_version (string): set to \"1.0\"\n")
+	b.WriteString("- agent (string)\n")
+	fmt.Fprintf(&b, "- round (int): set to %d\n", round)
+	b.WriteString("- scenario_count (int, > 0)\n")
+	b.WriteString("- categories (array of string, non-empty)\n")
+	fmt.Fprintf(&b, "- holdout_file (string): MUST be exactly `%s`\n\n", holdoutMDPath)
+	b.WriteString("### Output files\n\n")
+	fmt.Fprintf(&b, "1. Write the holdout markdown to: `%s`\n", holdoutMDPath)
+	fmt.Fprintf(&b, "2. Write the HoldoutOutput JSON draft to: `%s`\n\n", draftPath)
+	b.WriteString(pb.outvalidBlock("specworkflow/holdout-output.schema.json", draftPath, outputJSONPath))
+	b.WriteString("The markdown file must exist before you finish.\n")
+	b.WriteString("The markdown should contain full holdout scenarios, not just headings.\n")
 
 	return b.String(), nil
 }
@@ -554,16 +560,6 @@ func (pb *PromptBuilder) BuildReviserPrompt(specPath, mergedFindingsPath string,
 		b.WriteString("A revision that fails to address the judge's BLOCK rationale will be BLOCKed again.\n\n")
 	}
 
-	// Output schema.
-	b.WriteString("## Output Schema\n\n")
-	b.WriteString("You MUST produce valid JSON conforming to the RevisionOutput schema:\n")
-	b.WriteString("- schema_version (string, required)\n")
-	b.WriteString("- agent (string, required): set to \"reviser\"\n")
-	fmt.Fprintf(&b, "- round (int, required): set to %d\n", round)
-	b.WriteString("- revised_spec_file (string, required): path to the revised spec\n")
-	b.WriteString("- changes (array of Change): finding_id, action (revised|dismissed), description, sections_modified\n")
-	b.WriteString("- dismissal_requests (array of DismissalRequest): finding_id, rationale\n\n")
-
 	// Human feedback from gate rejections — must be addressed.
 	if feedback := loadPromptComments(pb.specDir()); feedback != "" {
 		b.WriteString(feedback)
@@ -572,9 +568,20 @@ func (pb *PromptBuilder) BuildReviserPrompt(specPath, mergedFindingsPath string,
 	// Output paths.
 	revisedSpecPath := filepath.Join(pb.specDir(), fmt.Sprintf("spec-v%d.md", round))
 	revisionJSONPath := filepath.Join(pb.specDir(), fmt.Sprintf("revision-round-%d.json", round))
-	b.WriteString("## Output Files\n\n")
-	fmt.Fprintf(&b, "Write the revised specification to: %s\n", revisedSpecPath)
-	fmt.Fprintf(&b, "Write the JSON output to: %s\n", revisionJSONPath)
+	draftPath := revisionJSONPath + ".draft.json"
+
+	b.WriteString("## Output Requirements\n\n")
+	b.WriteString("### Field reference\n\n")
+	b.WriteString("- schema_version (string): set to \"1.0\"\n")
+	b.WriteString("- agent (string): set to \"reviser\"\n")
+	fmt.Fprintf(&b, "- round (int): set to %d\n", round)
+	b.WriteString("- revised_spec_file (string): path to the revised spec\n")
+	b.WriteString("- changes (array): finding_id, action (revised|dismissed), description, sections_modified\n")
+	b.WriteString("- dismissal_requests (array): finding_id, rationale\n\n")
+	b.WriteString("### Output files\n\n")
+	fmt.Fprintf(&b, "1. Write the revised specification to: `%s`\n", revisedSpecPath)
+	fmt.Fprintf(&b, "2. Write the RevisionOutput JSON draft to: `%s`\n\n", draftPath)
+	b.WriteString(pb.outvalidBlock("specworkflow/revision-output.schema.json", draftPath, revisionJSONPath))
 
 	return b.String(), nil
 }
@@ -613,22 +620,21 @@ func (pb *PromptBuilder) BuildJudgePrompt(specPath, issueTrackerPath, revisionPa
 	b.WriteString("## Revision Change Log\n\n")
 	fmt.Fprintf(&b, "Read the revision output from: %s\n\n", revisionPath)
 
-	// Output schema.
-	b.WriteString("## Output Schema\n\n")
-	b.WriteString("You MUST produce valid JSON conforming to the JudgeOutput schema:\n")
-	b.WriteString("- schema_version (string, required)\n")
-	b.WriteString("- agent (string, required): set to \"judge\"\n")
-	fmt.Fprintf(&b, "- round (int, required): set to %d\n", round)
-	b.WriteString("- verdict (string, required): one of PASS, REVISE, BLOCK\n")
-	b.WriteString("- rationale (string, required)\n")
-	b.WriteString("- issue_updates (array of IssueUpdate): finding_id, new_status (verified|reopened|dismissed), explanation\n")
-	b.WriteString("- downgrades (array of Downgrade): finding_id, from_severity, to_severity, reason_code, reason_detail\n")
-	b.WriteString("- structural_delta (object): regressions_found (bool), details (array of string)\n\n")
-
 	// Output path.
 	outPath := filepath.Join(pb.specDir(), fmt.Sprintf("judge-round-%d.json", round))
-	b.WriteString("## Output File\n\n")
-	fmt.Fprintf(&b, "Write your JSON output to: %s\n", outPath)
+	draftPath := outPath + ".draft.json"
+
+	b.WriteString("## Output Requirements\n\n")
+	b.WriteString("### Field reference\n\n")
+	b.WriteString("- schema_version (string): set to \"1.0\"\n")
+	b.WriteString("- agent (string): set to \"judge\"\n")
+	fmt.Fprintf(&b, "- round (int): set to %d\n", round)
+	b.WriteString("- verdict (string): one of PASS, REVISE, BLOCK\n")
+	b.WriteString("- rationale (string)\n")
+	b.WriteString("- issue_updates (array): finding_id, new_status (verified|reopened|dismissed), explanation\n")
+	b.WriteString("- downgrades (array): finding_id, from_severity, to_severity, reason_code (DUPLICATE_OF|OUT_OF_SCOPE|CONTRADICTED_BY_REQUIREMENT|REVIEWER_ERROR), reason_detail\n")
+	b.WriteString("- structural_delta: regressions_found (bool), details (array of string)\n\n")
+	b.WriteString(pb.outvalidBlock("specworkflow/judge-output.schema.json", draftPath, outPath))
 
 	return b.String(), nil
 }

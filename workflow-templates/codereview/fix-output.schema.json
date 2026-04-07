@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["round", "fixes_applied", "test_results", "git_diff_stat"],
+  "additionalProperties": false,
+  "properties": {
+    "round": { "type": "integer", "minimum": 1 },
+    "fixes_applied": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["finding_id", "status", "files_modified", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "finding_id": { "type": "string" },
+          "status": { "type": "string", "enum": ["fixed", "deferred", "failed"] },
+          "files_modified": { "type": "array", "items": { "type": "string" } },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "test_results": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["total", "passed", "failed"],
+          "additionalProperties": false,
+          "properties": {
+            "total": { "type": "integer", "minimum": 0 },
+            "passed": { "type": "integer", "minimum": 0 },
+            "failed": { "type": "integer", "minimum": 0 },
+            "failures": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      ]
+    },
+    "git_diff_stat": { "type": "string" }
+  }
+}

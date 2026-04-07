@@ -133,8 +133,8 @@ func TestPromptDiscoveryIncludesSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildDiscoveryPrompt error: %v", err)
 	}
-	if !strings.Contains(prompt, "DiscoveryOutput") {
-		t.Error("expected prompt to reference DiscoveryOutput schema")
+	if !strings.Contains(prompt, "specworkflow/discovery-output.schema.json") {
+		t.Error("expected prompt to reference specworkflow/discovery-output.schema.json")
 	}
 }
 
@@ -173,8 +173,8 @@ func TestPromptHoldoutIncludesContractPaths(t *testing.T) {
 	if !strings.Contains(prompt, "/tmp/holdouts-round-1.md") {
 		t.Error("expected prompt to reference holdout markdown output path")
 	}
-	if !strings.Contains(prompt, "HoldoutOutput") {
-		t.Error("expected prompt to reference HoldoutOutput schema")
+	if !strings.Contains(prompt, "specworkflow/holdout-output.schema.json") {
+		t.Error("expected prompt to reference specworkflow/holdout-output.schema.json")
 	}
 }
 

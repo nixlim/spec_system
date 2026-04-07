@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "agent",
+    "mode",
+    "completion_status",
+    "tools_used",
+    "languages",
+    "frameworks",
+    "modules",
+    "entry_points",
+    "dependency_graph",
+    "existing_docs",
+    "test_coverage_overview",
+    "suggested_scope"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string" },
+    "agent": { "type": "string" },
+    "mode": { "type": "string", "enum": ["full", "incremental"] },
+    "completion_status": {
+      "type": "object",
+      "required": ["status", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": "string", "enum": ["complete", "partial"] },
+        "reason": { "type": "string" }
+      }
+    },
+    "tools_used": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["tool", "version", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "tool": { "type": "string" },
+          "version": { "type": "string" },
+          "status": { "type": "string" }
+        }
+      }
+    },
+    "languages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["language", "file_count", "line_count"],
+        "additionalProperties": false,
+        "properties": {
+          "language": { "type": "string" },
+          "file_count": { "type": "integer", "minimum": 0 },
+          "line_count": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "frameworks": { "type": "array", "items": { "type": "string" } },
+    "modules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "name", "description", "files", "lines", "exports", "dependencies", "has_tests", "test_files", "content_hash"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string" },
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "files": { "type": "integer", "minimum": 0 },
+          "lines": { "type": "integer", "minimum": 0 },
+          "exports": { "type": "array", "items": { "type": "string" } },
+          "dependencies": { "type": "array", "items": { "type": "string" } },
+          "has_tests": { "type": "boolean" },
+          "test_files": { "type": "integer", "minimum": 0 },
+          "content_hash": { "type": "string" }
+        }
+      }
+    },
+    "entry_points": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "type", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string" },
+          "type": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "dependency_graph": {
+      "type": "object",
+      "required": ["edges"],
+      "additionalProperties": false,
+      "properties": {
+        "edges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["from", "to"],
+            "additionalProperties": false,
+            "properties": {
+              "from": { "type": "string" },
+              "to": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "existing_docs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "last_modified", "estimated_staleness", "topics"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string" },
+          "last_modified": { "type": "string" },
+          "estimated_staleness": { "type": "string" },
+          "topics": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "test_coverage_overview": {
+      "type": "object",
+      "required": ["test_file_count", "packages_with_tests", "packages_without_tests", "test_frameworks"],
+      "additionalProperties": false,
+      "properties": {
+        "test_file_count": { "type": "integer", "minimum": 0 },
+        "packages_with_tests": { "type": "integer", "minimum": 0 },
+        "packages_without_tests": { "type": "integer", "minimum": 0 },
+        "test_frameworks": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "suggested_scope": {
+      "type": "object",
+      "required": ["include", "exclude", "focus_areas"],
+      "additionalProperties": false,
+      "properties": {
+        "include": { "type": "array", "items": { "type": "string" } },
+        "exclude": { "type": "array", "items": { "type": "string" } },
+        "focus_areas": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "incremental_changes": {
+      "type": "object",
+      "required": ["added_modules", "modified_modules", "removed_modules", "added_files", "modified_files", "removed_files", "recommendation", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "added_modules": { "type": "array", "items": { "type": "string" } },
+        "modified_modules": { "type": "array", "items": { "type": "string" } },
+        "removed_modules": { "type": "array", "items": { "type": "string" } },
+        "added_files": { "type": "integer", "minimum": 0 },
+        "modified_files": { "type": "integer", "minimum": 0 },
+        "removed_files": { "type": "integer", "minimum": 0 },
+        "recommendation": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    },
+    "merge_log": {
+      "type": "object",
+      "required": ["claude_modules", "codex_modules", "merged_modules", "conflicts", "dedup_count", "strategy"],
+      "additionalProperties": false,
+      "properties": {
+        "claude_modules": { "type": "integer", "minimum": 0 },
+        "codex_modules": { "type": "integer", "minimum": 0 },
+        "merged_modules": { "type": "integer", "minimum": 0 },
+        "conflicts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["module_path", "field", "claude_value", "codex_value", "resolution"],
+            "additionalProperties": false,
+            "properties": {
+              "module_path": { "type": "string" },
+              "field": { "type": "string" },
+              "claude_value": { "type": "string" },
+              "codex_value": { "type": "string" },
+              "resolution": { "type": "string" }
+            }
+          }
+        },
+        "dedup_count": { "type": "integer", "minimum": 0 },
+        "strategy": { "type": "string" }
+      }
+    }
+  }
+}
