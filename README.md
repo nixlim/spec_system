@@ -2,6 +2,8 @@
 
 > **Note**: This project is under active development. APIs, configuration fields, and workflow behaviour may change between commits.
 
+![Adversarial Spec System Demo](spec_system_demo.gif)
+
 A multi-agent system that produces high-quality software specifications through adversarial review. Specialised AI agents collaborate and compete — discovering requirements, drafting specs, reviewing through multiple lenses, revising, judging convergence, and decomposing into task graphs — while human gates ensure alignment at critical decision points.
 
 The system supports **dual-provider execution** (Claude + Codex in parallel) across discovery, drafting, and review phases, with intelligent merging of outputs. A separate **code review workflow** provides automated code auditing with fix-review loops. A **code documentation workflow** auto-generates and maintains code documentation.
