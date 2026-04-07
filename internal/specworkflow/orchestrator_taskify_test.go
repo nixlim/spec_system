@@ -12,12 +12,19 @@ import (
 )
 
 // taskifyTestOrchestrator creates a minimal Orchestrator wired for taskify tests.
+// Directory layout mirrors production:
+//
+//	projectRoot/
+//	  .workspace/   ← workspaceDir (agents run here)
+//	    specs/test-feature/
+//	  .tasks/       ← where handleTaskify writes the task graph
 func taskifyTestOrchestrator(t *testing.T, runner *orchMockRunner) (*Orchestrator, string) {
 	t.Helper()
 
-	dir := t.TempDir()
-	specDir := filepath.Join(dir, "specs", "test-feature")
-	tasksDir := filepath.Join(dir, ".tasks")
+	projectRoot := t.TempDir()
+	workspaceDir := filepath.Join(projectRoot, ".workspace")
+	specDir := filepath.Join(workspaceDir, "specs", "test-feature")
+	tasksDir := filepath.Join(projectRoot, ".tasks")
 	if err := os.MkdirAll(specDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +68,7 @@ func taskifyTestOrchestrator(t *testing.T, runner *orchMockRunner) (*Orchestrato
 		logger:       logger,
 		emitter:      NewChannelEmitter(64),
 		runner:       runner,
-		workspaceDir: dir,
+		workspaceDir: workspaceDir,
 		featureName:  "test-feature",
 		gateCh:       make(chan GateResponse, 1),
 		issueHistory: make(map[string][]string),
@@ -93,7 +100,7 @@ func TestHandleTaskify_ValidOutput(t *testing.T) {
 	runner := newOrchMockRunner()
 	o, specDir := taskifyTestOrchestrator(t, runner)
 
-	taskGraphPath := filepath.Join(o.workspaceDir, ".tasks", "test-feature.task.json")
+	taskGraphPath := filepath.Join(filepath.Dir(filepath.Clean(o.workspaceDir)), ".tasks", "test-feature.task.json")
 	os.MkdirAll(filepath.Dir(taskGraphPath), 0o755)
 
 	// Use a custom runner that writes valid task graph on dispatch.
@@ -120,7 +127,7 @@ func TestHandleTaskify_RetriesOnValidationFailure(t *testing.T) {
 	runner := newOrchMockRunner()
 	o, specDir := taskifyTestOrchestrator(t, runner)
 
-	taskGraphPath := filepath.Join(o.workspaceDir, ".tasks", "test-feature.task.json")
+	taskGraphPath := filepath.Join(filepath.Dir(filepath.Clean(o.workspaceDir)), ".tasks", "test-feature.task.json")
 	os.MkdirAll(filepath.Dir(taskGraphPath), 0o755)
 
 	callCount := 0
@@ -172,7 +179,7 @@ func TestHandleTaskify_EscalatesWhenRetriesExhausted(t *testing.T) {
 	runner := newOrchMockRunner()
 	o, specDir := taskifyTestOrchestrator(t, runner)
 
-	taskGraphPath := filepath.Join(o.workspaceDir, ".tasks", "test-feature.task.json")
+	taskGraphPath := filepath.Join(filepath.Dir(filepath.Clean(o.workspaceDir)), ".tasks", "test-feature.task.json")
 	os.MkdirAll(filepath.Dir(taskGraphPath), 0o755)
 
 	// Always write invalid task graph.
@@ -205,7 +212,7 @@ func TestHandleTaskify_MissingOutputFileTriggersRetry(t *testing.T) {
 	runner := newOrchMockRunner()
 	o, specDir := taskifyTestOrchestrator(t, runner)
 
-	taskGraphPath := filepath.Join(o.workspaceDir, ".tasks", "test-feature.task.json")
+	taskGraphPath := filepath.Join(filepath.Dir(filepath.Clean(o.workspaceDir)), ".tasks", "test-feature.task.json")
 
 	callCount := 0
 	customRunner := &taskifyTestRunner{
@@ -248,7 +255,7 @@ func TestHandleTaskify_IncludesHumanComments(t *testing.T) {
 	cData, _ := json.Marshal(comments)
 	os.WriteFile(filepath.Join(specDir, "human-comments.json"), cData, 0o644)
 
-	taskGraphPath := filepath.Join(o.workspaceDir, ".tasks", "test-feature.task.json")
+	taskGraphPath := filepath.Join(filepath.Dir(filepath.Clean(o.workspaceDir)), ".tasks", "test-feature.task.json")
 	os.MkdirAll(filepath.Dir(taskGraphPath), 0o755)
 
 	// Use a capturing runner to inspect prompt content.
@@ -298,7 +305,7 @@ func TestHandleTaskify_IncludesValidationErrorsOnRetry(t *testing.T) {
 	runner := newOrchMockRunner()
 	o, specDir := taskifyTestOrchestrator(t, runner)
 
-	taskGraphPath := filepath.Join(o.workspaceDir, ".tasks", "test-feature.task.json")
+	taskGraphPath := filepath.Join(filepath.Dir(filepath.Clean(o.workspaceDir)), ".tasks", "test-feature.task.json")
 	os.MkdirAll(filepath.Dir(taskGraphPath), 0o755)
 	customRunner.taskGraphPath = taskGraphPath
 	o.runner = customRunner
@@ -333,7 +340,7 @@ func TestHandleTaskify_AgentDispatchFailureTriggersRetry(t *testing.T) {
 
 	runner := newOrchMockRunner()
 	o, specDir := taskifyTestOrchestrator(t, runner)
-	taskGraphPath := filepath.Join(o.workspaceDir, ".tasks", "test-feature.task.json")
+	taskGraphPath := filepath.Join(filepath.Dir(filepath.Clean(o.workspaceDir)), ".tasks", "test-feature.task.json")
 	os.MkdirAll(filepath.Dir(taskGraphPath), 0o755)
 	customRunner.taskGraphPath = taskGraphPath
 	o.runner = customRunner
@@ -444,16 +451,18 @@ func TestLoadHumanComments_CorruptedFile(t *testing.T) {
 func taskHumanGateOrchestrator(t *testing.T) (*Orchestrator, string) {
 	t.Helper()
 
-	dir := t.TempDir()
-	specDir := filepath.Join(dir, "specs", "test-feature")
-	tasksDir := filepath.Join(dir, ".tasks")
+	// Use a subdirectory as workspaceDir so projectRoot (its parent) owns .tasks/.
+	projectRoot := t.TempDir()
+	workspaceDir := filepath.Join(projectRoot, "workspace")
+	specDir := filepath.Join(workspaceDir, "specs", "test-feature")
+	tasksDir := filepath.Join(projectRoot, ".tasks")
 	os.MkdirAll(specDir, 0o755)
 	os.MkdirAll(tasksDir, 0o755)
 
 	// Write spec-final.md (needed if correct action re-runs taskify).
 	os.WriteFile(filepath.Join(specDir, "spec-final.md"), []byte("# Final Spec"), 0o644)
 
-	// Write valid task graph (simulating prior taskify output).
+	// Write valid task graph at project root .tasks/ (matching handleTaskify output path).
 	os.WriteFile(filepath.Join(tasksDir, "test-feature.task.json"), validTaskGraphJSON(), 0o644)
 
 	cfg := orchTestConfig()
@@ -490,7 +499,7 @@ func taskHumanGateOrchestrator(t *testing.T) (*Orchestrator, string) {
 		logger:       logger,
 		emitter:      NewChannelEmitter(64),
 		runner:       newOrchMockRunner(),
-		workspaceDir: dir,
+		workspaceDir: workspaceDir,
 		featureName:  "test-feature",
 		gateCh:       make(chan GateResponse, 1),
 		issueHistory: make(map[string][]string),
@@ -522,7 +531,7 @@ func TestHandleTaskHumanGate_Approve(t *testing.T) {
 	}
 
 	// Verify task graph file still exists.
-	taskGraphPath := filepath.Join(o.workspaceDir, ".tasks", "test-feature.task.json")
+	taskGraphPath := filepath.Join(filepath.Dir(filepath.Clean(o.workspaceDir)), ".tasks", "test-feature.task.json")
 	if _, err := os.Stat(taskGraphPath); err != nil {
 		t.Errorf("task graph file should be preserved: %v", err)
 	}
@@ -748,4 +757,93 @@ func (r *taskifyFailThenSucceedRunner) Run(prompt string, outputPath string, tim
 	os.MkdirAll(filepath.Dir(r.taskGraphPath), 0o755)
 	os.WriteFile(r.taskGraphPath, r.validJSON, 0o644)
 	return 0, "", 0.01, 100, nil
+}
+
+// TestHandleTaskify_OutputPathIsProjectRoot verifies that handleTaskify reads the
+// task graph from the project root .tasks/ directory (parent of workspaceDir),
+// which is where the taskify skill writes its output.
+func TestHandleTaskify_OutputPathIsProjectRoot(t *testing.T) {
+	runner := newOrchMockRunner()
+	o, specDir := taskifyTestOrchestrator(t, runner)
+
+	// The expected path is projectRoot/.tasks/, not workspaceDir/.tasks/.
+	projectRoot := filepath.Dir(filepath.Clean(o.workspaceDir))
+	expectedTaskGraphPath := filepath.Join(projectRoot, ".tasks", "test-feature.task.json")
+
+	// Write valid JSON directly to the project root path (simulating the skill).
+	if err := os.MkdirAll(filepath.Dir(expectedTaskGraphPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	callCount := 0
+	capturingRunner := &taskifyCapturingRunner{
+		callCount:       &callCount,
+		capturedPrompts: new([]string),
+		taskGraphPath:   expectedTaskGraphPath,
+		responses: []taskifyRunResponse{
+			{writeJSON: validTaskGraphJSON()},
+		},
+	}
+	o.runner = capturingRunner
+
+	state := o.sm.State()
+	if err := o.handleTaskify(state, specDir); err != nil {
+		t.Fatalf("handleTaskify failed: %v", err)
+	}
+	if o.sm.State().State != StateTaskReview {
+		t.Errorf("expected TASK_REVIEW, got %s", o.sm.State().State)
+	}
+}
+
+// TestHandleTaskHumanGate_GateEventTaskIDIsFeatureName verifies that the gate
+// request event emitted by handleTaskHumanGate carries the actual feature name
+// (not the hardcoded string "task_approval") as its task_id. The frontend uses
+// this value to build the URL /api/tasks/{task_id}/approve, so a wrong value
+// causes the approval to land on the wrong feature and creates a spurious
+// workflow directory in workspace/specs/.
+func TestHandleTaskHumanGate_GateEventTaskIDIsFeatureName(t *testing.T) {
+	o, specDir := taskHumanGateOrchestrator(t)
+
+	// Send approve so the gate handler completes without blocking.
+	o.gateCh <- GateResponse{Action: "approve"}
+
+	done := make(chan error, 1)
+	go func() {
+		state := o.sm.State()
+		done <- o.handleTaskHumanGate(state, specDir)
+	}()
+
+	// Drain the emitter channel to find the gate request event.
+	ce, ok := o.emitter.(*ChannelEmitter)
+	if !ok {
+		t.Fatal("emitter is not a *ChannelEmitter")
+	}
+	timeout := time.After(2 * time.Second)
+	var foundTaskID string
+	for foundTaskID == "" {
+		select {
+		case env := <-ce.Events():
+			if env.Event != EventGateRequest {
+				continue
+			}
+			gr, ok := env.Data.(GateRequestEvent)
+			if !ok {
+				t.Fatal("gate request event data has wrong type")
+			}
+			foundTaskID = gr.TaskID
+		case <-timeout:
+			t.Fatal("timed out waiting for gate request event")
+		}
+	}
+
+	if err := <-done; err != nil {
+		t.Fatalf("handleTaskHumanGate returned error: %v", err)
+	}
+
+	if foundTaskID == "task_approval" {
+		t.Errorf("gate event task_id is hardcoded %q; want the feature name %q — this causes a spurious 'task_approval' workflow in the UI", foundTaskID, o.featureName)
+	}
+	if foundTaskID != o.featureName {
+		t.Errorf("gate event task_id = %q, want %q", foundTaskID, o.featureName)
+	}
 }

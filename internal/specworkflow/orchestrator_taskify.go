@@ -18,7 +18,10 @@ import (
 // schema and retries with validation errors on failure, up to TaskifyMaxRetries.
 // On exhausting retries, the workflow escalates.
 func (o *Orchestrator) handleTaskify(state *WorkflowStateJSON, specDir string) error {
-	taskGraphPath := filepath.Join(o.workspaceDir, ".tasks", o.featureName+".task.json")
+	// Agents resolve relative paths against the git repo root, not the workspace
+	// subdirectory. Use the project root .tasks/ as the authoritative output path.
+	projectRoot := filepath.Dir(filepath.Clean(o.workspaceDir))
+	taskGraphPath := filepath.Join(projectRoot, ".tasks", o.featureName+".task.json")
 
 	// Ensure .tasks directory exists.
 	if err := os.MkdirAll(filepath.Dir(taskGraphPath), 0o755); err != nil {
@@ -64,21 +67,24 @@ func (o *Orchestrator) handleTaskify(state *WorkflowStateJSON, specDir string) e
 
 		// Dispatch agent.
 		cost, duration, runErr := o.dispatchAgent("taskify", prompt, taskGraphPath, o.runnerFor("taskify"))
+		_ = cost
+		_ = duration
+
+		// If the runner detected a failure (crash, timeout, missing output, invalid
+		// JSON), record it and retry.
 		if runErr != nil {
 			log.Printf("[orchestrator] taskify agent failed on attempt %d: %v", attempt, runErr)
 			lastValidationErrors = []string{fmt.Sprintf("agent dispatch failed: %v", runErr)}
 			o.emitter.Emit(NewAgentErrorEvent("taskify", "dispatch_failure", runErr.Error(), attempt, maxRetries))
-			_ = cost
-			_ = duration
 			continue
 		}
 
-		// Check if output file exists.
-		data, readErr := os.ReadFile(taskGraphPath)
-		if readErr != nil {
-			log.Printf("[orchestrator] taskify output file missing on attempt %d: %v", attempt, readErr)
+		// Read and verify the output file.
+		data, dataErr := os.ReadFile(taskGraphPath)
+		if dataErr != nil {
+			log.Printf("[orchestrator] taskify output file missing on attempt %d: %v", attempt, dataErr)
 			lastValidationErrors = []string{"task graph output file was not created"}
-			o.emitter.Emit(NewAgentErrorEvent("taskify", "missing_output", readErr.Error(), attempt, maxRetries))
+			o.emitter.Emit(NewAgentErrorEvent("taskify", "missing_output", dataErr.Error(), attempt, maxRetries))
 			continue
 		}
 
@@ -150,13 +156,14 @@ func loadHumanComments(specDir string) (string, error) {
 //     transition to TASKIFY
 //   - skip: transition directly to COMPLETE without creating tasks
 func (o *Orchestrator) handleTaskHumanGate(state *WorkflowStateJSON, specDir string) error {
-	taskGraphPath := filepath.Join(o.workspaceDir, ".tasks", o.featureName+".task.json")
+	projectRoot := filepath.Dir(filepath.Clean(o.workspaceDir))
+	taskGraphPath := filepath.Join(projectRoot, ".tasks", o.featureName+".task.json")
 
 	// Create gate proxy in Beads (CD-88v.10).
 	o.openGateProxy("taskgate", o.featureName+": gate-taskify — Taskify review required")
 
 	// Emit gate request event.
-	o.emitter.Emit(NewGateRequestEvent("task_human_gate", "task_approval", map[string]string{
+	o.emitter.Emit(NewGateRequestEvent("task_human_gate", o.featureName, map[string]string{
 		"task_graph_path": taskGraphPath,
 	}))
 
@@ -248,11 +255,14 @@ func attemptCreateBeads(taskGraphPath string) string {
 		return "taskval unavailable -- tasks saved but Beads not created"
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "taskval", "--mode=graph", "--create-beads", taskGraphPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Sprintf("taskval timed out creating Beads (output so far: %s)", strings.TrimSpace(string(output)))
+		}
 		return fmt.Sprintf("taskval failed: %v (output: %s)", err, strings.TrimSpace(string(output)))
 	}
 
