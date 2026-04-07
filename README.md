@@ -99,6 +99,57 @@ flowchart TD
     class CP,CRDONE terminal
 ```
 
+### Code Documentation Workflow
+
+A workflow for auto-generating and maintaining code documentation:
+
+```mermaid
+%%{init: {"theme": "neutral", "flowchart": {"defaultRenderer": "elk"}}}%%
+flowchart TD
+    CP([Code Path])
+    CDINIT[CD_INIT]
+    CDDISC[CD_DISCOVERY<br/>Inventory modules · entry points · existing docs<br/><i>dual-provider: Claude + Codex</i>]
+    CDHGS[/CD_HUMAN_GATE_SCOPE<br/>Confirm / adjust scope\]
+    CDDRAFT[CD_DRAFTING<br/>Generate documentation + architecture diagrams<br/><i>dual-provider: Claude + Codex</i>]
+    CDSAN[CD_SANITISING<br/>Secret scan · redact before human review]
+    CDHGD[/CD_HUMAN_GATE_DRAFT<br/>Approve / redraft\]
+
+    subgraph CDLOOP["Review Loop · 1–3 rounds"]
+        direction TB
+        CDREV[CD_REVIEWING<br/>4 parallel reviewer groups · 7 lenses]
+        CDREVIS[CD_REVISING<br/>Address findings]
+        CDJUDG[CD_JUDGING<br/>Convergence check]
+    end
+
+    CDHGF[/CD_HUMAN_GATE_FINAL<br/>Only if unresolved CRITICAL/MAJOR remain\]
+    CDWRITE[CD_WRITING<br/>Write docs to disk · create manifest]
+    CDDONE([CD_COMPLETE / CD_ESCALATED])
+
+    CP --> CDINIT --> CDDISC --> CDHGS
+    CDHGS -- confirm --> CDDRAFT
+    CDHGS -- correct --> CDDISC
+    CDDRAFT --> CDSAN --> CDHGD
+    CDSAN -- secrets found --> CDDRAFT
+    CDHGD -- approve --> CDREV
+    CDHGD -- redraft --> CDDRAFT
+    CDREV --> CDREVIS --> CDJUDG
+    CDJUDG -- REVISE --> CDREV
+    CDJUDG -- PASS --> CDWRITE
+    CDJUDG -- unresolved findings --> CDHGF
+    CDHGF -- accept --> CDWRITE
+    CDHGF -- review again --> CDREV
+    CDWRITE --> CDDONE
+
+    classDef agent fill:#ffffff,stroke:#000000,color:#000000
+    classDef gate fill:#e8e8e8,stroke:#000000,color:#000000,stroke-dasharray:5 3
+    classDef terminal fill:#1a1a1a,stroke:#1a1a1a,color:#ffffff
+    class CDINIT,CDDISC,CDDRAFT,CDSAN,CDREV,CDREVIS,CDJUDG,CDWRITE agent
+    class CDHGS,CDHGD,CDHGF gate
+    class CP,CDDONE terminal
+```
+
+Supports **full** and **incremental** modes. Incremental mode reads the `.codedoc-manifest.json` from the previous run and only re-processes changed modules. The writer creates/updates this manifest on completion, enabling efficient subsequent runs.
+
 ### Agents
 
 | Agent | Role | Lenses |
@@ -116,6 +167,17 @@ flowchart TD
 | Taskify | Decomposes finalized spec into structured task graph | -- |
 | Task Reviewer | Reviews task graph for quality and completeness | -- |
 | Task Reviser | Addresses task review findings | -- |
+| Codedoc Discovery | Inventories modules, entry points, dependencies, existing docs | -- |
+| Codedoc Discovery Merge | Merges dual-provider codedoc discovery outputs | -- |
+| Codedoc Drafter | Generates documentation and architecture diagrams | -- |
+| Codedoc Drafter Combine | Merges dual-provider codedoc drafter outputs | -- |
+| Codedoc Reviewer (Accuracy) | Accuracy, Currency | ACC, CUR |
+| Codedoc Reviewer (Completeness) | Completeness, Clarity | CMP, CLA |
+| Codedoc Reviewer (Architecture) | Architecture, Structure | ARC, STR |
+| Codedoc Reviewer (Audit) | Audit, Consistency, Secrets | AUD, CON, SEC |
+| Codedoc Reviser | Addresses findings from codedoc reviewers | -- |
+| Codedoc Judge | Evaluates convergence, renders PASS/REVISE/BLOCK verdict | -- |
+| Codedoc Writer | Writes approved documentation to disk, creates manifest | -- |
 
 All JSON-producing agents use a **validation+retry loop** via `outvalid`: agents are instructed to draft JSON output, run `bin/outvalid --schema workflow-templates/<workflow>/<agent>-output.schema.json --input <draft> --writeTo <dest>`, read the numbered errors, fix the draft, and retry. If the agent cannot produce a valid document within `max_retries` attempts, validation errors are fed back into the orchestrator prompt and the agent is re-dispatched. Schema files for all agent roles live under `workflow-templates/`.
 
@@ -342,6 +404,35 @@ code_review:
     default: ""
     reviewer: ""
     fixer: ""
+
+# ─────────────────────────────────────────────
+# Code documentation workflow
+# ─────────────────────────────────────────────
+codedoc:
+  max_rounds: 3                       # Review/revise iterations (default: 3)
+  min_rounds: 1                       # Minimum rounds before human gate allowed (default: 1)
+  max_cost_usd: 50.0                  # Cost budget (default: 50.0)
+  max_wall_clock_minutes: 90          # Time budget (default: 90)
+  max_gate_corrections: 3             # Max scope gate correction rounds (default: 3)
+  max_gate_draft_redrafts: 2          # Max redraft rounds at draft gate (default: 2)
+  staleness_threshold: 2              # Consecutive unchanged rounds before escalation (default: 2)
+  agent_timeout_seconds: 600          # General agent timeout (default: 600)
+  discovery_timeout_seconds: 1200     # Discovery timeout — larger codebases (default: 1200)
+  reviewer_timeout_seconds: 300       # Reviewer agent timeout (default: 300)
+  max_retries: 2                      # Retry attempts per agent on failure (default: 2)
+  default_mode: full                  # "full" or "incremental" (default: full)
+  docs_output_dir: docs               # Output directory for generated docs (default: docs)
+  backup_before_write: true           # Create .bak files before overwriting (default: true)
+  drift_warning_threshold: 0.20       # Fraction of changed files that triggers a drift warning (default: 0.20)
+  enable_codex_codedoc_discovery: false  # Dual-provider discovery (default: false)
+  enable_codex_codedoc_drafting: false   # Dual-provider drafting (default: false)
+  enable_codex_reviewers: true           # Dual-provider reviewers (default: true)
+  claude_models:
+    default: ""
+    discovery: ""
+    drafter: ""
+    reviewer: ""
+    judge: ""
 ```
 
 ### Minimal Config (Fastest Start)
@@ -460,6 +551,17 @@ If `bd` is not on your PATH, Beads integration is silently disabled. The message
 | POST | `/api/codereview/{feature}/cancel` | Cancel running code review |
 | POST | `/api/codereview/{feature}/resume` | Resume from ERROR state |
 | POST | `/api/codereview/{feature}/reset` | Delete code review feature directory |
+
+### Code Documentation
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/codedoc/start` | Start new codedoc workflow |
+| GET | `/api/codedoc/{feature}/status` | Poll codedoc status |
+| POST | `/api/codedoc/{feature}/gate` | Submit gate decision |
+| POST | `/api/codedoc/{feature}/cancel` | Cancel running codedoc workflow |
+| POST | `/api/codedoc/{feature}/resume` | Resume from ERROR state |
+| POST | `/api/codedoc/{feature}/reset` | Delete codedoc feature directory |
 
 ### Source Documents
 
