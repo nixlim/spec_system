@@ -622,4 +622,4 @@ Test coverage includes: state machine, orchestrator, convergence, circuit breake
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE) for the full text.
+MIT License — see [LICENSE](LICENSE) for the full text.
