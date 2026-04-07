@@ -16,7 +16,10 @@ var RewindableStates = []WorkflowState{
 	StateRevising,
 	StateJudging,
 	StateTaskify,
+	StateTaskReview,
 }
+
+
 
 // IsRewindable reports whether the given state is a valid rewind target.
 func IsRewindable(state WorkflowState) bool {
@@ -92,6 +95,10 @@ func RewindWorkflow(specDir string, state *WorkflowStateJSON, targetState Workfl
 		// Rewinding to TASKIFY preserves existing task files and spec version.
 		// No counters need resetting — the taskify stage starts a fresh run
 		// that may produce different task graphs.
+	case StateTaskReview:
+		// Rewinding to TASK_REVIEW re-runs task review against the existing
+		// task graph. TaskReviewRound is reset so reviewers start fresh.
+		state.TaskReviewRound = 0
 	}
 
 	if err := SaveState(specDir, state); err != nil {

@@ -26,7 +26,7 @@ type taskReviewResult struct {
 // minor-only findings. When TaskReviewMaxRounds is reached, findings pass
 // to StateTaskHumanGate regardless of severity.
 func (o *Orchestrator) handleTaskReview(state *WorkflowStateJSON, specDir string) error {
-	taskGraphPath := filepath.Join(o.workspaceDir, ".tasks", o.featureName+".task.json")
+	taskGraphPath := filepath.Join(filepath.Dir(filepath.Clean(o.workspaceDir)), ".tasks", o.featureName+".task.json")
 	taskGraphData, err := os.ReadFile(taskGraphPath)
 	if err != nil {
 		return fmt.Errorf("read task graph for review: %w", err)
@@ -40,12 +40,15 @@ func (o *Orchestrator) handleTaskReview(state *WorkflowStateJSON, specDir string
 
 	timeout := o.config.AgentTimeoutSeconds
 
-	// Build task review prompt.
-	prompt := buildTaskReviewPrompt(string(taskGraphData), round, o.featureName)
-
-	// Output paths.
+	// Output paths — all inside the workspace (specDir).
 	claudeOutPath := filepath.Join(specDir, VersionedFilename("task-review", "claude", round, ".json"))
 	codexOutPath := filepath.Join(specDir, VersionedFilename("task-review", "codex", round, ".json"))
+	claudeMDPath := filepath.Join(specDir, fmt.Sprintf("task-review-report-claude-round-%d.md", round))
+	codexMDPath := filepath.Join(specDir, fmt.Sprintf("task-review-report-codex-round-%d.md", round))
+
+	// Build task review prompts with explicit output paths so agents write only inside the workspace.
+	claudePrompt := buildTaskReviewPrompt(string(taskGraphData), round, o.featureName, claudeOutPath, claudeMDPath)
+	codexPrompt := buildTaskReviewPrompt(string(taskGraphData), round, o.featureName, codexOutPath, codexMDPath)
 
 	// Dispatch both reviewers in parallel.
 	var wg sync.WaitGroup
@@ -58,7 +61,7 @@ func (o *Orchestrator) handleTaskReview(state *WorkflowStateJSON, specDir string
 	go func() {
 		defer wg.Done()
 		runner := taggedRunner(o.runnerFor("task_reviewer"), "task-reviewer-claude")
-		exitCode, stderr, cost, duration, runErr := runner.Run(prompt, claudeOutPath, timeout)
+		exitCode, stderr, cost, duration, runErr := runner.Run(claudePrompt, claudeOutPath, timeout)
 		claudeResult = taskReviewResult{provider: "claude", outPath: claudeOutPath, cost: cost, duration: duration}
 		if runErr != nil {
 			claudeResult.err = fmt.Errorf("task-reviewer-claude failed: %v", runErr)
@@ -91,7 +94,7 @@ func (o *Orchestrator) handleTaskReview(state *WorkflowStateJSON, specDir string
 		go func() {
 			defer wg.Done()
 			runner := taggedRunner(o.codexRunner, "task-reviewer-codex")
-			exitCode, stderr, cost, duration, runErr := runner.Run(prompt, codexOutPath, timeout)
+			exitCode, stderr, cost, duration, runErr := runner.Run(codexPrompt, codexOutPath, timeout)
 			codexResult = taskReviewResult{provider: "codex", outPath: codexOutPath, cost: cost, duration: duration}
 			if runErr != nil {
 				codexResult.err = fmt.Errorf("task-reviewer-codex failed: %v", runErr)
@@ -243,7 +246,7 @@ func countSeverity(findings []MergedFinding, severity Severity) int {
 // validated before transitioning back to StateTaskReview. If validation fails,
 // the workflow escalates.
 func (o *Orchestrator) handleTaskRevision(state *WorkflowStateJSON, specDir string) error {
-	taskGraphPath := filepath.Join(o.workspaceDir, ".tasks", o.featureName+".task.json")
+	taskGraphPath := filepath.Join(filepath.Dir(filepath.Clean(o.workspaceDir)), ".tasks", o.featureName+".task.json")
 	taskGraphData, err := os.ReadFile(taskGraphPath)
 	if err != nil {
 		return fmt.Errorf("read task graph for revision: %w", err)
@@ -320,7 +323,10 @@ func (o *Orchestrator) handleTaskRevision(state *WorkflowStateJSON, specDir stri
 }
 
 // buildTaskReviewPrompt constructs the prompt for task review agents.
-func buildTaskReviewPrompt(taskGraphJSON string, round int, featureName string) string {
+// outputJSONPath is the absolute path where the agent must write its ReviewerOutput JSON.
+// markdownReportPath is the absolute path where the agent must write its markdown report.
+// Both paths must be inside the workspace (specDir).
+func buildTaskReviewPrompt(taskGraphJSON string, round int, featureName, outputJSONPath, markdownReportPath string) string {
 	var b strings.Builder
 
 	b.WriteString("# Task Graph Review Agent\n\n")
@@ -349,7 +355,12 @@ func buildTaskReviewPrompt(taskGraphJSON string, round int, featureName string) 
 	b.WriteString("- lenses_applied (array of string, required): [\"completeness\", \"dependencies\", \"acceptance\", \"scope\", \"priority\"]\n")
 	b.WriteString("- findings (array of Finding): id, description, severity (CRITICAL|MAJOR|MINOR|OBSERVATION), impact, recommendation, lens, affected_section\n")
 	b.WriteString("- structural_integrity (object): performed (bool), checks (array of IntegrityCheck)\n")
-	b.WriteString("- markdown_report_file (string, required)\n\n")
+	fmt.Fprintf(&b, "- markdown_report_file (string, required): MUST be set to \"%s\"\n\n", markdownReportPath)
+
+	b.WriteString("## Output Files\n\n")
+	fmt.Fprintf(&b, "1. Write your ReviewerOutput JSON to: %s\n", outputJSONPath)
+	fmt.Fprintf(&b, "2. Write your markdown report to: %s\n", markdownReportPath)
+	b.WriteString("Do NOT write any files outside the workspace.\n")
 
 	return b.String()
 }
@@ -385,7 +396,8 @@ func buildTaskRevisionPrompt(taskGraphJSON, findingsJSON, humanComments, feature
 	b.WriteString("- You may add, modify, or remove tasks as needed to address findings\n")
 	fmt.Fprintf(&b, "- The revised task graph MUST conform to the TaskGraphFile JSON Schema at .tasks/task-graph-schema.json\n")
 	b.WriteString("- Ensure the dependency graph (depends_on) remains a valid DAG\n")
-	fmt.Fprintf(&b, "\nWrite output to: .tasks/%s.task.json\n", featureName)
+	b.WriteString("- Do NOT write any other files — only write the task graph JSON below\n")
+	fmt.Fprintf(&b, "\n## Output File\n\nWrite the revised task graph JSON to: .tasks/%s.task.json\n", featureName)
 
 	return b.String()
 }

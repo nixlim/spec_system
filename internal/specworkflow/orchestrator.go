@@ -292,13 +292,17 @@ func (o *Orchestrator) SetAgentStatus(name, status string) {
 	}
 }
 
-// GetActiveAgents returns a snapshot of all currently tracked agents.
+// GetActiveAgents returns a snapshot of agents currently in "running" status.
+// Completed agents ("done"/"failed") are excluded so the UI only shows what
+// is actually executing right now.
 func (o *Orchestrator) GetActiveAgents() []AgentStatus {
 	o.activeAgentsMu.RLock()
 	defer o.activeAgentsMu.RUnlock()
 	agents := make([]AgentStatus, 0, len(o.activeAgents))
 	for name, status := range o.activeAgents {
-		agents = append(agents, AgentStatus{Name: name, Status: status})
+		if status == "running" {
+			agents = append(agents, AgentStatus{Name: name, Status: status})
+		}
 	}
 	return agents
 }

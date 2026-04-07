@@ -73,8 +73,9 @@ func TestRegression_FullWorkflowNoCodex(t *testing.T) {
 	feature := "test-feature"
 	specDir := filepath.Join(workspace, "specs", feature)
 
-	// Ensure .tasks directory exists.
-	os.MkdirAll(filepath.Join(workspace, ".tasks"), 0o755)
+	// Ensure .tasks directory exists at project root (one level above workspace).
+	projectRoot := filepath.Dir(filepath.Clean(workspace))
+	os.MkdirAll(filepath.Join(projectRoot, ".tasks"), 0o755)
 
 	// Configure outputs for spec stages.
 	runner.SetOutput("Discovery Agent", orchDiscoveryOutput())
@@ -134,8 +135,8 @@ func TestRegression_FullWorkflowNoCodex(t *testing.T) {
 		t.Error("spec-final.md not created")
 	}
 
-	// Verify task graph was written.
-	taskGraphPath := filepath.Join(workspace, ".tasks", feature+".task.json")
+	// Verify task graph was written at project root (one level above workspace).
+	taskGraphPath := filepath.Join(projectRoot, ".tasks", feature+".task.json")
 	if _, err := os.Stat(taskGraphPath); os.IsNotExist(err) {
 		t.Error("task graph file not created")
 	}

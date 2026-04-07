@@ -25,6 +25,7 @@
 
   // Cache for issues, convergence history, etc.
   var issueCache = [];
+  var taskCache = [];
   var convergenceHistory = [];
   var lensSet = new Set();
 
@@ -336,9 +337,10 @@
     { state: "JUDGING",          label: "Judge",    gate: false },
     { state: "HUMAN_GATE_FINAL", label: "Gate F",   gate: true  },
     { state: "FINALIZED",        label: "Finalized", gate: false },
-    { state: "TASKIFY",          label: "Taskify",  gate: false },
-    { state: "TASK_REVIEW",      label: "T.Review", gate: false },
-    { state: "TASK_HUMAN_GATE",  label: "T.Gate",   gate: true  },
+    { state: "TASKIFY",          label: "Taskify",   gate: false },
+    { state: "TASK_REVIEW",      label: "T.Review",  gate: false },
+    { state: "TASK_REVISION",    label: "T.Revision", gate: false },
+    { state: "TASK_HUMAN_GATE",  label: "T.Gate",    gate: true  },
     { state: "COMPLETE",         label: "Done",     gate: false }
   ];
 
@@ -464,8 +466,9 @@
       "FINALIZED": 10,
       "TASKIFY": 11,
       "TASK_REVIEW": 12,
-      "TASK_HUMAN_GATE": 13,
-      "COMPLETE": 14
+      "TASK_REVISION": 13,
+      "TASK_HUMAN_GATE": 14,
+      "COMPLETE": 15
     };
     if (Object.prototype.hasOwnProperty.call(specStageIndex, state)) {
       return specStageIndex[state];
@@ -748,6 +751,9 @@
 
     // Re-fetch issues tab data
     loadIssues();
+
+    // Re-fetch tasks tab data
+    loadTasks();
 
     // Re-fetch convergence tab data
     loadConvergence();
@@ -1745,6 +1751,7 @@
         if (tab === "controls") { loadFeatureList(); startFeatureListPolling(); }
         if (tab === "spec") loadSpec();
         if (tab === "issues") loadIssues();
+        if (tab === "tasks") loadTasks();
         if (tab === "convergence") loadConvergence();
         if (tab === "messages") startMessagesPolling();
         if (tab === "running-agents") loadRunningAgents();
@@ -2200,7 +2207,7 @@
           var rewindRow = el("div", { className: "workflow-rewind", style: "display:flex;gap:6px;align-items:center;margin-top:6px;" });
 
           var stageSelect = el("select", { className: "rewind-select", style: "font-size:12px;padding:2px 4px;" });
-          var stages = ["DISCOVERY", "DRAFTING", "REVIEWING", "REVISING", "JUDGING", "TASKIFY"];
+          var stages = ["DISCOVERY", "DRAFTING", "REVIEWING", "REVISING", "JUDGING", "TASKIFY", "TASK_REVIEW"];
           stages.forEach(function (s) {
             var opt = el("option", { value: s, textContent: s });
             stageSelect.appendChild(opt);
@@ -2862,6 +2869,232 @@
   function onIssueUpdate(data) {
     // Refresh issues when updates arrive
     loadIssues();
+  }
+
+  // -----------------------------------------------------------------------
+  // Tasks Tab
+  // -----------------------------------------------------------------------
+
+  function loadTasks() {
+    var url = "/api/spec/tasks";
+    if (selectedFeature) url += "?feature=" + encodeURIComponent(selectedFeature);
+    fetchJSON(url).then(function (resp) {
+      taskCache = (resp && resp.tasks) ? resp.tasks : [];
+      renderTasks(taskCache);
+      updateTaskSummary(taskCache);
+    }).catch(function () {
+      taskCache = [];
+      renderTasks([]);
+      updateTaskSummary([]);
+    });
+  }
+
+  function renderTasks(tasks) {
+    var tbody = $("#task-table tbody");
+    clearChildren(tbody);
+
+    tasks.forEach(function (task) {
+      var tr = el("tr", { className: "expandable" });
+      var deps = buildDepsCell(task, tasks);
+      tr.innerHTML =
+        "<td><code>" + escapeHtml(task.task_id || "-") + "</code></td>" +
+        "<td>" + escapeHtml(task.task_name || "-") + "</td>" +
+        "<td>" + priorityBadge(task.priority) + "</td>" +
+        "<td>" + estimateBadge(task.estimate) + "</td>" +
+        "<td class='task-deps-cell'>" + deps + "</td>";
+
+      tr.addEventListener("click", function (e) {
+        // Chip clicks are handled separately — don't toggle detail for them.
+        if (e.target.classList.contains("task-dep-chip")) return;
+        var next = tr.nextElementSibling;
+        if (next && next.classList.contains("task-detail")) {
+          next.remove();
+        } else {
+          var detail = buildTaskDetail(task, tasks);
+          tr.parentNode.insertBefore(detail, tr.nextSibling);
+        }
+      });
+
+      tbody.appendChild(tr);
+    });
+
+    // Wire up dep-chip click navigation after all rows are rendered.
+    $("#task-table").querySelectorAll(".task-dep-chip[data-task-id]").forEach(function (chip) {
+      chip.addEventListener("click", function (e) {
+        e.stopPropagation();
+        scrollToTask(chip.dataset.taskId);
+      });
+    });
+  }
+
+  function buildDepsCell(task, allTasks) {
+    var deps = task.depends_on;
+    if (!deps || (typeof deps === "object" && deps.status === "N/A")) return "<span class='task-na'>N/A</span>";
+    if (!Array.isArray(deps) || deps.length === 0) return "<span class='task-na'>none</span>";
+    return deps.map(function (id) {
+      return "<span class='task-dep-chip' data-task-id='" + escapeHtml(id) + "'>" + escapeHtml(id) + "</span>";
+    }).join(" ");
+  }
+
+  function buildTaskDetail(task, allTasks) {
+    var tr = el("tr", { className: "task-detail" });
+    var td = el("td", { colSpan: "5" });
+
+    var html = '<div class="task-detail-content">';
+
+    // Goal
+    if (task.goal) {
+      html += '<div class="task-detail-section"><dt>Goal</dt><dd>' + escapeHtml(task.goal) + '</dd></div>';
+    }
+
+    // Acceptance criteria
+    if (task.acceptance && task.acceptance.length > 0) {
+      html += '<div class="task-detail-section"><dt>Acceptance Criteria</dt><dd><ul class="task-acceptance-list">';
+      task.acceptance.forEach(function (c) {
+        html += '<li>' + escapeHtml(c) + '</li>';
+      });
+      html += '</ul></dd></div>';
+    }
+
+    // Inputs/Outputs
+    if (task.inputs && task.inputs.length > 0) {
+      html += '<div class="task-detail-section"><dt>Inputs</dt><dd>';
+      html += buildIOTable(task.inputs);
+      html += '</dd></div>';
+    }
+    if (task.outputs && task.outputs.length > 0) {
+      html += '<div class="task-detail-section"><dt>Outputs</dt><dd>';
+      html += buildIOTable(task.outputs);
+      html += '</dd></div>';
+    }
+
+    // Files scope
+    if (task.files_scope && task.files_scope.length > 0) {
+      html += '<div class="task-detail-section"><dt>Files Scope</dt><dd class="task-files">';
+      task.files_scope.forEach(function (f) {
+        html += '<code class="task-file">' + escapeHtml(f) + '</code>';
+      });
+      html += '</dd></div>';
+    }
+
+    // Depends on (full IDs as chips)
+    var deps = task.depends_on;
+    if (Array.isArray(deps) && deps.length > 0) {
+      html += '<div class="task-detail-section"><dt>Depends On</dt><dd class="task-dep-chips">';
+      deps.forEach(function (id) {
+        html += '<span class="task-dep-chip task-dep-chip-detail" data-task-id="' + escapeHtml(id) + '">' + escapeHtml(id) + '</span>';
+      });
+      html += '</dd></div>';
+    }
+
+    // Blocked by (reverse deps)
+    var blockedBy = allTasks.filter(function (t) {
+      return Array.isArray(t.depends_on) && t.depends_on.indexOf(task.task_id) !== -1;
+    });
+    if (blockedBy.length > 0) {
+      html += '<div class="task-detail-section"><dt>Blocked By (depended on by)</dt><dd class="task-dep-chips">';
+      blockedBy.forEach(function (t) {
+        html += '<span class="task-dep-chip task-dep-chip-detail" data-task-id="' + escapeHtml(t.task_id) + '">' + escapeHtml(t.task_id) + '</span>';
+      });
+      html += '</dd></div>';
+    }
+
+    // Constraints
+    if (task.constraints && task.constraints.length > 0) {
+      html += '<div class="task-detail-section"><dt>Constraints</dt><dd><ul class="task-acceptance-list">';
+      task.constraints.forEach(function (c) {
+        html += '<li>' + escapeHtml(c) + '</li>';
+      });
+      html += '</ul></dd></div>';
+    }
+
+    // Notes
+    if (task.notes) {
+      html += '<div class="task-detail-section"><dt>Notes</dt><dd>' + escapeHtml(task.notes) + '</dd></div>';
+    }
+
+    html += '</div>';
+    td.innerHTML = html;
+    tr.appendChild(td);
+
+    // Wire up detail dep-chip navigation.
+    tr.querySelectorAll(".task-dep-chip-detail[data-task-id]").forEach(function (chip) {
+      chip.addEventListener("click", function (e) {
+        e.stopPropagation();
+        scrollToTask(chip.dataset.taskId);
+      });
+    });
+
+    return tr;
+  }
+
+  function buildIOTable(items) {
+    var html = '<table class="table task-io-table"><thead><tr><th>Name</th><th>Type</th><th>Constraints</th><th>Source/Dest</th></tr></thead><tbody>';
+    items.forEach(function (item) {
+      html += '<tr>' +
+        '<td>' + escapeHtml(item.name || "-") + '</td>' +
+        '<td>' + escapeHtml(item.type || "-") + '</td>' +
+        '<td>' + escapeHtml(item.constraints || "-") + '</td>' +
+        '<td>' + escapeHtml(item.source || item.destination || "-") + '</td>' +
+        '</tr>';
+    });
+    html += '</tbody></table>';
+    return html;
+  }
+
+  function updateTaskSummary(tasks) {
+    var counts = { total: tasks.length, critical: 0, high: 0, medium: 0, low: 0 };
+    tasks.forEach(function (t) {
+      var p = (t.priority || "").toLowerCase();
+      if (counts[p] !== undefined) counts[p]++;
+    });
+    $("#stat-task-total").textContent = counts.total;
+    $("#stat-task-critical").textContent = counts.critical;
+    $("#stat-task-high").textContent = counts.high;
+    $("#stat-task-medium").textContent = counts.medium;
+    $("#stat-task-low").textContent = counts.low;
+  }
+
+  function priorityBadge(priority) {
+    var p = (priority || "").toLowerCase();
+    var cls = {
+      critical: "badge-critical",
+      high:     "badge-major",
+      medium:   "badge-minor",
+      low:      "badge-observation"
+    }[p] || "";
+    return '<span class="badge ' + cls + '">' + escapeHtml(priority || "?") + '</span>';
+  }
+
+  function estimateBadge(estimate) {
+    var e = (estimate || "").toLowerCase();
+    var cls = {
+      trivial: "badge-observation",
+      small:   "badge-minor",
+      medium:  "badge-minor",
+      large:   "badge-major",
+      unknown: ""
+    }[e] || "";
+    return '<span class="badge ' + cls + '">' + escapeHtml(estimate || "?") + '</span>';
+  }
+
+  function scrollToTask(taskId) {
+    var tbody = $("#task-table tbody");
+    var rows = tbody.querySelectorAll("tr.expandable");
+    for (var i = 0; i < rows.length; i++) {
+      var codeEl = rows[i].querySelector("td:first-child code");
+      if (codeEl && codeEl.textContent === taskId) {
+        rows[i].scrollIntoView({ behavior: "smooth", block: "center" });
+        rows[i].classList.add("task-row-highlight");
+        setTimeout(function (row) { row.classList.remove("task-row-highlight"); }, 1500, rows[i]);
+        // If detail is not already open, open it.
+        var next = rows[i].nextElementSibling;
+        if (!next || !next.classList.contains("task-detail")) {
+          rows[i].click();
+        }
+        return;
+      }
+    }
   }
 
   // -----------------------------------------------------------------------

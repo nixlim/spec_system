@@ -252,13 +252,15 @@ func TestE2E_TaskReviewRevisionCycle_Unit(t *testing.T) {
 	// from Claude reviewer, then verify the full cycle:
 	// TASK_REVIEW (critical) → TASK_REVISION → TASK_REVIEW (minor) → TASK_HUMAN_GATE
 
-	dir := t.TempDir()
+	// Use a subdirectory as workspaceDir so projectRoot (its parent) owns .tasks/.
+	projectRoot := t.TempDir()
+	dir := filepath.Join(projectRoot, "workspace")
 	specDir := filepath.Join(dir, "specs", "test-feature")
-	tasksDir := filepath.Join(dir, ".tasks")
+	tasksDir := filepath.Join(projectRoot, ".tasks")
 	os.MkdirAll(specDir, 0o755)
 	os.MkdirAll(tasksDir, 0o755)
 
-	// Write initial task graph.
+	// Write initial task graph at project root .tasks/.
 	os.WriteFile(filepath.Join(tasksDir, "test-feature.task.json"),
 		validTaskGraphJSON(), 0o644)
 

@@ -6,7 +6,7 @@
 # ===========================================================================
 
 # Maximum number of review/revise iterations allowed.
-max_rounds: 10
+max_rounds: 20
 
 # Minimum number of review/revise iterations required before accepting a spec.
 min_rounds: 2
@@ -45,13 +45,13 @@ task_review_max_rounds: 3
 # --- Dual-Provider Settings ---
 
 # Enable Codex CLI agents alongside Claude for review and holdout generation.
-enable_codex_reviewers: true
+enable_codex_reviewers: false
 
 # Enable Codex CLI alongside Claude for the discovery phase.
-enable_codex_discovery: true
+enable_codex_discovery: false
 
 # Enable Codex CLI alongside Claude for the drafting phase.
-enable_codex_drafting: true
+enable_codex_drafting: false
 
 # Model for codex agents (reviewers, holdout, discovery, drafting — passed as -m flag).
 codex_model: "gpt-5.4"

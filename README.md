@@ -1,5 +1,7 @@
 # Adversarial Spec System
 
+> **Note**: This project is under active development. APIs, configuration fields, and workflow behaviour may change between commits.
+
 A multi-agent system that produces high-quality software specifications through adversarial review. Specialised AI agents collaborate and compete — discovering requirements, drafting specs, reviewing through multiple lenses, revising, judging convergence, and decomposing into task graphs — while human gates ensure alignment at critical decision points.
 
 The system supports **dual-provider execution** (Claude + Codex in parallel) across discovery, drafting, and review phases, with intelligent merging of outputs. A separate **code review workflow** provides automated code auditing with fix-review loops. A **code documentation workflow** auto-generates and maintains code documentation.
@@ -115,7 +117,7 @@ flowchart TD
 | Task Reviewer | Reviews task graph for quality and completeness | -- |
 | Task Reviser | Addresses task review findings | -- |
 
-All JSON-producing agents use a **validation+retry loop**: after dispatch, the output is validated against the expected schema. If invalid, validation errors are fed back into the prompt and the agent is re-dispatched (up to `max_retries` attempts).
+All JSON-producing agents use a **validation+retry loop** via `outvalid`: agents are instructed to draft JSON output, run `bin/outvalid --schema workflow-templates/<workflow>/<agent>-output.schema.json --input <draft> --writeTo <dest>`, read the numbered errors, fix the draft, and retry. If the agent cannot produce a valid document within `max_retries` attempts, validation errors are fed back into the orchestrator prompt and the agent is re-dispatched. Schema files for all agent roles live under `workflow-templates/`.
 
 ### Judge Verdicts
 
@@ -153,7 +155,7 @@ The workflow halts automatically when any limit is exceeded:
 
 ### Prerequisites
 
-Install these **before** running the installer:
+The only manual prerequisite is Claude CLI:
 
 | Dependency | Required | Install |
 |------------|----------|---------|
@@ -166,7 +168,7 @@ claude --version
 claude auth login   # if not already done
 ```
 
-The installer handles everything else (server binary, bd, taskval, skills).
+The installer handles everything else: server binary, `bd`, `taskval`, `jq`, `check-jsonschema`, and skills.
 
 ### Install
 
@@ -177,19 +179,23 @@ curl -fsSL https://raw.githubusercontent.com/nixlim/spec_system/main/install.sh 
 The script:
 - Downloads a pre-built binary (no Go required), or builds from source if Go is available
 - Installs **bd** (Beads issue tracking) and **taskval** (task graph validation)
-- Copies the bundled `plan-spec` and `grill-spec` skills to `~/.claude/skills/`
+- Installs **jq** and **check-jsonschema** (required by `outvalid` for agent output validation)
+- Copies the bundled `plan-spec`, `grill-spec`, and `outvalid` skills to `~/.claude/skills/`
 - Writes a default `config.yaml` and creates the workspace directory
 
 ```bash
 # Options
-./install.sh --help           # All flags
-./install.sh --skip-beads     # Skip bd installation
-./install.sh --skip-taskval   # Skip taskval installation
-./install.sh --dir ~/bin      # Custom binary location
-./install.sh --dry-run        # Preview without making changes
+./install.sh --help                 # All flags
+./install.sh --skip-beads           # Skip bd installation
+./install.sh --skip-taskval         # Skip taskval installation
+./install.sh --skip-outvalid-deps   # Skip jq + check-jsonschema installation
+./install.sh --dir ~/bin            # Custom binary location
+./install.sh --dry-run              # Preview without making changes
 ```
 
 If `bd` or `taskval` are not on your PATH, those features are silently disabled and the workflow continues without them.
+
+> **Note**: `outvalid` (`bin/outvalid`) is a bash script in the repo. Add `bin/` to your PATH or invoke it as `./bin/outvalid`.
 
 ### Build
 
@@ -361,6 +367,7 @@ The web dashboard provides real-time visibility into workflow execution. Multipl
 - **Spec** — View and diff spec versions as they evolve through rounds
 - **Issues** — Track findings with severity/status/lens filtering; shows round raised and round closed for each finding
 - **Convergence** — Monitor review/revision convergence metrics and round history
+- **Workspace Files** — Browse all files in a workflow's workspace directory; download individual files or view raw content
 - **Messages** — Filtered workflow log (OTEL, Orchestrator, Claude Runner, Agent Events, State Transitions)
 
 ### Workflow Status Panel
@@ -520,6 +527,14 @@ internal/specworkflow/
   types.go                        Core type definitions and workflow states
   recovery.go                     Agent failure detection and retry
 
+bin/
+  outvalid                        JSON schema validator for agent output (requires check-jsonschema, jq)
+
+workflow-templates/               JSON Schema files for all agent output types
+  specworkflow/                   Spec workflow agent schemas
+  codedoc/                        Code documentation agent schemas
+  codereview/                     Code review agent schemas
+
 static/
   index.html                      Dashboard HTML
   app.js                          Dashboard JavaScript (SPA)
@@ -607,4 +622,4 @@ Test coverage includes: state machine, orchestrator, convergence, circuit breake
 
 ## License
 
-Proprietary. All rights reserved.
+Apache License 2.0 — see [LICENSE](LICENSE) for the full text.

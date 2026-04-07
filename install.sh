@@ -8,13 +8,14 @@
 #   - Codex CLI   https://github.com/openai/codex  (optional — dual-provider mode)
 #
 # Options:
-#   --dir DIR          Install binary to DIR (default: /usr/local/bin)
-#   --workspace DIR    Create workspace at DIR (default: ./workspace)
-#   --skip-beads       Skip bd (Beads) installation
-#   --skip-taskval     Skip taskval installation
-#   --no-color         Disable coloured output
-#   --dry-run          Print what would be done without doing it
-#   -h, --help         Show this help
+#   --dir DIR              Install binary to DIR (default: /usr/local/bin)
+#   --workspace DIR        Create workspace at DIR (default: ./workspace)
+#   --skip-beads           Skip bd (Beads) installation
+#   --skip-taskval         Skip taskval installation
+#   --skip-outvalid-deps   Skip jq + check-jsonschema installation
+#   --no-color             Disable coloured output
+#   --dry-run              Print what would be done without doing it
+#   -h, --help             Show this help
 
 set -euo pipefail
 
@@ -46,16 +47,18 @@ INSTALL_DIR="/usr/local/bin"
 WORKSPACE_DIR="./workspace"
 SKIP_BEADS=false
 SKIP_TASKVAL=false
+SKIP_OUTVALID_DEPS=false
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dir)         INSTALL_DIR="$2"; shift 2 ;;
-    --workspace)   WORKSPACE_DIR="$2"; shift 2 ;;
-    --skip-beads)  SKIP_BEADS=true; shift ;;
-    --skip-taskval) SKIP_TASKVAL=true; shift ;;
-    --no-color)    USE_COLOR=false; shift ;;
-    --dry-run)     DRY_RUN=true; shift ;;
+    --dir)                INSTALL_DIR="$2"; shift 2 ;;
+    --workspace)          WORKSPACE_DIR="$2"; shift 2 ;;
+    --skip-beads)         SKIP_BEADS=true; shift ;;
+    --skip-taskval)       SKIP_TASKVAL=true; shift ;;
+    --skip-outvalid-deps) SKIP_OUTVALID_DEPS=true; shift ;;
+    --no-color)           USE_COLOR=false; shift ;;
+    --dry-run)            DRY_RUN=true; shift ;;
     -h|--help)
       cat <<EOF
 Adversarial Spec System Installer
@@ -65,13 +68,14 @@ PREREQUISITES (install before running this script):
   Codex CLI    https://github.com/openai/codex  (optional, dual-provider mode)
 
 Usage: $0 [options]
-  --dir DIR          Install binary to DIR (default: /usr/local/bin)
-  --workspace DIR    Create workspace at DIR (default: ./workspace)
-  --skip-beads       Skip bd (Beads) install
-  --skip-taskval     Skip taskval install
-  --no-color         Disable colour output
-  --dry-run          Show what would happen without doing it
-  -h, --help         Show this help
+  --dir DIR              Install binary to DIR (default: /usr/local/bin)
+  --workspace DIR        Create workspace at DIR (default: ./workspace)
+  --skip-beads           Skip bd (Beads) install
+  --skip-taskval         Skip taskval install
+  --skip-outvalid-deps   Skip jq + check-jsonschema install
+  --no-color             Disable colour output
+  --dry-run              Show what would happen without doing it
+  -h, --help             Show this help
 EOF
       exit 0 ;;
     *) die "Unknown option: $1  (run '$0 --help' for usage)" ;;
@@ -130,6 +134,18 @@ if has codex; then
 else
   info "Codex CLI not found — dual-provider mode will be disabled (optional)"
   info "Install from: https://github.com/openai/codex"
+fi
+
+if has jq; then
+  ok "jq found — outvalid validation available"
+else
+  info "jq not found — will install in Step 4"
+fi
+
+if has check-jsonschema; then
+  ok "check-jsonschema found — outvalid validation available"
+else
+  info "check-jsonschema not found — will install in Step 4"
 fi
 
 # ─────────────────────────────────────────────
@@ -329,9 +345,67 @@ else
 fi
 
 # ─────────────────────────────────────────────
-# Step 4: Skill directories
+# Step 4: outvalid dependencies (jq + check-jsonschema)
 # ─────────────────────────────────────────────
-header "Step 4: Skill directories"
+header "Step 4: outvalid dependencies — jq + check-jsonschema"
+
+if $SKIP_OUTVALID_DEPS; then
+  warn "Skipping (--skip-outvalid-deps)"
+else
+  # ── jq ────────────────────────────────────────────────────────────────────
+  if has jq; then
+    ok "jq already installed: $(jq --version 2>/dev/null || echo 'unknown')"
+  else
+    info "Installing jq..."
+    if [[ "$PLATFORM" == "darwin" ]]; then
+      if has brew; then
+        run brew install jq
+      else
+        warn "brew not found — install jq manually: https://stedolan.github.io/jq/download/"
+      fi
+    else
+      if has apt-get; then
+        run sudo apt-get install -y jq
+      elif has dnf; then
+        run sudo dnf install -y jq
+      elif has yum; then
+        run sudo yum install -y jq
+      else
+        warn "No supported package manager found — install jq manually: https://stedolan.github.io/jq/download/"
+      fi
+    fi
+    if ! $DRY_RUN && ! has jq; then
+      warn "jq not in PATH after install — outvalid validation will not work until it is."
+    else
+      ok "jq installed"
+    fi
+  fi
+
+  # ── check-jsonschema ──────────────────────────────────────────────────────
+  if has check-jsonschema; then
+    ok "check-jsonschema already installed: $(check-jsonschema --version 2>/dev/null || echo 'unknown')"
+  else
+    info "Installing check-jsonschema..."
+    if has pip3; then
+      run pip3 install --quiet check-jsonschema
+    elif has pip; then
+      run pip install --quiet check-jsonschema
+    else
+      warn "pip not found — install check-jsonschema manually: pip3 install check-jsonschema"
+    fi
+    if ! $DRY_RUN && ! has check-jsonschema; then
+      warn "check-jsonschema not in PATH after install — you may need to add the pip bin dir to PATH."
+      warn "  Python scripts dir: $(python3 -m site --user-scripts 2>/dev/null || echo 'unknown')"
+    else
+      ok "check-jsonschema installed"
+    fi
+  fi
+fi
+
+# ─────────────────────────────────────────────
+# Step 5: Skill directories
+# ─────────────────────────────────────────────
+header "Step 5: Skill directories"
 
 SKILLS_DEST="${HOME}/.claude/skills"
 
@@ -358,9 +432,9 @@ install_skill "plan-spec"
 install_skill "grill-spec"
 
 # ─────────────────────────────────────────────
-# Step 5: Workspace and config.yaml
+# Step 6: Workspace and config.yaml
 # ─────────────────────────────────────────────
-header "Step 5: Workspace and config"
+header "Step 6: Workspace and config"
 
 run mkdir -p "$WORKSPACE_DIR"
 ok "Workspace: $WORKSPACE_DIR"
@@ -416,9 +490,9 @@ YAML
 fi
 
 # ─────────────────────────────────────────────
-# Step 6: Initialise Beads workspace
+# Step 7: Initialise Beads workspace
 # ─────────────────────────────────────────────
-header "Step 6: Beads workspace"
+header "Step 7: Beads workspace"
 
 if $SKIP_BEADS; then
   warn "Skipping (--skip-beads)"
@@ -450,9 +524,11 @@ check() {
   fi
 }
 
-check "specworkflow" "specworkflow" false
-check "bd (Beads)"   "bd"           "$SKIP_BEADS"  "(open a new shell or check install)"
-check "taskval"      "taskval"      "$SKIP_TASKVAL" "(check \$GOPATH/bin is on PATH)"
+check "specworkflow"       "specworkflow"       false
+check "bd (Beads)"         "bd"                 "$SKIP_BEADS"         "(open a new shell or check install)"
+check "taskval"            "taskval"            "$SKIP_TASKVAL"       "(check \$GOPATH/bin is on PATH)"
+check "jq"                 "jq"                 "$SKIP_OUTVALID_DEPS" "(install: brew install jq / apt-get install jq)"
+check "check-jsonschema"   "check-jsonschema"   "$SKIP_OUTVALID_DEPS" "(install: pip3 install check-jsonschema)"
 
 # Claude and Codex are the user's responsibility — just report status
 if has claude; then

@@ -1461,3 +1461,26 @@ func TestOrchestratorNoStateFile_StartsFromInit(t *testing.T) {
 		t.Errorf("expected INIT for fresh feature, got %s", orch.sm.Current())
 	}
 }
+
+// TestGetActiveAgents_OnlyReturnsRunning verifies that GetActiveAgents returns
+// only agents with status "running", not completed ("done"/"failed") ones.
+// This is a regression test for the bug where the active agents panel showed
+// exited agents alongside the one truly running agent.
+func TestGetActiveAgents_OnlyReturnsRunning(t *testing.T) {
+	o := &Orchestrator{
+		activeAgents: make(map[string]string),
+	}
+
+	o.SetAgentStatus("task-reviewer-claude", "running")
+	o.SetAgentStatus("task-revision-claude", "done")
+	o.SetAgentStatus("old-agent", "failed")
+
+	agents := o.GetActiveAgents()
+
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 active agent, got %d: %v", len(agents), agents)
+	}
+	if agents[0].Name != "task-reviewer-claude" || agents[0].Status != "running" {
+		t.Errorf("expected task-reviewer-claude/running, got %v", agents[0])
+	}
+}

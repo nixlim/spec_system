@@ -24,6 +24,7 @@
         <li><button class="nav-tab" data-tab="running-agents">Running Agents</button></li>
         <li><button class="nav-tab" data-tab="spec">Spec</button></li>
         <li><button class="nav-tab" data-tab="issues">Issues</button></li>
+        <li><button class="nav-tab" data-tab="tasks">Tasks</button></li>
         <li><button class="nav-tab" data-tab="convergence">Convergence</button></li>
         <li><button class="nav-tab" data-tab="messages">Messages</button></li>
         <li><button class="nav-tab" data-tab="workspace">Workspace</button></li>
@@ -275,6 +276,30 @@
               <th>Status</th>
               <th>Round Raised</th>
               <th>Round Closed</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <!-- Tasks Tab -->
+      <section id="tab-tasks" class="tab-panel">
+        <h2>Task Graph</h2>
+        <div class="task-summary card">
+          <span class="summary-stat"><strong id="stat-task-total">0</strong> Total</span>
+          <span class="summary-stat"><strong id="stat-task-critical">0</strong> Critical</span>
+          <span class="summary-stat"><strong id="stat-task-high">0</strong> High</span>
+          <span class="summary-stat"><strong id="stat-task-medium">0</strong> Medium</span>
+          <span class="summary-stat"><strong id="stat-task-low">0</strong> Low</span>
+        </div>
+        <table id="task-table" class="table card">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Name</th>
+              <th>Priority</th>
+              <th>Estimate</th>
+              <th>Deps</th>
             </tr>
           </thead>
           <tbody></tbody>

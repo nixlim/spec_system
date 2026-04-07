@@ -25,7 +25,7 @@ func TestIsRewindable(t *testing.T) {
 		{StateEscalated, false},
 		{StateError, false},
 		{StateTaskify, true},
-		{StateTaskReview, false},
+		{StateTaskReview, true},
 		{StateComplete, false},
 	}
 	for _, tt := range tests {

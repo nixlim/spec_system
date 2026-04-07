@@ -448,6 +448,67 @@ func HandleGetConvergence(config SpecAPIConfig) http.HandlerFunc {
 	}
 }
 
+// taskGraphResponse is the JSON structure returned by the tasks endpoint.
+type taskGraphResponse struct {
+	Tasks   []json.RawMessage `json:"tasks"`
+	Feature string            `json:"feature"`
+}
+
+// HandleGetTasks returns an HTTP handler that reads the task graph JSON for
+// the given feature from {projectRoot}/.tasks/{featureName}.task.json.
+// projectRoot is derived as the parent of WorkspaceDir. Returns
+// {"tasks":[],"feature":""} (not a 404) when no file is found.
+func HandleGetTasks(config SpecAPIConfig) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		feature := resolveFeatureFromRequest(config, r)
+
+		// projectRoot is one level above the workspace directory.
+		projectRoot := filepath.Dir(filepath.Clean(config.WorkspaceDir))
+		taskFile := filepath.Join(projectRoot, ".tasks", feature+".task.json")
+
+		data, err := os.ReadFile(taskFile)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// Fall back to {feature}.json in case the agent omitted the .task infix.
+				fallback := filepath.Join(projectRoot, ".tasks", feature+".json")
+				data, err = os.ReadFile(fallback)
+				if err != nil {
+					writeJSON(w, http.StatusOK, taskGraphResponse{
+						Tasks:   []json.RawMessage{},
+						Feature: "",
+					})
+					return
+				}
+				taskFile = fallback
+			} else {
+				writeError(w, http.StatusInternalServerError, "failed to read task file")
+				return
+			}
+		}
+		// Parse just enough to extract the tasks array.
+		var raw struct {
+			Tasks []json.RawMessage `json:"tasks"`
+		}
+		if err := json.Unmarshal(data, &raw); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to parse task file")
+			return
+		}
+		if raw.Tasks == nil {
+			raw.Tasks = []json.RawMessage{}
+		}
+
+		writeJSON(w, http.StatusOK, taskGraphResponse{
+			Tasks:   raw.Tasks,
+			Feature: feature,
+		})
+	}
+}
+
 // HandleCancelWorkflow returns an HTTP handler that cancels the running
 // workflow by calling the configured CancelFunc. Returns 200 with a
 // cancellation confirmation on success.

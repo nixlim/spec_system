@@ -851,14 +851,15 @@ func TestTaskifyRefinement_ExitCode1_Retries(t *testing.T) {
 	taskRunner := &funcMockRunner{
 		runFunc: func(prompt, outputPath string, timeout int) (int, string, float64, int64, error) {
 			callCount++
-			taskGraphPath := filepath.Join(workspace, ".tasks", feature+".task.json")
 			taskGraph := `{"spec_version":"1.0","tasks":[{"id":"task-1","title":"Do stuff","description":"stuff","acceptance_criteria":["done"],"estimated_effort":"S","priority":"P1","depends_on":{"status":"N/A","reason":"none"},"constraints":{"status":"N/A","reason":"none"},"files_scope":{"status":"N/A","reason":"none"}}]}`
 			if callCount == 1 {
 				// Write invalid JSON first time.
-				os.WriteFile(taskGraphPath, []byte(`{"invalid`), 0o644)
+				os.MkdirAll(filepath.Dir(outputPath), 0o755)
+				os.WriteFile(outputPath, []byte(`{"invalid`), 0o644)
 				return 0, "", 0.01, 500, nil
 			}
-			os.WriteFile(taskGraphPath, []byte(taskGraph), 0o644)
+			os.MkdirAll(filepath.Dir(outputPath), 0o755)
+			os.WriteFile(outputPath, []byte(taskGraph), 0o644)
 			return 0, "", 0.01, 500, nil
 		},
 	}

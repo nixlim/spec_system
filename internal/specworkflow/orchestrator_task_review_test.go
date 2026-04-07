@@ -53,13 +53,15 @@ func (e *taskReviewNoopEmitter) Emit(event EventEnvelope) error { return nil }
 
 func setupTaskReviewOrchestrator(t *testing.T, claudeRunner, codexRunner AgentRunner, taskReviewMaxRounds int) (*Orchestrator, string, *WorkflowStateJSON) {
 	t.Helper()
-	dir := t.TempDir()
+	// Use a subdirectory as workspaceDir so projectRoot (its parent) owns .tasks/.
+	projectRoot := t.TempDir()
+	dir := filepath.Join(projectRoot, "workspace")
 	specDir := filepath.Join(dir, "specs", "test-feature")
-	tasksDir := filepath.Join(dir, ".tasks")
+	tasksDir := filepath.Join(projectRoot, ".tasks")
 	os.MkdirAll(specDir, 0o755)
 	os.MkdirAll(tasksDir, 0o755)
 
-	// Write a valid task graph.
+	// Write a valid task graph at project root .tasks/ (matching handleTaskify output path).
 	taskGraph := `{"version":"1.0","tasks":[{"task_id":"task-1","task_name":"Task 1","goal":"Do thing","inputs":[],"outputs":[],"acceptance":["Done"],"depends_on":[],"constraints":[],"files_scope":[],"priority":"high","estimate":"small"}]}`
 	os.WriteFile(filepath.Join(tasksDir, "test-feature.task.json"), []byte(taskGraph), 0o644)
 
@@ -375,12 +377,14 @@ func TestCountSeverity(t *testing.T) {
 }
 
 func TestBuildTaskReviewPrompt(t *testing.T) {
-	prompt := buildTaskReviewPrompt(`{"version":"1.0","tasks":[]}`, 2, "my-feature")
+	outPath := "/workspace/specs/my-feature/task-review-claude-round-2.json"
+	mdPath := "/workspace/specs/my-feature/task-review-report-claude-round-2.md"
+	prompt := buildTaskReviewPrompt(`{"version":"1.0","tasks":[]}`, 2, "my-feature", outPath, mdPath)
 
 	if len(prompt) == 0 {
 		t.Fatal("empty prompt")
 	}
-	for _, want := range []string{"Task Graph Review Agent", "round 2", "my-feature", "task_graph", "ReviewerOutput"} {
+	for _, want := range []string{"Task Graph Review Agent", "round 2", "my-feature", "task_graph", "ReviewerOutput", outPath, mdPath} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing %q", want)
 		}
@@ -415,13 +419,15 @@ const revisionInvalidTaskGraph = `{"version":"1.0","tasks":[]}`
 
 func setupTaskRevisionOrchestrator(t *testing.T, runner AgentRunner, taskReviewRound int) (*Orchestrator, string, *WorkflowStateJSON) {
 	t.Helper()
-	dir := t.TempDir()
+	// Use a subdirectory as workspaceDir so projectRoot (its parent) owns .tasks/.
+	projectRoot := t.TempDir()
+	dir := filepath.Join(projectRoot, "workspace")
 	specDir := filepath.Join(dir, "specs", "test-feature")
-	tasksDir := filepath.Join(dir, ".tasks")
+	tasksDir := filepath.Join(projectRoot, ".tasks")
 	os.MkdirAll(specDir, 0o755)
 	os.MkdirAll(tasksDir, 0o755)
 
-	// Write a valid task graph (the "current" one to be revised).
+	// Write a valid task graph at project root .tasks/ (the "current" one to be revised).
 	os.WriteFile(filepath.Join(tasksDir, "test-feature.task.json"), []byte(revisionValidTaskGraph), 0o644)
 
 	// Write findings from prior review round.
