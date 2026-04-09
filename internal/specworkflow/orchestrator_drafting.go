@@ -45,17 +45,19 @@ func (o *Orchestrator) handleDrafting(state *WorkflowStateJSON, specDir string) 
 	// Collect all context documents the drafter should read.
 	contextDocs := collectDrafterContext(specDir, o.workspaceDir)
 
-	prompt, err := o.promptBuilder.BuildDrafterPrompt(confirmedReqsPath, userAnswers, contextDocs)
-	if err != nil {
-		return fmt.Errorf("build drafter prompt: %w", err)
-	}
-
 	// Determine drafting version counter (increments on re-drafts).
 	version := state.Gate2RedraftCount + 1
 
-	// Dual-provider path.
+	// Dual-provider path. Each provider gets its own prompt with a per-provider
+	// versioned output path so the runners can read what the agents actually
+	// wrote, instead of racing on the shared canonical drafter-output.json.
 	if o.config.EnableCodexDrafting && o.codexDraftingRunner != nil {
-		return o.handleDualDrafting(state, specDir, prompt, version)
+		return o.handleDualDrafting(state, specDir, confirmedReqsPath, userAnswers, contextDocs, version)
+	}
+
+	prompt, err := o.promptBuilder.BuildDrafterPrompt(confirmedReqsPath, userAnswers, contextDocs)
+	if err != nil {
+		return fmt.Errorf("build drafter prompt: %w", err)
 	}
 
 	// Codex requested but unavailable — log fallback.
@@ -105,10 +107,29 @@ func (o *Orchestrator) handleSingleDrafting(state *WorkflowStateJSON, specDir, p
 
 // handleDualDrafting dispatches Claude and Codex drafters in parallel,
 // combines successful outputs via a Claude reviser, and handles fallback.
-func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, prompt string, version int) error {
+//
+// Each provider gets its OWN prompt with its own per-provider versioned
+// output path (drafter-output-claude-vN.json / drafter-output-codex-vN.json).
+// This avoids two consequences of the previous shared-prompt design:
+//  1. Both agents racing to write the same canonical drafter-output.json.
+//  2. The runner's outputPath not matching what the agent was actually
+//     instructed to write, which caused claude-runner to fall back to
+//     parsing stdout (a markdown summary) and report invalid_json even
+//     when the spec was successfully drafted on disk.
+func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, confirmedReqsPath string, userAnswers map[string]string, contextDocs []string, version int) error {
 	claudeOutPath := filepath.Join(specDir, VersionedFilename("drafter-output", "claude", version, ".json"))
 	codexOutPath := filepath.Join(specDir, VersionedFilename("drafter-output", "codex", version, ".json"))
 	timeout := o.config.AgentTimeoutSeconds
+
+	// Build per-provider prompts pointing at the per-provider output paths.
+	claudePrompt, err := o.promptBuilder.BuildDrafterPrompt(confirmedReqsPath, userAnswers, contextDocs, claudeOutPath)
+	if err != nil {
+		return fmt.Errorf("build claude drafter prompt: %w", err)
+	}
+	codexPrompt, err := o.promptBuilder.BuildDrafterPrompt(confirmedReqsPath, userAnswers, contextDocs, codexOutPath)
+	if err != nil {
+		return fmt.Errorf("build codex drafter prompt: %w", err)
+	}
 
 	// Dispatch both drafters in parallel.
 	var wg sync.WaitGroup
@@ -124,7 +145,7 @@ func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, pro
 	go func() {
 		defer wg.Done()
 		claudeRunner := taggedRunner(drafterClaudeRunner, "drafter-claude")
-		exitCode, stderr, cost, duration, runErr := claudeRunner.Run(prompt, claudeOutPath, timeout)
+		exitCode, stderr, cost, duration, runErr := claudeRunner.Run(claudePrompt, claudeOutPath, timeout)
 		claudeResult = drafterResult{provider: "claude", outPath: claudeOutPath, cost: cost, duration: duration}
 		if runErr != nil {
 			claudeResult.err = fmt.Errorf("drafter-claude failed: %v", runErr)
@@ -139,7 +160,7 @@ func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, pro
 	go func() {
 		defer wg.Done()
 		codexRunner := taggedRunner(o.codexDraftingRunner, "drafter-codex")
-		exitCode, stderr, cost, duration, runErr := codexRunner.Run(prompt, codexOutPath, timeout)
+		exitCode, stderr, cost, duration, runErr := codexRunner.Run(codexPrompt, codexOutPath, timeout)
 		codexResult = drafterResult{provider: "codex", outPath: codexOutPath, cost: cost, duration: duration}
 		if runErr != nil {
 			codexResult.err = fmt.Errorf("drafter-codex failed: %v", runErr)

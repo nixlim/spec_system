@@ -370,26 +370,17 @@ func (r *ClaudeRunner) Run(prompt string, outputPath string, timeoutSeconds int)
 		}
 	}
 
-	// Parse the JSON output.
-	parsed, parseErr := ParseOutput(stdoutData)
-	if parseErr != nil {
-		log.Printf("[claude-runner] FAILED to parse JSON output: %v", parseErr)
-		log.Printf("[claude-runner] raw stdout (first 500 chars): %s", truncate(string(stdoutData), 500))
-		_ = writeOutputFile(outputPath, stdoutData)
-		return code, stderrStr, 0, 0, fmt.Errorf("failed to parse claude JSON output: %w", parseErr)
-	}
-
-	log.Printf("[claude-runner] parsed: cost=$%.4f, duration=%dms, is_error=%v, result_length=%d",
-		parsed.CostUSD, parsed.DurationMS, parsed.IsError, len(parsed.Result))
-
-	if parsed.IsError {
-		log.Printf("[claude-runner] claude reported error: %s", truncate(parsed.Result, 200))
-		_ = writeOutputFile(outputPath, []byte(parsed.Result))
-		return 1, stderrStr, parsed.CostUSD, parsed.DurationMS, fmt.Errorf("claude reported error: %s", truncate(parsed.Result, 200))
-	}
-
-	// Check if the agent wrote the output file during execution (via Write tool).
-	// We compare mtime before/after to detect agent-written files.
+	// Disk-first: prefer the file the agent actually wrote over anything in
+	// stdout. The drafter prompt instructs the agent to produce a validated
+	// JSON file via outvalid; once that file exists, the agent's terminal
+	// stdout response is irrelevant (and is often a markdown summary like
+	// "All three outputs are complete and validated:" rather than JSON,
+	// which previously caused false-negative invalid_json escalations).
+	//
+	// We do this BEFORE attempting to parse stdout so a successful agent
+	// run is not lost to a stdout-parse failure. Cost/duration metadata
+	// from stdout is best-effort: if stdout parses we report it; if not,
+	// we still succeed and report zeros.
 	agentWroteFile := false
 	if fi, statErr := os.Stat(outputPath); statErr == nil {
 		if !outputExistedBefore || fi.ModTime().After(outputMtimeBefore) {
@@ -397,16 +388,51 @@ func (r *ClaudeRunner) Run(prompt string, outputPath string, timeoutSeconds int)
 		}
 	}
 
+	var diskData []byte
+	diskHasValidJSON := false
 	if agentWroteFile {
-		existingData, readErr := os.ReadFile(outputPath)
-		if readErr == nil && len(existingData) > 0 {
-			trimmed := bytes.TrimSpace(existingData)
-			if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
-				log.Printf("[claude-runner] agent wrote valid JSON output file directly, keeping it (%d bytes)", len(existingData))
-				return code, stderrStr, parsed.CostUSD, parsed.DurationMS, nil
+		if existingData, readErr := os.ReadFile(outputPath); readErr == nil && len(existingData) > 0 {
+			diskData = existingData
+			if json.Valid(bytes.TrimSpace(existingData)) {
+				diskHasValidJSON = true
 			}
-			log.Printf("[claude-runner] agent wrote output file but it's not JSON (starts with %q), overwriting", string(trimmed[:min(20, len(trimmed))]))
 		}
+	}
+
+	// Parse the JSON output for cost/duration metadata. Treat failure as
+	// non-fatal when the agent already wrote a valid JSON file on disk.
+	parsed, parseErr := ParseOutput(stdoutData)
+	if parseErr != nil {
+		log.Printf("[claude-runner] FAILED to parse stdout: %v", parseErr)
+		log.Printf("[claude-runner] raw stdout (first 500 chars): %s", truncate(string(stdoutData), 500))
+		if diskHasValidJSON {
+			log.Printf("[claude-runner] stdout unparseable but agent wrote valid JSON to %s (%d bytes), accepting it", outputPath, len(diskData))
+			return code, stderrStr, 0, 0, nil
+		}
+		_ = writeOutputFile(outputPath, stdoutData)
+		return code, stderrStr, 0, 0, fmt.Errorf("failed to parse claude JSON output: %w", parseErr)
+	}
+
+	log.Printf("[claude-runner] parsed: cost=$%.4f, duration=%dms, is_error=%v, result_length=%d",
+		parsed.CostUSD, parsed.DurationMS, parsed.IsError, len(parsed.Result))
+
+	// If the agent wrote valid JSON to outputPath, that wins regardless of
+	// what the result text or is_error flag says — the file is the source
+	// of truth.
+	if diskHasValidJSON {
+		log.Printf("[claude-runner] agent wrote valid JSON output file directly, keeping it (%d bytes)", len(diskData))
+		return code, stderrStr, parsed.CostUSD, parsed.DurationMS, nil
+	}
+
+	if parsed.IsError {
+		log.Printf("[claude-runner] claude reported error: %s", truncate(parsed.Result, 200))
+		_ = writeOutputFile(outputPath, []byte(parsed.Result))
+		return 1, stderrStr, parsed.CostUSD, parsed.DurationMS, fmt.Errorf("claude reported error: %s", truncate(parsed.Result, 200))
+	}
+
+	if agentWroteFile && len(diskData) > 0 {
+		trimmed := bytes.TrimSpace(diskData)
+		log.Printf("[claude-runner] agent wrote output file but it's not JSON (starts with %q), overwriting", string(trimmed[:min(20, len(trimmed))]))
 	}
 
 	// Agent didn't write a valid JSON file — prefer structured_output (from --json-schema),

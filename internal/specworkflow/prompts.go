@@ -291,7 +291,12 @@ func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string, codePath 
 // SkillCache, references the confirmed requirements JSON, optionally
 // includes user answers to open questions, and lists additional context
 // documents that the agent must read before drafting.
-func (pb *PromptBuilder) BuildDrafterPrompt(confirmedReqsPath string, userAnswers map[string]string, contextDocs []string) (string, error) {
+//
+// The optional outputJSONPathOverride lets the caller redirect the canonical
+// DrafterOutput JSON path the agent will write via outvalid; this is used by
+// dual-provider drafting so each parallel agent writes to its own per-provider
+// versioned target file instead of racing on the shared drafter-output.json.
+func (pb *PromptBuilder) BuildDrafterPrompt(confirmedReqsPath string, userAnswers map[string]string, contextDocs []string, outputJSONPathOverride ...string) (string, error) {
 	specTemplate, err := pb.skills.GetSkillContent(SpecTemplate)
 	if err != nil {
 		return "", fmt.Errorf("loading spec template: %w", err)
@@ -353,10 +358,16 @@ func (pb *PromptBuilder) BuildDrafterPrompt(confirmedReqsPath string, userAnswer
 		b.WriteString("\n")
 	}
 
-	// Output paths.
+	// Output paths. The canonical JSON output path can be overridden by the
+	// caller (used by dual-provider drafting to give each parallel agent its
+	// own per-provider versioned target file instead of racing on the shared
+	// drafter-output.json).
 	specPath := filepath.Join(pb.specDir(), "spec-v0.md")
 	holdoutPath := filepath.Join(pb.specDir(), pb.featureName+"-holdouts.md")
 	outputJSONPath := filepath.Join(pb.specDir(), "drafter-output.json")
+	if len(outputJSONPathOverride) > 0 && outputJSONPathOverride[0] != "" {
+		outputJSONPath = outputJSONPathOverride[0]
+	}
 	draftPath := outputJSONPath + ".draft.json"
 
 	b.WriteString("## Output Requirements\n\n")
