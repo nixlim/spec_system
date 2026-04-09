@@ -1285,10 +1285,57 @@ func HandleRetryWorkflow(manager *WorkflowManager) http.HandlerFunc {
 	}
 }
 
+// HandleResumeOptions returns an HTTP handler for
+// GET /api/workflow/resume-options?feature_name=NAME. It probes the spec
+// directory for the given feature and reports what resume strategies are
+// available for the inferred current stage, so the UI can offer the user
+// a choice between skip_to_gate, replay_merge, and restart_fresh.
+func HandleResumeOptions(manager *WorkflowManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		featureName := r.URL.Query().Get("feature_name")
+		if featureName == "" {
+			writeError(w, http.StatusBadRequest, "feature_name is required")
+			return
+		}
+		if err := ValidateFeatureName(featureName); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid feature_name: %v", err))
+			return
+		}
+
+		specDir := filepath.Join(manager.workspaceDir, "specs", featureName)
+		state, loadErr := specworkflow.LoadState(specDir)
+		if loadErr != nil {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("no workflow state found for %q", featureName))
+			return
+		}
+
+		opts := specworkflow.ProbeResumeOptions(manager.workspaceDir, featureName, state)
+		writeJSON(w, http.StatusOK, opts)
+	}
+}
+
 // HandleResumeWorkflow returns an HTTP handler for POST /api/workflow/resume.
-// It resumes a workflow from ESCALATED, ERROR, or any paused state by
-// determining the best state to resume from based on existing artefacts,
-// resetting the wall clock timer, and starting a new orchestrator.
+// It resumes a workflow from ESCALATED, ERROR, or any paused state.
+//
+// The request body accepts an optional `mode` field:
+//
+//   - "" / "auto" (default): infer the best resume state from disk artefacts
+//     using determineResumeState.
+//   - "restart_fresh": re-run the inferred stage from scratch (same as auto
+//     today, but reserved for future semantic divergence).
+//   - "skip_to_gate": accept the inferred stage's existing canonical output
+//     and advance to that stage's trailing human gate.
+//   - "replay_merge": re-run the dual-provider merge/combine step for the
+//     inferred stage using existing per-provider outputs, then advance to
+//     the trailing human gate.
+//
+// When mode is skip_to_gate or replay_merge the handler validates with
+// ProbeResumeOptions that the mode is actually available for the inferred
+// stage, and rejects the request otherwise.
 func HandleResumeWorkflow(manager *WorkflowManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -1298,6 +1345,7 @@ func HandleResumeWorkflow(manager *WorkflowManager) http.HandlerFunc {
 
 		var req struct {
 			FeatureName string `json:"feature_name"`
+			Mode        string `json:"mode,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
@@ -1329,8 +1377,47 @@ func HandleResumeWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			return
 		}
 
-		// Determine the best state to resume from based on artefacts on disk.
+		// Determine the base resume state from disk artefacts.
 		resumeState := determineResumeState(state, manager.workspaceDir, req.FeatureName)
+
+		// If a mode was supplied, apply it on top of the base state. Modes
+		// other than auto/restart_fresh may require probing the workspace
+		// and/or running replay helpers before we transition.
+		mode := specworkflow.ResumeMode(req.Mode)
+		var replayMessage string
+		switch mode {
+		case "", "auto", specworkflow.ResumeModeRestartFresh:
+			// No override — use the base resume state as-is.
+		case specworkflow.ResumeModeSkipToGate, specworkflow.ResumeModeReplayMerge:
+			opts := specworkflow.ProbeResumeOptions(manager.workspaceDir, req.FeatureName, state)
+			stageOpt, ok := findInferredStage(opts)
+			if !ok {
+				writeError(w, http.StatusConflict, "no inferred stage available for resume with a mode")
+				return
+			}
+			if err := specworkflow.ValidateResumeMode(mode, stageOpt); err != nil {
+				writeError(w, http.StatusConflict, err.Error())
+				return
+			}
+			if mode == specworkflow.ResumeModeReplayMerge {
+				msg, replayErr := runReplayForStage(stageOpt, manager, req.FeatureName, specDir, state)
+				if replayErr != nil {
+					writeError(w, http.StatusInternalServerError, fmt.Sprintf("replay merge failed: %v", replayErr))
+					return
+				}
+				replayMessage = msg
+			}
+			// Both skip_to_gate and replay_merge target the stage's NextGate.
+			if stageOpt.NextGate != "" {
+				if target, parseErr := specworkflow.ParseWorkflowState(stageOpt.NextGate); parseErr == nil {
+					resumeState = target
+				}
+			}
+		default:
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown resume mode %q", req.Mode))
+			return
+		}
+
 		previousState := state.State
 
 		// Update the persisted state: reset timer, set resumable state.
@@ -1393,11 +1480,64 @@ func HandleResumeWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			}
 		}()
 
-		writeJSON(w, http.StatusOK, map[string]string{
+		resp := map[string]string{
 			"status":       "resumed",
 			"resume_state": resumeState.String(),
 			"message":      fmt.Sprintf("Workflow resumed from %s", resumeState),
-		})
+		}
+		if req.Mode != "" {
+			resp["mode"] = req.Mode
+		}
+		if replayMessage != "" {
+			resp["replay_message"] = replayMessage
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// findInferredStage returns the StageResumeOptions entry in opts that matches
+// opts.InferredStage. Returns false when no match is found (e.g. the probe
+// reported no artefacts at all).
+func findInferredStage(opts *specworkflow.ResumeOptions) (specworkflow.StageResumeOptions, bool) {
+	if opts == nil {
+		return specworkflow.StageResumeOptions{}, false
+	}
+	for _, s := range opts.Stages {
+		if s.Stage == opts.InferredStage {
+			return s, true
+		}
+	}
+	return specworkflow.StageResumeOptions{}, false
+}
+
+// runReplayForStage dispatches the appropriate replay helper for the given
+// stage. Currently supports DRAFTING (via ReplayDraftingCombine) and
+// DISCOVERY (via ReplayDiscoveryMerge). Returns a human-readable status
+// message on success.
+func runReplayForStage(stageOpt specworkflow.StageResumeOptions, manager *WorkflowManager, featureName, specDir string, state *specworkflow.WorkflowStateJSON) (string, error) {
+	// Build a Claude runner matching the one the orchestrator would use
+	// for merge/combine work so tracker wiring and telemetry are consistent.
+	replayRunner := specworkflow.DefaultClaudeRunner(manager.workspaceDir, manager.otelPort, featureName, manager.config.ClaudeModels.Default)
+	replayRunner.Tracker = manager.processTracker
+	replayRunner.Feature = featureName
+
+	timeout := manager.config.AgentTimeoutSeconds
+	round := 1
+	if state != nil && state.Round > 0 {
+		round = state.Round
+	}
+
+	switch stageOpt.Stage {
+	case specworkflow.StateDrafting.String():
+		version := 1
+		if state != nil {
+			version = state.Gate2RedraftCount + 1
+		}
+		return specworkflow.ReplayDraftingCombine(replayRunner, specDir, version, timeout)
+	case specworkflow.StateDiscovery.String():
+		return specworkflow.ReplayDiscoveryMerge(replayRunner, specDir, round, timeout)
+	default:
+		return "", fmt.Errorf("replay_merge is not implemented for stage %s", stageOpt.Stage)
 	}
 }
 
@@ -1433,21 +1573,20 @@ func determineResumeState(state *specworkflow.WorkflowStateJSON, workspaceDir, f
 		return specworkflow.WorkflowState(state.State)
 	}
 
-	// If drafter output exists, we're past drafting. Check how far into
-	// the review cycle we got by inspecting artefacts in reverse order.
+	// If drafter output exists, we need to figure out how far past drafting
+	// we got. Work backward from the most-advanced review-cycle artefact:
+	//   judge-round-N → revision-round-N → merged-findings-round-N → review-*-round-N
+	// If ANY of those exist, gate 2 has clearly been passed and we should
+	// resume into the review cycle.
+	//
+	// If NONE of them exist, gate 2 has not yet been confirmed for this
+	// round, regardless of whether spec-v0.md is on disk — the drafter
+	// writes the spec before gate 2 opens. In that case we must resume
+	// into HUMAN_GATE_2, not REVIEWING; otherwise the orchestrator would
+	// silently skip human review of the spec.
 	drafterPath := filepath.Join(specDir, "drafter-output.json")
 	if _, err := os.Stat(drafterPath); err == nil {
-		// Drafter output exists. Check if spec exists too.
-		specPath := filepath.Join(specDir, "spec-v0.md")
-		if _, err := os.Stat(specPath); err != nil {
-			// Drafter output but no spec — resume into HUMAN_GATE_2.
-			return specworkflow.StateHumanGate2
-		}
-
-		// Spec exists — check how far into the review/revise/judge cycle.
-		// Work backward: judge -> revising -> reviewing.
-
-		// Check for judge output for this round.
+		// Check review-cycle artefacts in reverse order of progress.
 		judgePath := filepath.Join(specDir, fmt.Sprintf("judge-round-%d.json", round))
 		if _, err := os.Stat(judgePath); err == nil {
 			// Judge completed — the orchestrator loop will evaluate the
@@ -1456,29 +1595,24 @@ func determineResumeState(state *specworkflow.WorkflowStateJSON, workspaceDir, f
 			return specworkflow.StateJudging
 		}
 
-		// Check for revision output for this round (reviser completed).
 		revisionPath := filepath.Join(specDir, fmt.Sprintf("revision-round-%d.json", round))
 		if _, err := os.Stat(revisionPath); err == nil {
-			// Revision exists — move on to judging.
 			return specworkflow.StateJudging
 		}
 
-		// Check for merged findings (reviews completed, ready for revising).
 		mergedPath := filepath.Join(specDir, fmt.Sprintf("merged-findings-round-%d.json", round))
 		if _, err := os.Stat(mergedPath); err == nil {
-			// Reviews completed and merged — resume into REVISING.
 			return specworkflow.StateRevising
 		}
 
-		// Check if any individual review outputs exist for this round.
 		if hasReviewOutputs(specDir, round) {
-			// Some reviews exist but not merged yet — resume into REVIEWING
-			// so the orchestrator can re-run/complete the review dispatch.
 			return specworkflow.StateReviewing
 		}
 
-		// No review artefacts — start reviewing from scratch.
-		return specworkflow.StateReviewing
+		// No review-cycle artefacts at all — gate 2 has not yet been
+		// confirmed for this round. Resume into HUMAN_GATE_2 so the user
+		// can review the draft and advance (or reject) it.
+		return specworkflow.StateHumanGate2
 	}
 
 	// If discovery output exists, we can go to DRAFTING (or HUMAN_GATE_1).

@@ -935,6 +935,121 @@
     }
   }
 
+  // showResumeChoiceModal displays a lightweight modal offering the resume
+  // modes reported by /api/workflow/resume-options. onPick is invoked with
+  // the chosen mode string ("skip_to_gate" / "replay_merge" / "restart_fresh")
+  // once the user clicks a button. If the user cancels, onPick is not called.
+  function showResumeChoiceModal(featureName, opts, onPick) {
+    // Backdrop covers the viewport and closes the modal on click.
+    var backdrop = el("div", {
+      style: "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.55);z-index:10000;display:flex;align-items:center;justify-content:center;"
+    });
+    var box = el("div", {
+      style: "background:#1e1e24;color:#e5e7eb;padding:24px;border-radius:10px;max-width:560px;width:92%;box-shadow:0 20px 60px rgba(0,0,0,.5);border:1px solid #343448;font-family:inherit;"
+    });
+    box.addEventListener("click", function (ev) { ev.stopPropagation(); });
+    backdrop.addEventListener("click", function () { document.body.removeChild(backdrop); });
+
+    box.appendChild(el("h3", {
+      textContent: "Resume " + featureName,
+      style: "margin:0 0 8px;font-size:18px;"
+    }));
+    var inferred = (opts && opts.inferred_stage) || "?";
+    var persisted = (opts && opts.persisted_state) || "?";
+    box.appendChild(el("div", {
+      textContent: "Workflow state: " + persisted + "  —  Inferred stage: " + inferred,
+      style: "color:#9ca3af;font-size:13px;margin-bottom:14px;"
+    }));
+
+    // Locate the inferred stage entry and build one button per available mode.
+    var stageOpt = null;
+    if (opts && opts.stages) {
+      for (var i = 0; i < opts.stages.length; i++) {
+        if (opts.stages[i].stage === opts.inferred_stage) {
+          stageOpt = opts.stages[i];
+          break;
+        }
+      }
+    }
+    if (!stageOpt || !stageOpt.available_modes || stageOpt.available_modes.length === 0) {
+      box.appendChild(el("div", {
+        textContent: "No resume modes available — the workflow may be empty. Try Restart instead.",
+        style: "color:#fca5a5;margin-bottom:14px;"
+      }));
+    } else {
+      // Preview summary of what's on disk.
+      if (stageOpt.canonical_preview) {
+        var p = stageOpt.canonical_preview;
+        var summary = Object.keys(p).map(function (k) { return k + "=" + p[k]; }).join(", ");
+        box.appendChild(el("div", {
+          textContent: "Existing canonical output: " + summary,
+          style: "color:#93c5fd;font-size:12px;margin-bottom:14px;font-family:monospace;"
+        }));
+      }
+
+      var modeDescriptions = {
+        "skip_to_gate": {
+          label: "Skip to gate",
+          desc: "Accept existing outputs and advance to " + (stageOpt.next_gate || "the next gate") + " immediately.",
+          className: "btn-success"
+        },
+        "replay_merge": {
+          label: "Replay merge",
+          desc: "Re-run the merge/combine step using the existing per-provider outputs, without re-dispatching drafters.",
+          className: "btn-primary"
+        },
+        "restart_fresh": {
+          label: "Restart stage",
+          desc: "Re-run this stage's agents from scratch. Existing outputs will be overwritten.",
+          className: "btn-warning"
+        }
+      };
+
+      // Render buttons in canonical display order: skip, replay, restart.
+      var displayOrder = ["skip_to_gate", "replay_merge", "restart_fresh"];
+      displayOrder.forEach(function (mode) {
+        if (stageOpt.available_modes.indexOf(mode) < 0) return;
+        var meta = modeDescriptions[mode];
+        var row = el("div", {
+          style: "display:flex;gap:12px;align-items:flex-start;padding:10px;margin-bottom:8px;background:#25252e;border-radius:6px;border:1px solid #343448;"
+        });
+        var btn = el("button", {
+          className: "btn " + meta.className + " btn-sm",
+          textContent: meta.label,
+          style: "min-width:130px;flex-shrink:0;"
+        });
+        btn.addEventListener("click", function () {
+          document.body.removeChild(backdrop);
+          if (typeof onPick === "function") onPick(mode);
+        });
+        row.appendChild(btn);
+        row.appendChild(el("div", {
+          textContent: meta.desc,
+          style: "color:#d1d5db;font-size:13px;"
+        }));
+        box.appendChild(row);
+      });
+
+      // Default-highlight the recommended mode.
+      if (opts.default_mode) {
+        var hint = el("div", {
+          textContent: "Recommended: " + opts.default_mode,
+          style: "color:#9ca3af;font-size:12px;margin-top:4px;"
+        });
+        box.appendChild(hint);
+      }
+    }
+
+    var cancelRow = el("div", { style: "text-align:right;margin-top:14px;" });
+    var cancelBtn = el("button", { className: "btn btn-secondary btn-sm", textContent: "Cancel" });
+    cancelBtn.addEventListener("click", function () { document.body.removeChild(backdrop); });
+    cancelRow.appendChild(cancelBtn);
+    box.appendChild(cancelRow);
+
+    backdrop.appendChild(box);
+    document.body.appendChild(backdrop);
+  }
+
   function addActivityEntry(message, type, featureName) {
     var container = $("#status-activity");
     var typeClass = type ? "activity-" + type : "";
@@ -1878,30 +1993,48 @@
             });
             termResumeBtn.addEventListener("click", (function (featureName) {
               return function () {
-                if (!confirm("Resume workflow \"" + featureName + "\" from where it left off? The wall clock timer will be reset.")) return;
                 termResumeBtn.disabled = true;
-                termResumeBtn.textContent = "Resuming...";
-                fetchJSON("/api/workflow/resume", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ feature_name: featureName })
-                }).then(function (data) {
-                  updateWorkflowStatus({
-                    state: data.resume_state || "REVIEWING",
-                    feature_name: featureName,
-                    round: 1,
-                    cost_usd: 0,
-                    wall_clock_seconds: 0,
-                    agent_invocations: 0
+                termResumeBtn.textContent = "Loading...";
+                // Fetch resume options so we can offer the user a choice
+                // (skip_to_gate / replay_merge / restart_fresh) instead of
+                // blindly re-running the current stage.
+                fetchJSON("/api/workflow/resume-options?feature_name=" + encodeURIComponent(featureName))
+                  .then(function (opts) {
+                    termResumeBtn.textContent = "Resume";
+                    termResumeBtn.disabled = false;
+                    showResumeChoiceModal(featureName, opts, function (mode) {
+                      termResumeBtn.disabled = true;
+                      termResumeBtn.textContent = "Resuming...";
+                      fetchJSON("/api/workflow/resume", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ feature_name: featureName, mode: mode })
+                      }).then(function (data) {
+                        updateWorkflowStatus({
+                          state: data.resume_state || "REVIEWING",
+                          feature_name: featureName,
+                          round: 1,
+                          cost_usd: 0,
+                          wall_clock_seconds: 0,
+                          agent_invocations: 0
+                        });
+                        var msg = "Workflow resumed: " + featureName + " from " + (data.resume_state || "?") + " (mode: " + (data.mode || "auto") + ")";
+                        if (data.replay_message) msg += " — " + data.replay_message;
+                        addActivityEntry(msg, "info");
+                        startWorkflowPoller();
+                        loadFeatureList();
+                      }).catch(function (err) {
+                        alert("Resume failed: " + err.message);
+                        termResumeBtn.disabled = false;
+                        termResumeBtn.textContent = "Resume";
+                      });
+                    });
+                  })
+                  .catch(function (err) {
+                    alert("Could not load resume options: " + err.message);
+                    termResumeBtn.disabled = false;
+                    termResumeBtn.textContent = "Resume";
                   });
-                  addActivityEntry("Workflow resumed: " + featureName + " from " + (data.resume_state || "?"), "info");
-                  startWorkflowPoller();
-                  loadFeatureList();
-                }).catch(function (err) {
-                  alert("Resume failed: " + err.message);
-                  termResumeBtn.disabled = false;
-                  termResumeBtn.textContent = "Resume";
-                });
               };
             })(f.feature_name));
             actions.appendChild(termResumeBtn);

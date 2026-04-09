@@ -242,6 +242,7 @@ func main() {
 	mux.HandleFunc("/api/workflow/reset", api.HandleResetWorkflow(workflowManager))
 	mux.HandleFunc("/api/workflow/restart", api.HandleRestartWorkflow(workflowManager))
 	mux.HandleFunc("/api/workflow/resume", api.HandleResumeWorkflow(workflowManager))
+	mux.HandleFunc("/api/workflow/resume-options", api.HandleResumeOptions(workflowManager))
 	mux.HandleFunc("/api/workflow/rewind", api.HandleRewindWorkflow(workflowManager))
 	mux.HandleFunc("/api/workflow/replay", api.HandleReplayPhase(workflowManager))
 
