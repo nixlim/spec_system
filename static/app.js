@@ -382,6 +382,24 @@
     if (workflowType === "code_review") stages = CR_PIPELINE_STAGES;
     else if (workflowType === "codedoc") stages = CD_PIPELINE_STAGES;
 
+    // Sub-state heuristic: the backend has no StateHoldout — holdout
+    // generation runs inside REVIEWING as a sub-phase (see
+    // orchestrator_review.go:149 dispatchHoldoutGeneration). Drive the
+    // HOLDOUT stepper node from live agent activity instead: if we're in
+    // REVIEWING and any active agent name starts with "holdout-", advance
+    // the visual highlight to HOLDOUT so the user sees what's actually
+    // running.
+    if (state === "REVIEWING" && stages === PIPELINE_STAGES && typeof activeAgents === "object") {
+      var holdoutRunning = false;
+      for (var aName in activeAgents) {
+        if (aName && aName.indexOf("holdout-") === 0) {
+          holdoutRunning = true;
+          break;
+        }
+      }
+      if (holdoutRunning) state = "HOLDOUT";
+    }
+
     // Find the index of the current state in the pipeline (-1 if not in happy path).
     var currentIdx = getPipelineStageIndex(state, workflowType, stages);
     for (var i = 0; currentIdx === -1 && i < stages.length; i++) {
@@ -1244,6 +1262,13 @@
         status: "running"
       };
       renderActiveAgents();
+      // If a holdout agent just started, immediately reapply the pipeline
+      // sub-state heuristic so the stepper advances from REVIEWING to
+      // HOLDOUT without waiting for the next poll tick.
+      if (agentName.indexOf("holdout-") === 0) {
+        var badge = $("#workflow-state");
+        if (badge) updateWorkflowPipeline(badge.textContent || "", selectedWorkflowType);
+      }
     }
   }
 
@@ -1267,6 +1292,14 @@
       setTimeout(function () {
         delete activeAgents[agentName];
         renderActiveAgents();
+        // Reapply pipeline sub-state heuristic once this agent is gone.
+        // Matters for holdout-* agents so the stepper rolls back from
+        // HOLDOUT to REVIEWING (or onward to whatever the next poll
+        // reports) as soon as holdouts finish.
+        if (agentName && agentName.indexOf("holdout-") === 0) {
+          var badge = $("#workflow-state");
+          if (badge) updateWorkflowPipeline(badge.textContent || "", selectedWorkflowType);
+        }
       }, 3000);
     }
   }
