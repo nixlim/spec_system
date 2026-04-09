@@ -391,6 +391,7 @@ func (m *WorkflowManager) ResumeFromGate(featureName string) (*specworkflow.Orch
 		Runner:         runner,
 		Emitter:        specworkflow.NewFeatureEmitter(m.emitter, featureName),
 		BeadsClient:    beadsClient,
+		ProcessTracker: m.processTracker,
 	}
 	// Wire cost provider if metrics store is available.
 	if m.metricsStore != nil {
@@ -573,6 +574,7 @@ func HandleStartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			Runner:         startRunner,
 			Emitter:        specworkflow.NewFeatureEmitter(manager.emitter, req.FeatureName),
 			BeadsClient:    beadsClient,
+			ProcessTracker: manager.processTracker,
 		}
 
 		// Wire cost provider if metrics store is available.
@@ -1361,6 +1363,7 @@ func HandleResumeWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			Runner:         resumeRunner,
 			Emitter:        specworkflow.NewFeatureEmitter(manager.emitter, req.FeatureName),
 			BeadsClient:    beadsClient,
+			ProcessTracker: manager.processTracker,
 		}
 		if manager.metricsStore != nil {
 			orchConfig.CostProvider = NewMetricsCostProvider(manager.metricsStore, req.FeatureName)
