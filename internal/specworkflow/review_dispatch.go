@@ -135,9 +135,19 @@ var reviewerLensGroups = []string{"clarity", "consistency", "security", "correct
 // Dispatch
 // ---------------------------------------------------------------------------
 
-// SpecReviewerLensGroups returns the canonical lens groups for spec review workflows.
+// SpecReviewerLensGroups returns the canonical lens groups for spec review
+// workflows. This is the single source of truth — any code that dispatches
+// spec reviewers must call this function rather than inlining its own list,
+// so adding/removing a lens is a one-line change.
+//
+// Current lens groups:
+//   - clarity     (AMB, INC)
+//   - consistency (CON, FEA)
+//   - security    (SEC, OPS)
+//   - correctness (COR, CPX)
+//   - coverage    (COV) — source-document coverage audit (added CD-f0vc)
 func SpecReviewerLensGroups() []string {
-	return []string{"clarity", "consistency", "security", "correctness"}
+	return []string{"clarity", "consistency", "security", "correctness", "coverage"}
 }
 
 // DispatchReviewers launches reviewer agents in parallel, collects their

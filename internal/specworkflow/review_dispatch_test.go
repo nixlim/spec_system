@@ -87,29 +87,29 @@ func validReviewerOutputJSON(lensGroup string) []byte {
 // noopDelay is a DelayFunc that does not sleep.
 func noopDelay(_ time.Duration) {}
 
-// makePrompts returns a standard prompts map for all 4 lens groups.
+// makePrompts returns a standard prompts map for all spec reviewer lens
+// groups. Uses SpecReviewerLensGroups() as the single source of truth so
+// adding/removing a lens is a one-line change.
 func makePrompts() map[string]string {
-	return map[string]string{
-		"clarity":     "Review for clarity",
-		"consistency": "Review for consistency",
-		"security":    "Review for security",
-		"correctness": "Review for correctness",
+	prompts := make(map[string]string)
+	for _, lens := range SpecReviewerLensGroups() {
+		prompts[lens] = "Review for " + lens
 	}
+	return prompts
 }
 
 // makeOutputPaths returns output paths in the given temp directory.
 func makeOutputPaths(dir string) map[string]string {
-	return map[string]string{
-		"clarity":     filepath.Join(dir, "clarity.json"),
-		"consistency": filepath.Join(dir, "consistency.json"),
-		"security":    filepath.Join(dir, "security.json"),
-		"correctness": filepath.Join(dir, "correctness.json"),
+	out := make(map[string]string)
+	for _, lens := range SpecReviewerLensGroups() {
+		out[lens] = filepath.Join(dir, lens+".json")
 	}
+	return out
 }
 
 // lensFromPath extracts the lens group name from an output path.
 func lensFromPath(dir, path string) string {
-	for _, lens := range []string{"clarity", "consistency", "security", "correctness"} {
+	for _, lens := range SpecReviewerLensGroups() {
 		if path == filepath.Join(dir, lens+".json") {
 			return lens
 		}
@@ -141,14 +141,14 @@ func TestReviewDispatch_AllSucceed(t *testing.T) {
 		t.Fatalf("DispatchReviewers returned unexpected error: %v", err)
 	}
 
-	if len(result.Results) != 4 {
-		t.Errorf("expected 4 successful results, got %d", len(result.Results))
+	if len(result.Results) != len(SpecReviewerLensGroups()) {
+		t.Errorf("expected %d successful results, got %d", len(SpecReviewerLensGroups()), len(result.Results))
 	}
 	if len(result.Failures) != 0 {
 		t.Errorf("expected 0 failures, got %d", len(result.Failures))
 	}
 	if result.ReducedCoverage {
-		t.Error("expected ReducedCoverage=false when all 4 succeed")
+		t.Error("expected ReducedCoverage=false when all reviewers succeed")
 	}
 	if len(result.CoverageLoss) != 0 {
 		t.Errorf("expected empty CoverageLoss, got %v", result.CoverageLoss)
@@ -199,7 +199,7 @@ func TestReviewDispatch_OneFailsThenSucceedsOnRetry(t *testing.T) {
 		t.Fatalf("DispatchReviewers returned unexpected error: %v", err)
 	}
 
-	if len(result.Results) != 4 {
+	if len(result.Results) != len(SpecReviewerLensGroups()) {
 		t.Errorf("expected 4 successful results after retry, got %d", len(result.Results))
 	}
 	if len(result.Failures) != 0 {
@@ -251,8 +251,9 @@ func TestReviewDispatch_OneFailsAfterAllRetries(t *testing.T) {
 		t.Fatalf("DispatchReviewers should not return error for 1 failure, got: %v", err)
 	}
 
-	if len(result.Results) != 3 {
-		t.Errorf("expected 3 successful results, got %d", len(result.Results))
+	expectedSuccesses := len(SpecReviewerLensGroups()) - 1
+	if len(result.Results) != expectedSuccesses {
+		t.Errorf("expected %d successful results, got %d", expectedSuccesses, len(result.Results))
 	}
 	if len(result.Failures) != 1 {
 		t.Errorf("expected 1 failure, got %d", len(result.Failures))
@@ -310,8 +311,9 @@ func TestReviewDispatch_TwoFailAfterAllRetries_ReturnsError(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected non-nil result even on error")
 	}
-	if len(result.Results) != 2 {
-		t.Errorf("expected 2 successful results, got %d", len(result.Results))
+	expectedSuccesses := len(SpecReviewerLensGroups()) - 2
+	if len(result.Results) != expectedSuccesses {
+		t.Errorf("expected %d successful results, got %d", expectedSuccesses, len(result.Results))
 	}
 	if len(result.Failures) != 2 {
 		t.Errorf("expected 2 failures, got %d", len(result.Failures))
@@ -356,7 +358,7 @@ func TestReviewDispatch_InvalidJSONTriggersRetry(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(result.Results) != 4 {
+	if len(result.Results) != len(SpecReviewerLensGroups()) {
 		t.Errorf("expected 4 results after invalid JSON retry, got %d", len(result.Results))
 	}
 
@@ -392,8 +394,8 @@ func TestReviewDispatch_CostAndDurationAccumulation(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Total cost = 4 * 0.10 = 0.40.
-	expectedTotalCost := 0.40
+	// Total cost = N * 0.10 where N = len(SpecReviewerLensGroups()).
+	expectedTotalCost := 0.10 * float64(len(SpecReviewerLensGroups()))
 	if result.TotalCostUSD < expectedTotalCost-0.001 || result.TotalCostUSD > expectedTotalCost+0.001 {
 		t.Errorf("TotalCostUSD = %f, want ~%f", result.TotalCostUSD, expectedTotalCost)
 	}
@@ -445,7 +447,7 @@ func TestReviewDispatch_ConcurrentExecution(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(result.Results) != 4 {
+	if len(result.Results) != len(SpecReviewerLensGroups()) {
 		t.Errorf("expected 4 results, got %d", len(result.Results))
 	}
 
@@ -534,14 +536,15 @@ func TestReviewDispatch_RetryDelayIsCalled(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(result.Results) != 4 {
+	if len(result.Results) != len(SpecReviewerLensGroups()) {
 		t.Errorf("expected 4 results, got %d", len(result.Results))
 	}
 
 	// Each of the 4 reviewers should have called delay once (before retry).
 	delays := delaysCalled.Load()
-	if delays != 4 {
-		t.Errorf("expected 4 delay calls (one per reviewer retry), got %d", delays)
+	expectedDelays := int64(len(SpecReviewerLensGroups()))
+	if delays != expectedDelays {
+		t.Errorf("expected %d delay calls (one per reviewer retry), got %d", expectedDelays, delays)
 	}
 }
 
@@ -594,7 +597,7 @@ func TestReviewDispatch_SchemaViolationTriggersRetry(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(result.Results) != 4 {
+	if len(result.Results) != len(SpecReviewerLensGroups()) {
 		t.Errorf("expected 4 results after schema violation retry, got %d", len(result.Results))
 	}
 	if len(result.Failures) != 0 {
@@ -673,8 +676,8 @@ func TestReviewDispatch_PartialFindingsAccepted(t *testing.T) {
 	}
 
 	// All 4 should succeed — the partial findings output should NOT trigger a retry.
-	if len(result.Results) != 4 {
-		t.Errorf("expected 4 successful results, got %d", len(result.Results))
+	if len(result.Results) != len(SpecReviewerLensGroups()) {
+		t.Errorf("expected %d successful results, got %d", len(SpecReviewerLensGroups()), len(result.Results))
 	}
 	if len(result.Failures) != 0 {
 		t.Errorf("expected 0 failures, got %d", len(result.Failures))
@@ -700,8 +703,9 @@ func TestReviewDispatch_PartialFindingsAccepted(t *testing.T) {
 
 	// Should only have been called once per reviewer (no retries needed).
 	totalCalls := runner.callCount.Load()
-	if totalCalls != 4 {
-		t.Errorf("expected 4 total runner calls (no retries), got %d", totalCalls)
+	expectedCalls := int64(len(SpecReviewerLensGroups()))
+	if totalCalls != expectedCalls {
+		t.Errorf("expected %d total runner calls (no retries), got %d", expectedCalls, totalCalls)
 	}
 }
 
@@ -731,8 +735,9 @@ func TestReviewDispatch_RunnerInfrastructureError(t *testing.T) {
 		t.Fatalf("expected no dispatch error for 1 failure, got: %v", err)
 	}
 
-	if len(result.Results) != 3 {
-		t.Errorf("expected 3 results, got %d", len(result.Results))
+	expectedInfraSuccesses := len(SpecReviewerLensGroups()) - 1
+	if len(result.Results) != expectedInfraSuccesses {
+		t.Errorf("expected %d results, got %d", expectedInfraSuccesses, len(result.Results))
 	}
 	if len(result.Failures) != 1 {
 		t.Errorf("expected 1 failure, got %d", len(result.Failures))
@@ -767,7 +772,7 @@ func TestDispatch_BackwardCompat_ClaudeOnly(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(result.Results) != 4 {
+	if len(result.Results) != len(SpecReviewerLensGroups()) {
 		t.Errorf("expected 4 claude-only results, got %d", len(result.Results))
 	}
 	if len(result.Failures) != 0 {
@@ -787,9 +792,13 @@ func TestDispatch_BackwardCompat_ClaudeOnly(t *testing.T) {
 }
 
 func TestMerge_BackwardCompat_FourInputs(t *testing.T) {
-	// 4 claude-only inputs should merge the same as before.
-	outputs := make([]*ReviewerOutput, 4)
-	for i, lens := range []string{"clarity", "consistency", "security", "correctness"} {
+	// Regression guard: a caller passing the original 4-lens group inputs
+	// (pre-coverage-lens) should still merge cleanly into exactly 4 findings.
+	// This locks in behaviour for any external caller that hasn't adopted
+	// the coverage lens yet.
+	legacyLenses := []string{"clarity", "consistency", "security", "correctness"}
+	outputs := make([]*ReviewerOutput, len(legacyLenses))
+	for i, lens := range legacyLenses {
 		var out ReviewerOutput
 		if err := json.Unmarshal(validReviewerOutputJSON(lens), &out); err != nil {
 			t.Fatalf("unmarshal: %v", err)
@@ -801,8 +810,8 @@ func TestMerge_BackwardCompat_FourInputs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("merge error: %v", err)
 	}
-	if len(merged.Findings) != 4 {
-		t.Errorf("expected 4 merged findings, got %d", len(merged.Findings))
+	if len(merged.Findings) != len(legacyLenses) {
+		t.Errorf("expected %d merged findings, got %d", len(legacyLenses), len(merged.Findings))
 	}
 }
 
@@ -830,7 +839,7 @@ func TestTeamConfig_BackwardCompat_NoCodex(t *testing.T) {
 // Dual-provider dispatch tests (vse.8)
 // ---------------------------------------------------------------------------
 
-func TestDispatch_DualProvider_8Reviewers(t *testing.T) {
+func TestDispatch_DualProvider_AllReviewers(t *testing.T) {
 	claudeDir := t.TempDir()
 	codexDir := t.TempDir()
 	claudeOutputPaths := makeOutputPaths(claudeDir)
@@ -862,9 +871,10 @@ func TestDispatch_DualProvider_8Reviewers(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// 8 reviewers: 4 claude + 4 codex.
-	if len(result.Results) != 8 {
-		t.Errorf("expected 8 results, got %d", len(result.Results))
+	// 2N reviewers: N claude + N codex, where N = len(SpecReviewerLensGroups()).
+	expectedTotal := 2 * len(SpecReviewerLensGroups())
+	if len(result.Results) != expectedTotal {
+		t.Errorf("expected %d results, got %d", expectedTotal, len(result.Results))
 	}
 	if len(result.Failures) != 0 {
 		t.Errorf("expected 0 failures, got %d", len(result.Failures))
@@ -887,11 +897,12 @@ func TestDispatch_DualProvider_8Reviewers(t *testing.T) {
 	}
 
 	// Verify both runners were called.
-	if claudeRunner.callCount.Load() != 4 {
-		t.Errorf("expected 4 claude calls, got %d", claudeRunner.callCount.Load())
+	expectedProviderCalls := int64(len(SpecReviewerLensGroups()))
+	if claudeRunner.callCount.Load() != expectedProviderCalls {
+		t.Errorf("expected %d claude calls, got %d", expectedProviderCalls, claudeRunner.callCount.Load())
 	}
-	if codexRunner.callCount.Load() != 4 {
-		t.Errorf("expected 4 codex calls, got %d", codexRunner.callCount.Load())
+	if codexRunner.callCount.Load() != expectedProviderCalls {
+		t.Errorf("expected %d codex calls, got %d", expectedProviderCalls, codexRunner.callCount.Load())
 	}
 }
 
@@ -918,21 +929,22 @@ func TestDispatch_DualProvider_FailureTolerance(t *testing.T) {
 	}
 
 	// With 8 reviewers, maxFailuresAllowed = 8/2-1 = 3.
-	// 4 codex failures > 3 → should return error.
+	// All codex failures → should return error.
 	config := ReviewDispatchConfig{MaxRetries: 0, TimeoutSeconds: 30}
 	result, err := DispatchReviewers(claudeRunner, codexRunner, SpecReviewerLensGroups(), makePrompts(), claudeOutputPaths, codexOutputPaths, config, noopDelay, nil)
 	if err == nil {
-		t.Fatal("expected error when 4 of 8 reviewers fail, got nil")
+		t.Fatalf("expected error when all %d codex reviewers fail, got nil", len(SpecReviewerLensGroups()))
 	}
 
 	// Result should still have partial data.
 	if result == nil {
 		t.Fatal("expected non-nil result even on error")
 	}
-	if len(result.Results) != 4 {
-		t.Errorf("expected 4 claude successes, got %d", len(result.Results))
+	expectedReviewers := len(SpecReviewerLensGroups())
+	if len(result.Results) != expectedReviewers {
+		t.Errorf("expected %d claude successes, got %d", expectedReviewers, len(result.Results))
 	}
-	if len(result.Failures) != 4 {
-		t.Errorf("expected 4 codex failures, got %d", len(result.Failures))
+	if len(result.Failures) != expectedReviewers {
+		t.Errorf("expected %d codex failures, got %d", expectedReviewers, len(result.Failures))
 	}
 }

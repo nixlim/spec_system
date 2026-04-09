@@ -94,8 +94,10 @@ func ExpectedOutputFile(state WorkflowState, featureName string, round int) stri
 	}
 }
 
-// reviewerLetters are the suffix letters for the four reviewer groups.
-var reviewerLetters = []string{"a", "b", "c", "d"}
+// reviewerLetters are the suffix letters for the reviewer groups. Keep in
+// sync with reviewerGroupLetter in prompts.go: a=clarity, b=consistency,
+// c=security, d=correctness, e=coverage.
+var reviewerLetters = []string{"a", "b", "c", "d", "e"}
 
 // reviewOutputExists returns true if at least one reviewer output file for the
 // given round exists in the workspace.

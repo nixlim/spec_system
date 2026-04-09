@@ -34,7 +34,7 @@ max_retries: 3
 
 # Per-agent timeout in seconds for dual-provider agent invocations
 # (discovery, drafting, taskify).
-agent_timeout_seconds: 900
+agent_timeout_seconds: 1800
 
 # Maximum retry attempts for taskify when output fails schema/DAG validation.
 taskify_max_retries: 3
@@ -45,13 +45,13 @@ task_review_max_rounds: 3
 # --- Dual-Provider Settings ---
 
 # Enable Codex CLI agents alongside Claude for review and holdout generation.
-enable_codex_reviewers: false
+enable_codex_reviewers: true
 
 # Enable Codex CLI alongside Claude for the discovery phase.
-enable_codex_discovery: false
+enable_codex_discovery: true
 
 # Enable Codex CLI alongside Claude for the drafting phase.
-enable_codex_drafting: false
+enable_codex_drafting: true
 
 # Model for codex agents (reviewers, holdout, discovery, drafting — passed as -m flag).
 codex_model: "gpt-5.4"
@@ -77,10 +77,15 @@ reviewer_timeout_seconds: 900
 holdout_timeout_seconds: 900
 
 # --- Skill Paths ---
-
+#
+# Paths are resolved relative to the server process's working directory,
+# which is normally the repo root. Keeping skills inside the repo's
+# .claude/skills/ directory makes them version-controlled alongside the
+# code that consumes them, and avoids drift with per-user globals in
+# ~/.claude/skills/.
 skill_paths:
-  plan_spec: "/Users/nixlim/.claude/skills/plan-spec"
-  grill_spec: "/Users/nixlim/.claude/skills/grill-spec"
+  plan_spec: ".claude/skills/plan-spec"
+  grill_spec: ".claude/skills/grill-spec"
 
 # ===========================================================================
 # Code Review Workflow Configuration

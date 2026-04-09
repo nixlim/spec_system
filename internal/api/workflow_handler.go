@@ -1629,9 +1629,10 @@ func determineResumeState(state *specworkflow.WorkflowStateJSON, workspaceDir, f
 }
 
 // hasReviewOutputs checks whether any reviewer output files exist for the
-// given round in the spec directory.
+// given round in the spec directory. Keep the letter list in sync with
+// reviewerGroupLetter in internal/specworkflow/prompts.go.
 func hasReviewOutputs(specDir string, round int) bool {
-	for _, letter := range []string{"a", "b", "c", "d"} {
+	for _, letter := range []string{"a", "b", "c", "d", "e"} {
 		p := filepath.Join(specDir, fmt.Sprintf("review-%s-round-%d.json", letter, round))
 		if _, err := os.Stat(p); err == nil {
 			return true

@@ -346,9 +346,10 @@ func probeReviewingResume(specDir string, round int) *StageResumeOptions {
 		AvailableModes: []ResumeMode{ResumeModeRestartFresh},
 	}
 
-	// Count reviewer output files for this round.
+	// Count reviewer output files for this round. Keep this letter list in
+	// sync with reviewerGroupLetter in prompts.go.
 	reviewerCount := 0
-	for _, letter := range []string{"a", "b", "c", "d"} {
+	for _, letter := range []string{"a", "b", "c", "d", "e"} {
 		p := filepath.Join(specDir, fmt.Sprintf("review-%s-round-%d.json", letter, round))
 		if _, err := os.Stat(p); err == nil {
 			reviewerCount++

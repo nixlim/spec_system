@@ -192,17 +192,17 @@ func (o *Orchestrator) handleDiscovery(goal GoalInput, state *WorkflowStateJSON,
 
 	// Dual-provider path: dispatch both Claude and Codex in parallel.
 	if o.config.EnableCodexDiscovery && o.codexDiscoveryRunner != nil {
-		return o.handleDualDiscovery(prompt, state, specDir, discoveryRound)
+		return o.handleDualDiscovery(prompt, state, specDir, discoveryRound, goal.SourceDocPaths)
 	}
 
 	// Single-provider path (current behavior).
-	return o.handleSingleDiscovery(prompt, state, specDir, discoveryRound)
+	return o.handleSingleDiscovery(prompt, state, specDir, discoveryRound, goal.SourceDocPaths)
 }
 
 // handleSingleDiscovery is the single-provider discovery path with
 // validation+retry. If the agent produces invalid JSON, the prompt is
 // augmented with validation errors and the agent is re-dispatched.
-func (o *Orchestrator) handleSingleDiscovery(prompt string, state *WorkflowStateJSON, specDir string, discoveryRound int) error {
+func (o *Orchestrator) handleSingleDiscovery(prompt string, state *WorkflowStateJSON, specDir string, discoveryRound int, sourceDocPaths []string) error {
 	outPath := filepath.Join(specDir, "discovery-output.json")
 
 	maxAttempts := o.config.MaxRetries
@@ -255,6 +255,21 @@ func (o *Orchestrator) handleSingleDiscovery(prompt string, state *WorkflowState
 	log.Printf("[orchestrator] discovery output valid: %d actors, %d priorities, %d open questions",
 		len(discovery.Actors), len(discovery.Priorities), len(discovery.OpenQuestions))
 
+	// Gate 1 heuristic: if the source corpus is large but discovery produced
+	// few substantive questions, prepend a synthetic warning to OpenQuestions
+	// so the human reviewer sees it on the first gate render. This catches
+	// the "over-confident empty gate" failure mode.
+	if discovery != nil {
+		if newData, injected := o.maybeInjectGate1HeuristicWarning(sourceDocPaths, discovery); injected {
+			canonicalPath := filepath.Join(specDir, "discovery-output.json")
+			if writeErr := os.WriteFile(canonicalPath, newData, 0o644); writeErr != nil {
+				log.Printf("[orchestrator] warning: failed to rewrite canonical discovery output after heuristic injection: %v", writeErr)
+			} else {
+				data = newData
+			}
+		}
+	}
+
 	// Save a numbered copy for history (discovery-output-{N}.json).
 	versionedPath := filepath.Join(specDir, fmt.Sprintf("discovery-output-%d.json", discoveryRound))
 	if copyErr := os.WriteFile(versionedPath, data, 0o644); copyErr != nil {
@@ -270,7 +285,7 @@ func (o *Orchestrator) handleSingleDiscovery(prompt string, state *WorkflowState
 
 // handleDualDiscovery dispatches both Claude and Codex discovery agents in
 // parallel, merges successful outputs, and handles fallback/escalation.
-func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJSON, specDir string, discoveryRound int) error {
+func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJSON, specDir string, discoveryRound int, sourceDocPaths []string) error {
 	timeout := o.config.AgentTimeoutSeconds
 
 	claudeOutPath := filepath.Join(specDir, VersionedFilename("discovery-output", "claude", discoveryRound, ".json"))
@@ -428,6 +443,15 @@ func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJS
 		finalData = codexData
 		log.Printf("[orchestrator] Claude discovery failed, using Codex-only output")
 	}
+	// Gate 1 heuristic: inject synthetic warning into OpenQuestions when
+	// discovery produced few substantive questions against a large source
+	// corpus. Must run BEFORE writing the canonical file and the versioned
+	// history copy, so both reflect the same augmented output.
+	if finalOutput != nil {
+		if newData, injected := o.maybeInjectGate1HeuristicWarning(sourceDocPaths, finalOutput); injected {
+			finalData = newData
+		}
+	}
 	_ = finalOutput // used implicitly through finalData
 
 	// Write the canonical discovery-output.json (for backward compat with gate handler).
@@ -456,6 +480,119 @@ func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJS
 		return fmt.Errorf("transition DISCOVERY -> HUMAN_GATE_1: %w", err)
 	}
 	return nil
+}
+
+// gate1HeuristicWarningPrefix marks the synthetic warning message injected
+// into OpenQuestions when discovery produced suspiciously few substantive
+// questions against a large source corpus. The prefix makes the warning
+// identifiable in downstream UI rendering and prevents it from being counted
+// as a "substantive" question on a subsequent heuristic re-check.
+const gate1HeuristicWarningPrefix = "[SYSTEM WARNING]"
+
+// gate1ProceduralQuestionMarkers are substrings that make an open question
+// qualify as procedural (about the workflow/output format/pipeline) rather
+// than substantive (about the feature being specified). Case-insensitive.
+var gate1ProceduralQuestionMarkers = []string{
+	"schema",
+	"output format",
+	"workflow",
+	"additional source doc",
+	"plan-spec",
+	"which file",
+	"output path",
+}
+
+// countSourceDocLines returns the total line count across all files listed
+// in sourceDocPaths. Files that cannot be read are skipped silently — this
+// is a best-effort heuristic, not a correctness check.
+func countSourceDocLines(sourceDocPaths []string) int {
+	total := 0
+	for _, p := range sourceDocPaths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		total += strings.Count(string(data), "\n")
+		if len(data) > 0 && !strings.HasSuffix(string(data), "\n") {
+			total++
+		}
+	}
+	return total
+}
+
+// isSubstantiveQuestion returns true if q is about the feature being
+// specified (e.g. data model, failure handling, infrastructure choices) and
+// false if it only asks about the workflow pipeline itself (schema paths,
+// output formats, etc.). The heuristic is conservative: any question
+// containing one of gate1ProceduralQuestionMarkers AND under 120 characters
+// is treated as procedural. A long question that mentions "schema" in
+// passing (e.g. "should the Neo4j schema enforce uniqueness on datom IDs?")
+// is still substantive.
+func isSubstantiveQuestion(q string) bool {
+	if strings.HasPrefix(q, gate1HeuristicWarningPrefix) {
+		return false
+	}
+	lower := strings.ToLower(q)
+	if len(q) >= 120 {
+		return true
+	}
+	for _, marker := range gate1ProceduralQuestionMarkers {
+		if strings.Contains(lower, marker) {
+			return false
+		}
+	}
+	return true
+}
+
+// maybeInjectGate1HeuristicWarning audits the merged discovery output
+// against a heuristic for "suspiciously confident" results: if the source
+// corpus is > gate1MinSourceLines lines AND fewer than
+// gate1MinSubstantiveQuestions substantive questions were produced, prepend
+// a synthetic warning to discovery.OpenQuestions asking the human to verify
+// that operational topics are covered before confirming the gate.
+//
+// Returns (re-marshalled JSON bytes, true) when a warning was injected,
+// or (nil, false) when the heuristic did not trigger or injection failed.
+// The caller is responsible for persisting the returned bytes to disk
+// BEFORE the StateHumanGate1 transition, so the UI sees the warning on
+// the first gate render.
+func (o *Orchestrator) maybeInjectGate1HeuristicWarning(sourceDocPaths []string, discovery *DiscoveryOutput) ([]byte, bool) {
+	const gate1MinSourceLines = 500
+	const gate1MinSubstantiveQuestions = 3
+
+	sourceLines := countSourceDocLines(sourceDocPaths)
+	if sourceLines < gate1MinSourceLines {
+		return nil, false
+	}
+
+	substantive := 0
+	for _, q := range discovery.OpenQuestions {
+		if isSubstantiveQuestion(q) {
+			substantive++
+		}
+	}
+	if substantive >= gate1MinSubstantiveQuestions {
+		return nil, false
+	}
+
+	warning := fmt.Sprintf(
+		"%s Discovery produced only %d substantive questions against a source corpus of %d lines. "+
+			"Please verify that operational topics (infrastructure, deployment, setup, tech stack) "+
+			"are adequately covered in the scope, constraints, and integration_points before "+
+			"confirming. If you notice anything missing, reject this gate with corrections.",
+		gate1HeuristicWarningPrefix, substantive, sourceLines,
+	)
+	discovery.OpenQuestions = append([]string{warning}, discovery.OpenQuestions...)
+
+	newData, marshalErr := json.MarshalIndent(discovery, "", "  ")
+	if marshalErr != nil {
+		log.Printf("[orchestrator] gate1 heuristic: failed to re-marshal discovery output: %v", marshalErr)
+		return nil, false
+	}
+
+	log.Printf("[orchestrator] gate1 heuristic triggered: source=%d lines, substantive_questions=%d — injected warning",
+		sourceLines, substantive)
+	return newData, true
 }
 
 // buildDiscoveryMergePrompt constructs the base prompt for the discovery merge

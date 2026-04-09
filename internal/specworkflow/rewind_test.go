@@ -60,6 +60,8 @@ func createTestArtefacts(t *testing.T, specDir string) {
 		"review-c-round-1.md",
 		"review-d-round-1.json",
 		"review-d-round-1.md",
+		"review-e-round-1.json",
+		"review-e-round-1.md",
 		"merged-findings-round-1.json",
 		"revision-round-1.json",
 		"judge-round-1.json",

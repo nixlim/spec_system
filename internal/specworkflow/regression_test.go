@@ -238,9 +238,10 @@ func regressionLensFromPath(path string) string {
 	return "unknown"
 }
 
-// TestRegression_SpecDispatchReviewersWith4Groups verifies that DispatchReviewers
-// with the spec workflow's 4 lens groups still dispatches correctly.
-func TestRegression_SpecDispatchReviewersWith4Groups(t *testing.T) {
+// TestRegression_SpecDispatchReviewersWithAllGroups verifies that
+// DispatchReviewers with the spec workflow's canonical lens groups still
+// dispatches correctly regardless of how many there are.
+func TestRegression_SpecDispatchReviewersWithAllGroups(t *testing.T) {
 	dir := t.TempDir()
 
 	runner := &regressionDispatchRunner{
@@ -272,8 +273,8 @@ func TestRegression_SpecDispatchReviewersWith4Groups(t *testing.T) {
 	}
 
 	lensGroups := SpecReviewerLensGroups()
-	if len(lensGroups) != 4 {
-		t.Fatalf("SpecReviewerLensGroups: expected 4, got %d", len(lensGroups))
+	if len(lensGroups) < 4 {
+		t.Fatalf("SpecReviewerLensGroups: expected at least 4 groups, got %d", len(lensGroups))
 	}
 
 	prompts := make(map[string]string)
@@ -297,14 +298,15 @@ func TestRegression_SpecDispatchReviewersWith4Groups(t *testing.T) {
 		t.Fatalf("DispatchReviewers: %v", err)
 	}
 
-	if len(result.Results) != 4 {
-		t.Errorf("expected 4 results, got %d", len(result.Results))
+	if len(result.Results) != len(lensGroups) {
+		t.Errorf("expected %d results, got %d", len(lensGroups), len(result.Results))
 	}
-	if result.TotalCostUSD < 0.03 {
-		t.Errorf("expected cost >= $0.03, got $%.4f", result.TotalCostUSD)
+	minCost := 0.01 * float64(len(lensGroups))
+	if result.TotalCostUSD < minCost-0.001 {
+		t.Errorf("expected cost >= $%.4f, got $%.4f", minCost, result.TotalCostUSD)
 	}
 
-	// Verify all 4 lens groups produced output.
+	// Verify every lens group produced output.
 	seenLenses := map[string]bool{}
 	for _, r := range result.Results {
 		if r.Output != nil {

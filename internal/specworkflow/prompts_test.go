@@ -179,6 +179,59 @@ func TestPromptHoldoutIncludesContractPaths(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Operational topic lock-in tests (CD-f0vc)
+// ---------------------------------------------------------------------------
+
+// TestPromptDiscoveryOperationalTopics locks in the operational topic
+// enumeration added in CD-f0vc. If these markers disappear from
+// BuildDiscoveryPrompt the agent will likely start silently dropping
+// infrastructure content from the source material.
+func TestPromptDiscoveryOperationalTopics(t *testing.T) {
+	pb := newTestPromptBuilder(t)
+	goal := &GoalInput{Title: "test", Description: "test"}
+	prompt, err := pb.BuildDiscoveryPrompt(nil, "", goal)
+	if err != nil {
+		t.Fatalf("BuildDiscoveryPrompt error: %v", err)
+	}
+	for _, want := range []string{
+		"Runtime",
+		"Containerisation",
+		"Bootstrap",
+		"Deployment environments",
+		"Build artefacts",
+		"Sanity Check Before Emission",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("BuildDiscoveryPrompt output missing %q — operational topics block may have been removed", want)
+		}
+	}
+}
+
+// TestPromptDrafterSourceDocCoverageMandate locks in the source-doc
+// coverage mandate added to BuildDrafterPrompt in CD-f0vc. If these
+// markers disappear the drafter will fall back to "from confirmed
+// requirements" only and stop backfilling operational content from the
+// source documents.
+func TestPromptDrafterSourceDocCoverageMandate(t *testing.T) {
+	pb := newTestPromptBuilder(t)
+	prompt, err := pb.BuildDrafterPrompt("/tmp/reqs.json", nil, nil)
+	if err != nil {
+		t.Fatalf("BuildDrafterPrompt error: %v", err)
+	}
+	for _, want := range []string{
+		"AUTHORITATIVE",
+		"source documents",
+		"Coverage Mandate",
+		"AMB-W-NNN",
+		"[None applicable for this feature]",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("BuildDrafterPrompt output missing %q — source-doc coverage mandate may have been removed", want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Drafter prompt tests
 // ---------------------------------------------------------------------------
 
@@ -293,7 +346,11 @@ func TestPromptDrafterNoContextDocsSection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildDrafterPrompt error: %v", err)
 	}
-	if strings.Contains(prompt, "Context Documents") {
+	// The "## Context Documents" header is only emitted when contextDocs is
+	// non-empty. The drafter preamble may reference the phrase "Context
+	// Documents section" in its coverage mandate, so check for the actual
+	// Markdown section header rather than a loose substring match.
+	if strings.Contains(prompt, "## Context Documents\n") {
 		t.Error("should not include Context Documents section when none provided")
 	}
 }
@@ -410,6 +467,7 @@ func TestPromptReviewerOutputPath(t *testing.T) {
 		{"consistency", "review-b-round-2.json"},
 		{"security", "review-c-round-3.json"},
 		{"correctness", "review-d-round-1.json"},
+		{"coverage", "review-e-round-1.json"},
 	}
 	for _, tc := range tests {
 		round := 1

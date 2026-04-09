@@ -12,7 +12,8 @@ import (
 	"time"
 )
 
-// handleReviewing dispatches all 4 reviewer lens groups in parallel, merges
+// handleReviewing dispatches all 5 reviewer lens groups in parallel
+// (clarity, consistency, security, correctness, coverage), merges
 // findings, updates the issue tracker, and transitions to either REVISING
 // (if critical/major findings) or JUDGING (if none).
 func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string) error {
@@ -25,12 +26,15 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 		return nil
 	}
 
-	// Build reviewer prompts for all 4 lens groups.
+	// Build reviewer prompts for all lens groups. SpecReviewerLensGroups() is
+	// the single source of truth — do not inline a literal list here, and
+	// keep dispatch/event loops below consistent by reusing this slice.
+	lensGroups := SpecReviewerLensGroups()
 	specPath := o.currentSpecPath(state)
 	prompts := make(map[string]string)
 	outputPaths := make(map[string]string)
 
-	for _, lens := range []string{"clarity", "consistency", "security", "correctness"} {
+	for _, lens := range lensGroups {
 		letter := reviewerGroupLetter[lens]
 		outPath := filepath.Join(specDir, fmt.Sprintf("review-%s-claude-round-%d.json", letter, state.Round))
 		p, err := o.promptBuilder.BuildReviewerPrompt(lens, state.Round, specPath, outPath)
@@ -45,7 +49,7 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 	var codexOutputPaths map[string]string
 	if o.codexRunner != nil {
 		codexOutputPaths = make(map[string]string)
-		for _, lens := range []string{"clarity", "consistency", "security", "correctness"} {
+		for _, lens := range lensGroups {
 			letter := reviewerGroupLetter[lens]
 			codexOutputPaths[lens] = filepath.Join(specDir, fmt.Sprintf("review-%s-codex-round-%d.json", letter, state.Round))
 		}
@@ -53,22 +57,23 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 
 	// Emit dispatch events and track active agents so the dashboard shows
 	// which agents are currently running.
-	for _, lens := range []string{"clarity", "consistency", "security", "correctness"} {
+	for _, lens := range lensGroups {
 		name := "reviewer-" + lens + "-claude"
 		o.SetAgentStatus(name, "running")
 		o.emitter.Emit(NewAgentDispatchEvent(name, state.Round))
 	}
 	if o.codexRunner != nil {
-		for _, lens := range []string{"clarity", "consistency", "security", "correctness"} {
+		for _, lens := range lensGroups {
 			name := "reviewer-" + lens + "-codex"
 			o.SetAgentStatus(name, "running")
 			o.emitter.Emit(NewAgentDispatchEvent(name, state.Round))
 		}
 	}
 
-	// Dispatch reviewers in parallel (4 claude + optionally 4 codex).
-	// The onComplete callback fires in real-time as each agent finishes,
-	// updating the dashboard immediately rather than waiting for all to complete.
+	// Dispatch reviewers in parallel (N claude + optionally N codex, where
+	// N = len(SpecReviewerLensGroups())). The onComplete callback fires in
+	// real-time as each agent finishes, updating the dashboard immediately
+	// rather than waiting for all to complete.
 	dispatchCfg := ReviewDispatchConfig{
 		MaxRetries:     o.config.MaxRetries,
 		TimeoutSeconds: o.config.ReviewerTimeoutSeconds,

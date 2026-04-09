@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -506,5 +507,168 @@ func TestDiscoveryOutputSchema_RequiredFields(t *testing.T) {
 		if !requiredSet[f] {
 			t.Errorf("expected required field %q not found in schema", f)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// maybeInjectGate1HeuristicWarning
+// ---------------------------------------------------------------------------
+
+// writeTempSourceDoc writes content to a temp file and returns its path. The
+// file is cleaned up when the test ends.
+func writeTempSourceDoc(t *testing.T, content string) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "source-*.md")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	f.Close()
+	return f.Name()
+}
+
+// bigSourceDoc returns a string with n lines (each a non-blank line of text).
+// Used to drive the heuristic's line-count threshold above the 500-line trigger.
+func bigSourceDoc(n int) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		b.WriteString("line of source material describing the system\n")
+	}
+	return b.String()
+}
+
+func TestMaybeInjectGate1HeuristicWarning_TriggersOnLargeSourceWithZeroQuestions(t *testing.T) {
+	o := &Orchestrator{}
+	path := writeTempSourceDoc(t, bigSourceDoc(600))
+
+	discovery := &DiscoveryOutput{
+		SchemaVersion: "1.0",
+		Agent:         "discovery",
+		OpenQuestions: []string{},
+	}
+
+	newData, injected := o.maybeInjectGate1HeuristicWarning([]string{path}, discovery)
+	if !injected {
+		t.Fatalf("expected heuristic to trigger (600 lines, 0 questions), got injected=false")
+	}
+	if len(discovery.OpenQuestions) != 1 {
+		t.Fatalf("expected 1 question after injection, got %d", len(discovery.OpenQuestions))
+	}
+	if !strings.HasPrefix(discovery.OpenQuestions[0], gate1HeuristicWarningPrefix) {
+		t.Errorf("expected warning prefix %q, got: %q", gate1HeuristicWarningPrefix, discovery.OpenQuestions[0])
+	}
+	if len(newData) == 0 {
+		t.Error("expected non-empty re-marshalled JSON, got empty")
+	}
+}
+
+func TestMaybeInjectGate1HeuristicWarning_TriggersWhenAllQuestionsAreProcedural(t *testing.T) {
+	o := &Orchestrator{}
+	path := writeTempSourceDoc(t, bigSourceDoc(800))
+
+	// Two procedural questions + one short procedural → substantive count = 0.
+	discovery := &DiscoveryOutput{
+		SchemaVersion: "1.0",
+		Agent:         "discovery",
+		OpenQuestions: []string{
+			"Should I read the schema from the default path?",
+			"Which output format should I emit?",
+			"Are there additional source docs I should read?",
+		},
+	}
+
+	newData, injected := o.maybeInjectGate1HeuristicWarning([]string{path}, discovery)
+	if !injected {
+		t.Fatalf("expected heuristic to trigger (all questions procedural), got injected=false")
+	}
+	if len(discovery.OpenQuestions) != 4 {
+		t.Fatalf("expected 4 questions after prepending warning, got %d", len(discovery.OpenQuestions))
+	}
+	if !strings.HasPrefix(discovery.OpenQuestions[0], gate1HeuristicWarningPrefix) {
+		t.Errorf("expected warning at head, got: %q", discovery.OpenQuestions[0])
+	}
+	_ = newData
+}
+
+func TestMaybeInjectGate1HeuristicWarning_DoesNotTriggerWhenSourceIsSmall(t *testing.T) {
+	o := &Orchestrator{}
+	path := writeTempSourceDoc(t, bigSourceDoc(100))
+
+	discovery := &DiscoveryOutput{
+		SchemaVersion: "1.0",
+		Agent:         "discovery",
+		OpenQuestions: []string{},
+	}
+
+	newData, injected := o.maybeInjectGate1HeuristicWarning([]string{path}, discovery)
+	if injected {
+		t.Fatalf("expected heuristic NOT to trigger (source < 500 lines), got injected=true")
+	}
+	if len(discovery.OpenQuestions) != 0 {
+		t.Errorf("expected questions untouched, got %d", len(discovery.OpenQuestions))
+	}
+	if newData != nil {
+		t.Errorf("expected nil newData when not injected, got %d bytes", len(newData))
+	}
+}
+
+func TestMaybeInjectGate1HeuristicWarning_DoesNotTriggerWhenQuestionsSubstantive(t *testing.T) {
+	o := &Orchestrator{}
+	path := writeTempSourceDoc(t, bigSourceDoc(1000))
+
+	discovery := &DiscoveryOutput{
+		SchemaVersion: "1.0",
+		Agent:         "discovery",
+		OpenQuestions: []string{
+			"How should Cortex handle concurrent multi-agent writes to the datom log?",
+			"What fsync strategy should the datom append loop use under crash recovery?",
+			"Should the system enforce strict mode on Neo4j GDS plugin availability?",
+		},
+	}
+
+	_, injected := o.maybeInjectGate1HeuristicWarning([]string{path}, discovery)
+	if injected {
+		t.Fatalf("expected heuristic NOT to trigger (3 substantive questions), got injected=true")
+	}
+}
+
+func TestMaybeInjectGate1HeuristicWarning_LongQuestionWithProceduralWordIsSubstantive(t *testing.T) {
+	// "schema" is a procedural marker, but a long question mentioning it in
+	// passing should still count as substantive.
+	long := "Should the Neo4j schema enforce uniqueness on datom IDs across restarts and across concurrent write sessions, or should the application layer handle deduplication before committing?"
+	if len(long) < 120 {
+		t.Fatalf("test setup error: long question must be >= 120 chars, got %d", len(long))
+	}
+	if !isSubstantiveQuestion(long) {
+		t.Errorf("long question with 'schema' in passing should be substantive, got false")
+	}
+	if isSubstantiveQuestion("Should I use the default schema path?") {
+		t.Errorf("short question with 'schema' should be procedural, got true")
+	}
+}
+
+func TestMaybeInjectGate1HeuristicWarning_AlreadyInjectedWarningIsIgnoredOnRecheck(t *testing.T) {
+	// If the helper re-runs on an output that already has a synthetic warning,
+	// the warning should not be counted as a substantive question — otherwise
+	// a double-injection would flip the heuristic off incorrectly.
+	o := &Orchestrator{}
+	path := writeTempSourceDoc(t, bigSourceDoc(800))
+
+	discovery := &DiscoveryOutput{
+		SchemaVersion: "1.0",
+		Agent:         "discovery",
+		OpenQuestions: []string{
+			gate1HeuristicWarningPrefix + " previous synthetic warning from an earlier run",
+		},
+	}
+
+	_, injected := o.maybeInjectGate1HeuristicWarning([]string{path}, discovery)
+	if !injected {
+		t.Fatalf("expected heuristic to still trigger on re-check (pre-existing warning should not count), got injected=false")
+	}
+	if len(discovery.OpenQuestions) != 2 {
+		t.Fatalf("expected 2 questions after re-injection, got %d", len(discovery.OpenQuestions))
 	}
 }

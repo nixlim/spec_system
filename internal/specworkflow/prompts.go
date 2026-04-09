@@ -2,6 +2,7 @@ package specworkflow
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -28,6 +29,13 @@ var lensGroupMap = map[string][]string{
 	"consistency": {"CON", "FEA"},
 	"security":    {"SEC", "OPS"},
 	"correctness": {"COR", "CPX"},
+	// Coverage lens — audits whether every top-level topic in the source
+	// documents is addressed somewhere in the spec. Primarily targets
+	// operational/infrastructure content (tech stack, setup, deployment,
+	// build artefacts, external services) that tends to get silently
+	// dropped at the discovery stage. Acts as a safety net after
+	// discovery + drafting prompt guardrails.
+	"coverage": {"COV"},
 }
 
 // reviewerGroupLetter maps a lens group to the suffix letter used in output
@@ -37,6 +45,7 @@ var reviewerGroupLetter = map[string]string{
 	"consistency": "b",
 	"security":    "c",
 	"correctness": "d",
+	"coverage":    "e",
 }
 
 // PromptBuilder constructs system/user prompts for each agent type in the
@@ -63,6 +72,28 @@ func NewPromptBuilder(skills *SkillCache, workspaceDir, featureName string) *Pro
 // projectRoot returns the project root by walking up one level from workspaceDir.
 func (pb *PromptBuilder) projectRoot() string {
 	return filepath.Dir(filepath.Clean(pb.workspaceDir))
+}
+
+// collectCoverageSourceDocs returns the absolute paths of every file in
+// {workspaceDir}/source-docs/ that the Coverage reviewer should audit against.
+// Used by BuildReviewerPrompt when lensGroup == "coverage". Returns an empty
+// slice (not nil) if the directory is absent or empty — the Coverage lens
+// then gracefully skips the source-doc section and still renders the rest
+// of the reviewer prompt.
+func (pb *PromptBuilder) collectCoverageSourceDocs() []string {
+	out := []string{}
+	dir := filepath.Join(pb.workspaceDir, "source-docs")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		out = append(out, filepath.Join(dir, e.Name()))
+	}
+	return out
 }
 
 // outvalidBlock returns the outvalid validate-and-write instruction for a prompt.
@@ -127,6 +158,39 @@ func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string, codePath 
 	b.WriteString("- open_questions (unresolved questions about the software system's requirements)\n\n")
 	b.WriteString("IMPORTANT: Your output must describe the SOFTWARE SYSTEM from the source documents, ")
 	b.WriteString("NOT your own task or activity. Do NOT describe what you did — describe what the system does.\n\n")
+
+	// Operational topic enumeration — explicit guardrail against silently dropping
+	// infrastructure / tech-stack / deployment content when the source material
+	// contains it. Without this block, agents tend to focus on functional scope
+	// and leave Docker configs, setup commands, and deployment guarantees out of
+	// the discovery output entirely, which then propagates into a spec with no
+	// operational sections.
+	b.WriteString("## Operational Topics — Coverage Requirement\n\n")
+	b.WriteString("Your analysis MUST cover operational topics whenever they appear in the source material:\n\n")
+	b.WriteString("- **Runtime / language**: Go, Node, Python, JVM, etc., and version pins if specified\n")
+	b.WriteString("- **Containerisation**: Docker, Docker Compose, Kubernetes, Nomad, Podman\n")
+	b.WriteString("- **External services**: databases, vector stores, message queues, cache layers, third-party APIs\n")
+	b.WriteString("- **Bootstrap / setup commands**: anything the user must run to get from a clean checkout to a working system (e.g. `docker compose up`, `make migrate`, `cortex up`)\n")
+	b.WriteString("- **Deployment environments**: target platforms, online vs offline requirements, resource limits\n")
+	b.WriteString("- **Build artefacts**: binaries, container images, bundles, release naming conventions\n")
+	b.WriteString("- **Monitoring / observability dependencies**: log sinks, metrics backends, tracing collectors\n\n")
+	b.WriteString("These topics belong in `integration_points`, `constraints`, or `open_questions` as appropriate. ")
+	b.WriteString("Never silently drop them. If the source material mentions a specific tech (e.g. \"Neo4j with the GDS plugin\") ")
+	b.WriteString("you MUST include that fact in `constraints` or `integration_points` — it is not optional context.\n\n")
+
+	// Reflective sanity check — if the agent finishes with zero substantive
+	// questions against a large corpus, that is almost certainly wrong. This
+	// directive gives the model a self-audit step before emission.
+	b.WriteString("## Sanity Check Before Emission\n\n")
+	b.WriteString("Before you emit your output, perform this check: if the source material is substantial ")
+	b.WriteString("(roughly more than 500 total lines across all source documents) and you produced fewer than ")
+	b.WriteString("3 substantive `open_questions`, revisit your analysis. You are almost certainly missing ")
+	b.WriteString("something a human reviewer would want to confirm. Substantive questions address feature scope, ")
+	b.WriteString("data model, behaviour under failure, infrastructure choices, or deployment assumptions — ")
+	b.WriteString("they are NOT procedural questions about the workflow itself (schema paths, output formats, ")
+	b.WriteString("which files to read, etc.). If after revisiting you still have fewer than 3 substantive ")
+	b.WriteString("questions, include an explicit statement in `assumptions` saying that you verified the source ")
+	b.WriteString("material is simple enough not to warrant more questions.\n\n")
 
 	// Feature focus — when the user specifies a title/description, the discovery
 	// should focus on that specific feature, not the entire system.
@@ -314,9 +378,28 @@ func (pb *PromptBuilder) BuildDrafterPrompt(confirmedReqsPath string, userAnswer
 
 	// System preamble.
 	b.WriteString("# Drafter Agent\n\n")
-	b.WriteString("You are the Drafter agent in the adversarial spec review workflow.\n")
+	b.WriteString("You are the Drafter agent in the adversarial spec review workflow.\n\n")
 	b.WriteString("Your task is to produce a complete specification document and holdout ")
-	b.WriteString("test dataset from the confirmed requirements.\n\n")
+	b.WriteString("test dataset. You have TWO AUTHORITATIVE INPUTS:\n\n")
+	b.WriteString("1. **The confirmed requirements JSON** (primary source of truth for functional scope: ")
+	b.WriteString("user stories, acceptance scenarios, functional requirements, BDD scenarios).\n")
+	b.WriteString("2. **The source documents** listed in the Context Documents section below (AUTHORITATIVE ")
+	b.WriteString("for operational/infrastructure details: tech stack, prerequisites, development setup, ")
+	b.WriteString("deployment, build commands, external services, environment variables, version pins).\n\n")
+	b.WriteString("## Coverage Mandate\n\n")
+	b.WriteString("You MUST populate EVERY section of the spec template, including the operational sections ")
+	b.WriteString("(Prerequisites, Development Setup, Tech Stack, Deployment / Runtime). For those operational ")
+	b.WriteString("sections the source documents are your primary reference — read them carefully and transcribe ")
+	b.WriteString("exact commands, version pins, environment variables, service endpoints, and port mappings ")
+	b.WriteString("verbatim. Do not paraphrase or invent.\n\n")
+	b.WriteString("If a topic appears in the source documents but is NOT mentioned in the confirmed requirements ")
+	b.WriteString("JSON, you MUST still include it in the appropriate section of the spec AND emit an ")
+	b.WriteString("`AMB-W-NNN` ambiguity warning describing the gap, so the user can confirm or correct it at ")
+	b.WriteString("gate 2. Never silently drop source-document content.\n\n")
+	b.WriteString("If a section of the spec template has no applicable content for this feature (e.g. a pure ")
+	b.WriteString("algorithm library with no infrastructure), write `[None applicable for this feature]` in ")
+	b.WriteString("that section rather than deleting it — an explicit \"not applicable\" is a legitimate answer; ")
+	b.WriteString("silent omission is not.\n\n")
 
 	// Embed templates.
 	b.WriteString("## Spec Template\n\n")
@@ -430,6 +513,40 @@ func (pb *PromptBuilder) BuildReviewerPrompt(lensGroup string, round int, specPa
 	// Spec reference.
 	b.WriteString("## Specification Under Review\n\n")
 	fmt.Fprintf(&b, "Read and review the specification at: %s\n\n", specPath)
+
+	// Coverage lens — give the reviewer the source documents explicitly so it
+	// can perform a topic-by-topic coverage audit. The other lenses do not
+	// need the source material because they work against the spec itself.
+	if lensGroup == "coverage" {
+		sourceDocs := pb.collectCoverageSourceDocs()
+		if len(sourceDocs) > 0 {
+			b.WriteString("## Source Documents for Coverage Audit\n\n")
+			b.WriteString("You are the Coverage reviewer. Your job is to verify that every top-level topic ")
+			b.WriteString("that appears in the source documents below is addressed somewhere in the specification ")
+			b.WriteString("under review. Read each source document completely.\n\n")
+			for _, p := range sourceDocs {
+				fmt.Fprintf(&b, "- `%s`\n", p)
+			}
+			b.WriteString("\n### Coverage Audit Procedure\n\n")
+			b.WriteString("1. Read every source document listed above.\n")
+			b.WriteString("2. Enumerate the top-level topics in each (prerequisites, tech stack, setup steps, ")
+			b.WriteString("deployment, build, external services, environment variables, version pins, ")
+			b.WriteString("infrastructure commands, monitoring/observability, offline/online behaviour).\n")
+			b.WriteString("3. For each topic, verify it is addressed somewhere in the spec. Check the dedicated ")
+			b.WriteString("operational sections first (Prerequisites, Development Setup, Tech Stack, ")
+			b.WriteString("Deployment / Runtime), then the broader Integration Boundaries and Functional ")
+			b.WriteString("Requirements sections.\n")
+			b.WriteString("4. Emit one `COV` finding per topic that is mentioned in the source but NOT ")
+			b.WriteString("addressed in the spec. Severity: MAJOR for operational topics (setup, deployment, ")
+			b.WriteString("infrastructure), MINOR for supplementary content.\n")
+			b.WriteString("5. Pay particular attention to verbatim content: exact commands, version pins, ")
+			b.WriteString("environment variables, port mappings, service endpoints. These must appear in the ")
+			b.WriteString("spec with the same values as the source — flag any paraphrasing or invention as ")
+			b.WriteString("a COV finding.\n")
+			b.WriteString("6. If the source material has no operational content at all (e.g. pure algorithm ")
+			b.WriteString("spec), emit zero COV findings and note that fact in the markdown report.\n\n")
+		}
+	}
 
 	if round > 1 {
 		holdoutPath := filepath.Join(pb.specDir(), fmt.Sprintf("holdouts-round-%d.md", round-1))
@@ -727,6 +844,8 @@ func lensDescription(lens string) string {
 		return "Correctness verification — check logical errors, incorrect assumptions, wrong calculations"
 	case "CPX":
 		return "Complexity analysis — flag over-engineered solutions and unnecessary complexity"
+	case "COV":
+		return "Source-document coverage audit — verify every top-level topic in the source documents is addressed somewhere in the spec, with particular attention to operational content (tech stack, setup, deployment, build artefacts, external services)"
 	default:
 		return "Unknown lens"
 	}

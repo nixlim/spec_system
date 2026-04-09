@@ -108,6 +108,75 @@ Boundary conditions:
 
 ---
 
+## Prerequisites
+
+> Hardware, OS, runtimes, services, and network assumptions a user must have
+> before they can build or run this feature. Pull these directly from the
+> source documents — do not invent. If none of this applies to the feature
+> (e.g. pure algorithm work), write `[None applicable for this feature]` in
+> each subsection rather than omitting them.
+
+- **Hardware / OS**: [e.g. "macOS arm64 or Linux x86_64; 16 GB RAM minimum"]
+- **Required runtimes**: [e.g. "Go 1.22+", "Node 20+", "Python 3.11+"]
+- **Required services**: [e.g. "Docker 24+", "PostgreSQL 15+", "Redis 7+"]
+- **Network assumptions**: [e.g. "outbound HTTPS to api.example.com", "offline operation supported"]
+- **Accounts / credentials**: [e.g. "no external accounts required", "AWS credentials with S3 read"]
+
+---
+
+## Development Setup
+
+> Exact commands to go from a clean checkout to a working local system.
+> Transcribe verbatim from source documents where possible. Numbered steps,
+> each with the literal command. If no setup applies, write
+> `[None applicable for this feature]`.
+
+1. `[clone / cd]`
+2. `[dependency install, e.g. go mod download]`
+3. `[service start, e.g. docker compose up -d]`
+4. `[bootstrap / migration, e.g. make migrate]`
+5. `[smoke check, e.g. ./bin/feature status]`
+
+**Expected first-run behaviour**: [what the user should see when setup succeeds]
+
+**Common first-run failures**: [known issues from source docs, e.g. "if docker
+pull fails, check that the Neo4j image is available"]
+
+---
+
+## Tech Stack
+
+> Languages, frameworks, datastores, and external services the feature
+> depends on, with version pins where the source material specifies them.
+> If a topic is not applicable, write `[None]` for that row rather than
+> deleting it.
+
+| Category | Choice | Version / Pin | Source |
+|----------|--------|---------------|--------|
+| Language | [e.g. Go] | [e.g. 1.22] | [source doc file/line] |
+| Runtime / container | [e.g. Docker Compose] | [e.g. 2.x] | [source] |
+| Datastore(s) | [e.g. Neo4j, Weaviate] | [versions] | [source] |
+| External APIs | [e.g. Ollama] | [endpoint] | [source] |
+| Build tool | [e.g. Makefile / go build] | — | [source] |
+| Test framework | [e.g. go test, testify] | — | [source] |
+
+---
+
+## Deployment / Runtime
+
+> How this feature runs in its target environment. Offline vs online
+> requirements, resource limits, startup/shutdown semantics, and operational
+> commands. If not applicable, write `[None applicable for this feature]`.
+
+- **Target environment**: [e.g. "local workstation only", "single-node VPS", "Kubernetes cluster"]
+- **Online / offline**: [e.g. "fully offline-capable once models are pre-cached", "requires outbound HTTPS"]
+- **Resource limits**: [e.g. "< 4 GB RAM steady-state", "< 1 CPU core idle"]
+- **Start / stop commands**: [e.g. `cortex up`, `cortex down`, `cortex status`]
+- **Health check**: [e.g. `cortex doctor` verifies all dependencies are reachable]
+- **Logs / telemetry**: [where the feature writes logs and metrics]
+
+---
+
 ## Integration Boundaries
 
 ### [External System Name]
