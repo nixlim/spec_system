@@ -939,26 +939,40 @@
   // modes reported by /api/workflow/resume-options. onPick is invoked with
   // the chosen mode string ("skip_to_gate" / "replay_merge" / "restart_fresh")
   // once the user clicks a button. If the user cancels, onPick is not called.
+  //
+  // Styling uses the same CSS custom properties as the rest of the app, so
+  // the modal tracks whichever theme is active (see :root and
+  // [data-theme="light"] in style.css).
   function showResumeChoiceModal(featureName, opts, onPick) {
     // Backdrop covers the viewport and closes the modal on click.
     var backdrop = el("div", {
       style: "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.55);z-index:10000;display:flex;align-items:center;justify-content:center;"
     });
     var box = el("div", {
-      style: "background:#1e1e24;color:#e5e7eb;padding:24px;border-radius:10px;max-width:560px;width:92%;box-shadow:0 20px 60px rgba(0,0,0,.5);border:1px solid #343448;font-family:inherit;"
+      style: [
+        "background:var(--color-surface)",
+        "color:var(--color-text)",
+        "padding:24px",
+        "border-radius:var(--radius-lg)",
+        "max-width:560px",
+        "width:92%",
+        "box-shadow:var(--shadow-lg)",
+        "border:1px solid var(--color-border)",
+        "font-family:var(--font-ui)"
+      ].join(";")
     });
     box.addEventListener("click", function (ev) { ev.stopPropagation(); });
     backdrop.addEventListener("click", function () { document.body.removeChild(backdrop); });
 
     box.appendChild(el("h3", {
       textContent: "Resume " + featureName,
-      style: "margin:0 0 8px;font-size:18px;"
+      style: "margin:0 0 8px;font-size:18px;color:var(--color-text-strong);"
     }));
     var inferred = (opts && opts.inferred_stage) || "?";
     var persisted = (opts && opts.persisted_state) || "?";
     box.appendChild(el("div", {
       textContent: "Workflow state: " + persisted + "  —  Inferred stage: " + inferred,
-      style: "color:#9ca3af;font-size:13px;margin-bottom:14px;"
+      style: "color:var(--color-text-muted);font-size:13px;margin-bottom:14px;"
     }));
 
     // Locate the inferred stage entry and build one button per available mode.
@@ -974,7 +988,7 @@
     if (!stageOpt || !stageOpt.available_modes || stageOpt.available_modes.length === 0) {
       box.appendChild(el("div", {
         textContent: "No resume modes available — the workflow may be empty. Try Restart instead.",
-        style: "color:#fca5a5;margin-bottom:14px;"
+        style: "color:var(--color-danger);margin-bottom:14px;"
       }));
     } else {
       // Preview summary of what's on disk.
@@ -983,7 +997,7 @@
         var summary = Object.keys(p).map(function (k) { return k + "=" + p[k]; }).join(", ");
         box.appendChild(el("div", {
           textContent: "Existing canonical output: " + summary,
-          style: "color:#93c5fd;font-size:12px;margin-bottom:14px;font-family:monospace;"
+          style: "color:var(--color-primary);font-size:12px;margin-bottom:14px;font-family:var(--font-mono);"
         }));
       }
 
@@ -1011,7 +1025,16 @@
         if (stageOpt.available_modes.indexOf(mode) < 0) return;
         var meta = modeDescriptions[mode];
         var row = el("div", {
-          style: "display:flex;gap:12px;align-items:flex-start;padding:10px;margin-bottom:8px;background:#25252e;border-radius:6px;border:1px solid #343448;"
+          style: [
+            "display:flex",
+            "gap:12px",
+            "align-items:flex-start",
+            "padding:10px",
+            "margin-bottom:8px",
+            "background:var(--color-surface-2)",
+            "border-radius:var(--radius)",
+            "border:1px solid var(--color-border)"
+          ].join(";")
         });
         var btn = el("button", {
           className: "btn " + meta.className + " btn-sm",
@@ -1025,7 +1048,7 @@
         row.appendChild(btn);
         row.appendChild(el("div", {
           textContent: meta.desc,
-          style: "color:#d1d5db;font-size:13px;"
+          style: "color:var(--color-text);font-size:13px;"
         }));
         box.appendChild(row);
       });
@@ -1034,14 +1057,15 @@
       if (opts.default_mode) {
         var hint = el("div", {
           textContent: "Recommended: " + opts.default_mode,
-          style: "color:#9ca3af;font-size:12px;margin-top:4px;"
+          style: "color:var(--color-text-muted);font-size:12px;margin-top:4px;"
         });
         box.appendChild(hint);
       }
     }
 
     var cancelRow = el("div", { style: "text-align:right;margin-top:14px;" });
-    var cancelBtn = el("button", { className: "btn btn-secondary btn-sm", textContent: "Cancel" });
+    // Use bare .btn — the neutral selector at style.css:832 themes it.
+    var cancelBtn = el("button", { className: "btn btn-sm", textContent: "Cancel" });
     cancelBtn.addEventListener("click", function () { document.body.removeChild(backdrop); });
     cancelRow.appendChild(cancelBtn);
     box.appendChild(cancelRow);
