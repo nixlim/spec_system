@@ -1536,6 +1536,9 @@ func runReplayForStage(stageOpt specworkflow.StageResumeOptions, manager *Workfl
 		return specworkflow.ReplayDraftingCombine(replayRunner, specDir, version, timeout)
 	case specworkflow.StateDiscovery.String():
 		return specworkflow.ReplayDiscoveryMerge(replayRunner, specDir, round, timeout)
+	case specworkflow.StateReviewing.String():
+		// Review merge is mechanical dedup, no runner needed.
+		return specworkflow.ReplayReviewMerge(specDir, round)
 	default:
 		return "", fmt.Errorf("replay_merge is not implemented for stage %s", stageOpt.Stage)
 	}

@@ -107,9 +107,11 @@ func ProbeResumeOptions(workspaceDir, featureName string, state *WorkflowStateJS
 	// stage until we hit the first one that is not yet complete. The final
 	// stage we report is the inferred "resume from here" stage.
 	//
-	// For this first iteration we surface DRAFTING and DISCOVERY — these are
-	// the dual-provider stages where replay_merge makes sense. Other stages
-	// (REVIEWING, REVISING, JUDGING, TASKIFY) will be added in a follow-up.
+	// Walk order reflects the orchestrator's state machine:
+	//   DISCOVERY → DRAFTING → REVIEWING → REVISING → JUDGING → TASKIFY
+	// A stage is probed only when the previous stage has a valid canonical
+	// output. We stop extending the chain as soon as the current stage has
+	// NO artefacts at all — that's the natural resume point.
 
 	// DISCOVERY stage probe.
 	discoveryOpts := probeDiscoveryResume(specDir, round)
@@ -117,11 +119,52 @@ func ProbeResumeOptions(workspaceDir, featureName string, state *WorkflowStateJS
 		opts.Stages = append(opts.Stages, *discoveryOpts)
 	}
 
-	// DRAFTING stage probe. Only reported when discovery is complete.
+	// DRAFTING stage probe. Only reported when discovery has a canonical.
+	var draftingOpts *StageResumeOptions
 	if discoveryOpts != nil && discoveryOpts.HasCanonical {
-		draftingOpts := probeDraftingResume(specDir, round)
+		draftingOpts = probeDraftingResume(specDir, round)
 		if draftingOpts != nil {
 			opts.Stages = append(opts.Stages, *draftingOpts)
+		}
+	}
+
+	// REVIEWING stage probe. Only reported when drafting has a canonical.
+	var reviewingOpts *StageResumeOptions
+	if draftingOpts != nil && draftingOpts.HasCanonical {
+		reviewingOpts = probeReviewingResume(specDir, round)
+		if reviewingOpts != nil {
+			opts.Stages = append(opts.Stages, *reviewingOpts)
+		}
+	}
+
+	// REVISING stage probe. Only reported when reviewing has a canonical
+	// (merged-findings-round-N.json exists).
+	var revisingOpts *StageResumeOptions
+	if reviewingOpts != nil && reviewingOpts.HasCanonical {
+		revisingOpts = probeRevisingResume(specDir, round)
+		if revisingOpts != nil {
+			opts.Stages = append(opts.Stages, *revisingOpts)
+		}
+	}
+
+	// JUDGING stage probe. Only reported when revising has a canonical.
+	var judgingOpts *StageResumeOptions
+	if revisingOpts != nil && revisingOpts.HasCanonical {
+		judgingOpts = probeJudgingResume(specDir, round)
+		if judgingOpts != nil {
+			opts.Stages = append(opts.Stages, *judgingOpts)
+		}
+	}
+
+	// TASKIFY stage probe. Task graph lives outside the spec dir, under
+	// the workspace's .tasks directory. Only reported once the main spec
+	// workflow has reached HUMAN_GATE_FINAL / finalisation, which we
+	// approximate by "drafter canonical exists" — taskify can only run
+	// once the spec has been drafted.
+	if draftingOpts != nil && draftingOpts.HasCanonical {
+		taskifyOpts := probeTaskifyResume(workspaceDir, featureName)
+		if taskifyOpts != nil {
+			opts.Stages = append(opts.Stages, *taskifyOpts)
 		}
 	}
 
@@ -275,6 +318,185 @@ func probeDraftingResume(specDir string, round int) *StageResumeOptions {
 	if !opts.HasCanonical && !opts.HasClaude && !opts.HasCodex {
 		return nil
 	}
+	return opts
+}
+
+// reviewingPreview is a lightweight summary of the reviewing stage for the UI.
+type reviewingPreview struct {
+	ReviewerFileCount int `json:"reviewer_file_count"`
+	MergedFindings    int `json:"merged_findings,omitempty"`
+}
+
+// probeReviewingResume inspects the spec directory for reviewer artefacts at
+// the given round. The "canonical" output for reviewing is the merged
+// findings file (merged-findings-round-N.json); the "per-provider" outputs
+// are the individual review-{a,b,c,d}-round-N.json files.
+//
+// Modes offered:
+//   - restart_fresh: always.
+//   - replay_merge:  when at least 2 reviewer outputs exist on disk (so the
+//     dedup merge has something to work with). Runs ReplayReviewMerge.
+//   - skip_to_gate:  when the merged-findings file already exists. Advances
+//     past reviewing into REVISING (the next active state — not a human
+//     gate, but we reuse the NextGate field for "what to transition to").
+func probeReviewingResume(specDir string, round int) *StageResumeOptions {
+	opts := &StageResumeOptions{
+		Stage:          StateReviewing.String(),
+		NextGate:       StateRevising.String(),
+		AvailableModes: []ResumeMode{ResumeModeRestartFresh},
+	}
+
+	// Count reviewer output files for this round.
+	reviewerCount := 0
+	for _, letter := range []string{"a", "b", "c", "d"} {
+		p := filepath.Join(specDir, fmt.Sprintf("review-%s-round-%d.json", letter, round))
+		if _, err := os.Stat(p); err == nil {
+			reviewerCount++
+		}
+	}
+
+	// Canonical: merged findings file.
+	mergedPath := filepath.Join(specDir, fmt.Sprintf("merged-findings-round-%d.json", round))
+	var mergedFindingsCount int
+	if raw, err := os.ReadFile(mergedPath); err == nil {
+		// Don't require a specific type; just that it parses as JSON.
+		var probe map[string]interface{}
+		if json.Unmarshal(raw, &probe) == nil {
+			opts.HasCanonical = true
+			if total, ok := probe["total_after_dedup"].(float64); ok {
+				mergedFindingsCount = int(total)
+			}
+			opts.AvailableModes = insertMode(opts.AvailableModes, ResumeModeSkipToGate)
+		}
+	}
+
+	if reviewerCount >= 2 {
+		opts.AvailableModes = insertMode(opts.AvailableModes, ResumeModeReplayMerge)
+	}
+
+	if reviewerCount == 0 && !opts.HasCanonical {
+		return nil
+	}
+
+	opts.CanonicalPreview = &reviewingPreview{
+		ReviewerFileCount: reviewerCount,
+		MergedFindings:    mergedFindingsCount,
+	}
+	return opts
+}
+
+// revisingPreview is a lightweight summary of the revising stage for the UI.
+type revisingPreview struct {
+	HasRevisionOutput bool `json:"has_revision_output"`
+}
+
+// probeRevisingResume inspects the spec directory for revision artefacts at
+// the given round. REVISING is a single-agent stage (no dual-provider, no
+// merge), so the only modes offered are skip_to_gate (advances to JUDGING)
+// and restart_fresh. Returns nil when no revision output exists.
+func probeRevisingResume(specDir string, round int) *StageResumeOptions {
+	revisionPath := filepath.Join(specDir, fmt.Sprintf("revision-round-%d.json", round))
+	if raw, err := os.ReadFile(revisionPath); err == nil {
+		var probe map[string]interface{}
+		if json.Unmarshal(raw, &probe) == nil {
+			return &StageResumeOptions{
+				Stage:          StateRevising.String(),
+				NextGate:       StateJudging.String(),
+				AvailableModes: []ResumeMode{ResumeModeSkipToGate, ResumeModeRestartFresh},
+				HasCanonical:   true,
+				CanonicalPreview: &revisingPreview{
+					HasRevisionOutput: true,
+				},
+			}
+		}
+	}
+	return nil
+}
+
+// judgingPreview is a lightweight summary of the judging stage for the UI.
+type judgingPreview struct {
+	Verdict string `json:"verdict,omitempty"`
+}
+
+// probeJudgingResume inspects the spec directory for judge artefacts at the
+// given round. The judge produces a verdict that the orchestrator uses to
+// decide the next state (next-round reviewing, HUMAN_GATE_FINAL, etc.), so
+// skip_to_gate is intentionally NOT offered here — the orchestrator must
+// re-evaluate the verdict to pick the correct next state. Only restart_fresh
+// is meaningful. Returns nil when no judge output exists.
+func probeJudgingResume(specDir string, round int) *StageResumeOptions {
+	judgePath := filepath.Join(specDir, fmt.Sprintf("judge-round-%d.json", round))
+	if raw, err := os.ReadFile(judgePath); err == nil {
+		var probe map[string]interface{}
+		if json.Unmarshal(raw, &probe) == nil {
+			verdict, _ := probe["verdict"].(string)
+			return &StageResumeOptions{
+				Stage:          StateJudging.String(),
+				AvailableModes: []ResumeMode{ResumeModeRestartFresh},
+				HasCanonical:   true,
+				CanonicalPreview: &judgingPreview{
+					Verdict: verdict,
+				},
+			}
+		}
+	}
+	return nil
+}
+
+// taskifyPreview is a lightweight summary of the taskify stage for the UI.
+type taskifyPreview struct {
+	TaskCount int `json:"task_count,omitempty"`
+}
+
+// probeTaskifyResume inspects the workspace .tasks directory for a task graph
+// file for the given feature. The taskify output path is
+// {workspaceDir}/.tasks/{featureName}.task.json — it lives OUTSIDE the spec
+// directory, unlike every other stage artefact.
+//
+// Modes offered:
+//   - restart_fresh: always (when at least the file exists).
+//   - skip_to_gate:  when the task graph parses and has at least one task.
+//     Advances past taskify into TASK_HUMAN_GATE.
+//
+// Returns nil when no task graph file exists.
+func probeTaskifyResume(workspaceDir, featureName string) *StageResumeOptions {
+	taskGraphPath := filepath.Join(workspaceDir, ".tasks", featureName+".task.json")
+	raw, err := os.ReadFile(taskGraphPath)
+	if err != nil {
+		return nil
+	}
+
+	var probe map[string]interface{}
+	if json.Unmarshal(raw, &probe) != nil {
+		// File exists but is unparseable — still offer restart_fresh, mark
+		// canonical as absent.
+		return &StageResumeOptions{
+			Stage:          StateTaskify.String(),
+			NextGate:       StateTaskHumanGate.String(),
+			AvailableModes: []ResumeMode{ResumeModeRestartFresh},
+		}
+	}
+
+	taskCount := 0
+	if tasks, ok := probe["tasks"].([]interface{}); ok {
+		taskCount = len(tasks)
+	}
+
+	opts := &StageResumeOptions{
+		Stage:          StateTaskify.String(),
+		NextGate:       StateTaskHumanGate.String(),
+		AvailableModes: []ResumeMode{ResumeModeRestartFresh},
+		HasCanonical:   true,
+		CanonicalPreview: &taskifyPreview{
+			TaskCount: taskCount,
+		},
+	}
+
+	// Only offer skip_to_gate when the graph is non-empty.
+	if taskCount > 0 {
+		opts.AvailableModes = insertMode(opts.AvailableModes, ResumeModeSkipToGate)
+	}
+
 	return opts
 }
 
