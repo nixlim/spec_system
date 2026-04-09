@@ -222,6 +222,25 @@ func (r *CodexRunner) Run(prompt string, outputPath string, timeoutSeconds int) 
 	}
 }
 
+// CloneForAgent returns a shallow copy of this CodexRunner with the Role
+// field set to agentName. This satisfies the AgentTagger interface so
+// taggedRunner() produces per-agent clones; without it, the process tracker
+// would record codex PIDs with the base role (e.g. "drafter" rather than
+// "drafter-codex"), making the Running Agents tab ambiguous when claude and
+// codex run in parallel.
+func (r *CodexRunner) CloneForAgent(agentName string) AgentRunner {
+	return &CodexRunner{
+		Command:      r.Command,
+		Model:        r.Model,
+		Ctx:          r.Ctx,
+		WorkspaceDir: r.WorkspaceDir,
+		SchemaBytes:  r.SchemaBytes,
+		Tracker:      r.Tracker,
+		Feature:      r.Feature,
+		Role:         agentName,
+	}
+}
+
 // DefaultCodexRunner returns a CodexRunner configured with standard defaults.
 func DefaultCodexRunner(model string, workspaceDir string, schemaBytes []byte) *CodexRunner {
 	return &CodexRunner{
