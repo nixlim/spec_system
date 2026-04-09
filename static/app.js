@@ -1594,20 +1594,23 @@
   }
 
   function collectGate2FormState(panel) {
-    var state = {};
-    // Action dropdowns (by data-idx)
+    // State is keyed by the stable AMB-W-NNN identifier carried in
+    // data-amb-id. Previously this used the ordinal data-idx, which caused
+    // stale drafts from an earlier drafter round to bleed into a new round
+    // whose warnings had different IDs at the same ordinal positions.
+    var state = { schema: "amb-id-v1" };
     var actions = {};
     $$(".amb-action", panel).forEach(function (sel) {
-      actions[sel.dataset.idx] = sel.value;
+      var id = sel.dataset.ambId;
+      if (id) actions[id] = sel.value;
     });
     state.actions = actions;
-    // Answer inputs (by data-idx)
     var answers = {};
     $$(".amb-answer", panel).forEach(function (input) {
-      answers[input.dataset.idx] = input.value;
+      var id = input.dataset.ambId;
+      if (id) answers[id] = input.value;
     });
     state.answers = answers;
-    // Comment
     var commentEl = $("#gate2-comment");
     state.comment = commentEl ? commentEl.value : "";
     return state;
@@ -1615,31 +1618,37 @@
 
   function restoreGate2FormState(panel, saved) {
     if (!saved) return;
-    // Restore action dropdowns
+    // Only restore state saved by the current schema. Older state keyed by
+    // ordinal idx (pre amb-id-v1) is silently dropped: it cannot be safely
+    // mapped onto a new set of ambiguity warnings because the IDs may have
+    // changed across drafter re-runs.
+    if (saved.schema !== "amb-id-v1") return;
+
     if (saved.actions) {
       $$(".amb-action", panel).forEach(function (sel) {
-        var val = saved.actions[sel.dataset.idx];
+        var id = sel.dataset.ambId;
+        if (!id) return;
+        var val = saved.actions[id];
         if (val) sel.value = val;
       });
     }
-    // Restore answer inputs and show/hide answer rows based on action
     if (saved.answers || saved.actions) {
       $$(".amb-answer", panel).forEach(function (textarea) {
-        var idx = textarea.dataset.idx;
-        var answerRow = panel.querySelector(".amb-answer-row[data-idx='" + idx + "']");
-        var sel = $(".amb-action[data-idx='" + idx + "']", panel);
+        var id = textarea.dataset.ambId;
+        if (!id) return;
+        var answerRow = panel.querySelector(".amb-answer-row[data-amb-id='" + id + "']");
+        var sel = panel.querySelector(".amb-action[data-amb-id='" + id + "']");
         var isAnswer = sel && sel.value === "answer";
         if (isAnswer && !gate2AnswerDisabled) {
           if (answerRow) answerRow.style.display = "";
           textarea.disabled = false;
         }
         if (saved.answers) {
-          var val = saved.answers[idx];
+          var val = saved.answers[id];
           if (val) textarea.value = val;
         }
       });
     }
-    // Restore comment
     if (saved.comment) {
       var commentEl = $("#gate2-comment");
       if (commentEl) commentEl.value = saved.comment;
@@ -4078,22 +4087,28 @@
     content += "<tbody>";
 
     warnings.forEach(function (w, idx) {
-      content += '<tr class="amb-row" data-idx="' + idx + '">' +
+      // data-amb-id carries the stable AMB-W-NNN identifier; auto-save
+      // uses this (not the ordinal idx) so drafts from a previous drafter
+      // round cannot bleed into a new round whose ambiguity IDs have
+      // changed. data-idx is still emitted because the submit handler
+      // uses it to look up the warning object in the warnings array.
+      var ambIdAttr = 'data-amb-id="' + escapeHtml(w.id) + '"';
+      content += '<tr class="amb-row" data-idx="' + idx + '" ' + ambIdAttr + '>' +
         "<td>" + escapeHtml(w.id) + "</td>" +
         "<td>" + escapeHtml(w.section) + "</td>" +
         "<td>" + escapeHtml(w.ambiguity) + "</td>" +
         "<td>" + escapeHtml(w.agent_assumption) + "</td>" +
         "<td>" + escapeHtml(w.question_for_user) + "</td>" +
-        '<td><select class="amb-action" data-idx="' + idx + '">' +
+        '<td><select class="amb-action" data-idx="' + idx + '" ' + ambIdAttr + '>' +
         '<option value="accept">Accept assumption</option>' +
         '<option value="answer"' + (gate2AnswerDisabled ? " disabled" : "") + '>Provide answer</option>' +
         '<option value="defer">Defer</option>' +
         "</select></td>" +
         "</tr>";
       // Answer row — spans all columns, hidden by default
-      content += '<tr class="amb-answer-row" data-idx="' + idx + '" style="display:none;">' +
+      content += '<tr class="amb-answer-row" data-idx="' + idx + '" ' + ambIdAttr + ' style="display:none;">' +
         '<td colspan="6">' +
-        '<textarea class="amb-answer" data-idx="' + idx + '" rows="3" ' +
+        '<textarea class="amb-answer" data-idx="' + idx + '" ' + ambIdAttr + ' rows="3" ' +
         'style="width:100%;font-size:13px;padding:8px;border:1px solid var(--color-border);border-radius:4px;resize:vertical;" ' +
         'placeholder="Your answer..."' + (gate2AnswerDisabled ? " disabled" : "") + '></textarea>' +
         '</td></tr>';
