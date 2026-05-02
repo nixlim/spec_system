@@ -86,6 +86,8 @@ classification — just use it to adapt your behaviour.
 | 0c. Read Code Changes | Yes | Yes | Yes | Yes |
 | 0d. Read Tests | Yes | Yes | Yes | Yes |
 | 1. Spec Compliance | Yes | Yes (adapted) | Skip | Skip |
+| 1.5 Intent Drift Analysis | Yes | Yes | Skip | Skip |
+| 1.6 Implicit Decision Surfacing | Yes | Yes | Skip | Skip |
 | 2. Task Completeness | Yes | Skip | Yes | Skip |
 | 3. Code Quality (6 lenses) | Yes | Yes | Yes | Yes |
 
@@ -230,6 +232,180 @@ compliance assessment covering:
 - Which aspects of the spec are clearly implemented
 - Which aspects are partially implemented or ambiguous
 - Which aspects appear to be missing from the implementation
+
+## Phase 1.5 — Intent Drift Analysis
+
+**Skip this phase entirely if in `tasks-only` or `code-only` mode.**
+
+Each run MUST perform a full re-analysis of the current spec-code state.
+Do NOT rely on prior run results or attempt incremental analysis.
+
+For every code element in the implementation, classify it using the drift
+classification decision tree:
+
+### Drift Classification Decision Tree
+
+For each significant code element (functions, types, middleware, config,
+endpoints) that is not a trivial import or boilerplate:
+
+1. **Does the code element implement functionality that an FR explicitly
+   describes?** YES → Not drift. Record as spec-compliant. NO → Step 2.
+
+2. **Does the code element exist solely to support an explicitly-required
+   feature?** (Helper functions, type definitions, imports, structural code
+   that exist solely to implement a stated FR.) YES → Not drift. It is
+   implementation infrastructure. NO → Step 3.
+
+3. **Does any FR implicitly require this functionality?**
+   - YES and approach is consistent with the FR → Not drift.
+   - YES but approach differs from what the FR describes → **Direction Drift**.
+   - UNCERTAIN → Report as **"Uncertain — possible [Positive/Direction] Drift"**
+     with reasoning documented.
+   - NO → **Positive Drift**.
+
+### Drift Categories
+
+| Category | Definition |
+|----------|-----------|
+| **Positive Drift** | Code that exists but no FR covers it. The agent added functionality nobody asked for. |
+| **Negative Drift** | An FR that has no corresponding implementation. The agent forgot or skipped it. (Also appears as MISSING in Phase 1.) |
+| **Direction Drift** | Code that implements an FR's intent but takes a different approach than the spec describes. (Also appears as INCORRECT in Phase 1.) |
+| **Uncertain** | Classification is genuinely ambiguous. Report with reasoning. |
+
+### Convention Alignment
+
+When a Positive Drift item aligns with a project convention documented in the
+root CLAUDE.md (explicit instruction, not general principle), annotate it:
+- Note: "Aligns with project convention: [reference]"
+- Severity: OBSERVATION (not MAJOR)
+
+Only the root CLAUDE.md counts for convention alignment. Skill-level and
+subdirectory CLAUDE.md files do not qualify.
+
+### Cross-Referencing with Phase 1.6
+
+When a Positive Drift item also involves design choices (e.g., unrequested
+logging that uses a specific library and format), it MUST be cross-referenced
+in Phase 1.6 (Implicit Decisions) and vice versa. The same code element may
+appear in both phases with different lenses. Use `DRIFT-xxx` IDs in Phase 1.5
+and `ID-xxx` IDs in Phase 1.6, with "See also" cross-references.
+
+### Output
+
+Record each drift finding with a unique ID (`DRIFT-001`, `DRIFT-002`, ...):
+- Category (Positive/Negative/Direction/Uncertain)
+- Code location (file:line)
+- Spec reference (FR-xxx or "No FR covers this functionality")
+- Description of the divergence
+- Convention alignment note (if applicable)
+- Severity
+- Cross-reference to Phase 1.6 IDs (if applicable)
+
+Produce a summary table with drift counts by category.
+
+## Phase 1.6 — Implicit Decision Surfacing
+
+**Skip this phase entirely if in `tasks-only` or `code-only` mode.**
+
+Identify places where the implementing agent made design decisions without
+explicit spec guidance. These are not defects — they may be excellent choices —
+but they represent places where the AI exercised judgment that a human should
+be aware of.
+
+### Implicit Decision Category Taxonomy
+
+Each implicit decision MUST be classified into exactly one category:
+
+| Category | Covers |
+|----------|--------|
+| Storage | Database choice, schema design, storage engine, data format |
+| Error Handling | Error format, error codes, retry strategies, fallback behavior |
+| API Design | Endpoint structure, response format, status codes, content types |
+| Naming | Variable names, file names, package structure, conventions |
+| Configuration | Config format, defaults, environment variables, feature flags |
+| Security | Auth approach, input validation strategy, encryption, access control |
+| Logging | Log format, log levels, correlation IDs, observability |
+| Performance | Caching strategy, concurrency model, resource limits, timeouts |
+| Other | Anything not fitting the above categories |
+
+### Volume Control
+
+- Hard ceiling: MUST NOT exceed 10 entries per review.
+- Batch related decisions by category (e.g., multiple storage decisions
+  become one "Storage" entry listing all choices).
+- If more than 10 categories have decisions after batching, merge the
+  categories with the fewest decisions into "Other."
+
+### Convention Alignment Scope
+
+A convention-aligned decision is one where the project's root CLAUDE.md
+contains an explicit instruction that directly covers the decision category
+(e.g., "use zerolog for logging" covers a logging library choice).
+
+- General principles (e.g., "write clean code") do NOT constitute convention
+  alignment.
+- Only the root CLAUDE.md counts — skill-level and subdirectory CLAUDE.md
+  files do not qualify.
+- Convention-aligned decisions are still recorded but at priority P3
+  with note "Aligns with project convention: [reference]".
+- Unanchored decisions use priority P2.
+
+### Beads Issue Persistence
+
+For each implicit decision (or batch of related decisions by category),
+create a beads issue:
+
+1. **Deduplication**: Before creating, search for existing issues:
+   ```bash
+   bd search "Implicit Decision: [category] — [spec-name]"
+   ```
+   - If a matching **open** issue exists → skip creation.
+   - If a matching **closed** issue exists → do NOT re-flag. The closed
+     issue serves as the ratification record.
+
+2. **Creation** (for new decisions only):
+   ```bash
+   bd create --title="Implicit Decision: [category] — [spec-name]-[spec_reference]-L[line]" \
+     --description="[What the spec left unspecified and what the agent chose]" \
+     --type=task --priority=2
+   ```
+   For batched decisions (multiple related choices in one category):
+   ```bash
+   bd create --title="Implicit Decision: [category] — [spec-name]-[multiple refs]" \
+     --description="[List of individual decisions with code locations]" \
+     --type=task --priority=2
+   ```
+   Use `--priority=3` for convention-aligned decisions.
+
+3. **Flag for human review**:
+   ```bash
+   bd human <id>
+   ```
+
+4. **Failure handling**: If `bd create` fails, record in the report as:
+   `[beads: failed — <error reason>]`
+   If `bd` CLI is not installed, note: `[beads: skipped — bd CLI unavailable]`
+   The review MUST complete successfully regardless of beads failures.
+
+### Cross-Referencing with Phase 1.5
+
+When a Positive Drift item (Phase 1.5) also involves design choices, it
+MUST appear in both sections:
+- Phase 1.5: `DRIFT-xxx` with "See also: ID-xxx"
+- Phase 1.6: `ID-xxx` with "See also: DRIFT-xxx"
+
+### Output
+
+Record each implicit decision with a unique ID (`ID-001`, `ID-002`, ...):
+- Category (from taxonomy)
+- Code location (file:line)
+- Spec gap (what the spec left unspecified)
+- Agent choice (what the implementing agent decided)
+- Beads cross-reference (issue ID or failure note)
+- Cross-reference to Phase 1.5 DRIFT IDs (if applicable)
+
+If no implicit decisions are detected, state: "No implicit decisions
+detected — spec was sufficiently precise" and create no beads issues.
 
 ## Phase 2 — Task Completeness Audit
 
@@ -388,6 +564,13 @@ Apply the same overcomplexity lens from the spec review, but against code:
 - **Configuration bloat**: Externalized values that will never change
 - **Test overhead**: Test helpers and utilities more complex than the code
   they test
+- **Unnecessary nominal types**: Check for violations of the Conservative
+  Type Design principle (see `docs/reference/conservative-type-design.md`).
+  Flag user-defined types that wrap built-in types without adding invariants,
+  methods, or domain semantics. Examples: `type StringSlice []string`,
+  `type ConfigMap map[string]string`. Semantic type aliases that carry
+  documentation value (e.g., `type UserID string`) are judgment calls —
+  classify as OBSERVATION, not MAJOR.
 
 **Test**: Delete the abstraction mentally. Does the feature still work?
 If yes, it's unnecessary.

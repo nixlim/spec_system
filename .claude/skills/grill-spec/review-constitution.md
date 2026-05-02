@@ -117,6 +117,7 @@ violated, it becomes a finding.
 | CPX-08 | Feature flags, toggles, and gradual rollout mechanisms must justify their maintenance cost | Feature flag for a feature that will never be toggled off after initial release |
 | CPX-09 | New concepts (types, services, tables, queues) must each solve a distinct stated problem | Creating a dedicated microservice for logic that belongs in an existing module |
 | CPX-10 | Performance optimizations must target measured bottlenecks, not theoretical ones | Adding caching, connection pooling, or async processing without evidence of a performance problem |
+| CPX-11 | Nominal types must carry invariants, methods, or domain semantics beyond the underlying built-in type. See `docs/reference/conservative-type-design.md` for the principle and language-specific examples. | `type StringSlice []string` or `class UserList extends ArrayList<User>` when the wrapper adds no invariants, methods, or domain value — use the built-in type directly |
 
 ## Review Completeness Check
 

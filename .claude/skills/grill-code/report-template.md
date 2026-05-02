@@ -72,6 +72,34 @@ by severity. Be direct.]
 
 ---
 
+## Drift Analysis
+
+<!-- Include this section only when a spec was provided (full-context or spec-only mode).
+     Omit entirely in tasks-only and code-only modes. -->
+
+### Summary
+
+| Category | Count |
+|----------|-------|
+| Positive Drift | N |
+| Negative Drift | N |
+| Direction Drift | N |
+| Uncertain | N |
+
+### Findings
+
+#### [DRIFT-001] [Short title]
+
+- **Category**: [Positive Drift | Negative Drift | Direction Drift | Uncertain — possible [category] Drift]
+- **Code**: `path/to/file.go:line`
+- **Spec reference**: [FR-xxx or "No FR covers this functionality"]
+- **Description**: [What diverged — what the spec says vs what the code does, or what the code adds that the spec doesn't mention]
+- **Convention alignment**: [If applicable: "Aligns with project convention: [reference]" | N/A]
+- **Severity**: [OBSERVATION for convention-aligned positive drift | MAJOR for other drift | as appropriate]
+- **Cross-reference**: [See also: ID-xxx, ID-xxx | N/A]
+
+---
+
 ## Task Audit
 
 <!-- Include this section only when tasks exist (docs/plan/*/tasks.md or .tasks/*.task.json).
@@ -91,6 +119,25 @@ by severity. Be direct.]
 1. [criterion] — VERIFIED at `file:line`
 2. [criterion] — NOT MET: [what's wrong]
 3. [criterion] — NOT MET: [what's missing]
+
+---
+
+## Implicit Decisions
+
+<!-- Include this section only when a spec was provided (full-context or spec-only mode).
+     Omit entirely in tasks-only and code-only modes.
+     If no implicit decisions detected, state: "No implicit decisions detected —
+     spec was sufficiently precise" -->
+
+| ID | Category | Code Location | Spec Gap | Agent Choice | Beads Cross-Reference |
+|----|----------|---------------|----------|--------------|-----------------------|
+| ID-001 | [Storage\|Error Handling\|API Design\|Naming\|Configuration\|Security\|Logging\|Performance\|Other] | `path/to/file.go:line` | [What the spec left unspecified] | [What the implementing agent chose] | [beads-xxx \| beads: failed — <error reason> \| beads: skipped — bd CLI unavailable] |
+| ID-002 | [category] | `path/to/file.go:line` | [spec gap] | [agent choice] | [beads ref] |
+
+### Cross-References
+
+- ID-001 → See also: DRIFT-001
+- DRIFT-001 → See also: ID-001
 
 ---
 

@@ -35,7 +35,53 @@ Before starting, explore the codebase to understand:
 - **GitNexus code graph** — use the GitNexus MCP tools to understand the existing
   codebase structure before planning. See the GitNexus section below.
 
+## Phase Boundary Guardrails (Phases 1–2.5)
+
+Phases 1 through 2.5 MUST NOT contain implementation detail. The following
+are PROHIBITED in these phases:
+
+- Method signatures or function names (`func handleRequest(...)`, `def process_payment()`)
+- SQL, JSON, YAML, or other schema definitions (`CREATE TABLE`, `{"type": "object"}`)
+- Framework-specific annotations (`@Route`, `@Injectable`, `#[derive]`)
+- Internal function or variable names (`buildQuery()`, `userRepo.Save()`)
+- Struct/class/type definitions (`type Config struct{...}`, `class UserDTO`)
+- Specific library references (`zerolog.New()`, `express.Router()`)
+
+### Phrasing Decision Table
+
+Before finalizing each phase (1 through 2.5), self-check output against this
+table. If PROHIBITED phrasings are detected, rewrite using PERMITTED equivalents.
+
+| Phrasing | Verdict | Category |
+|----------|---------|----------|
+| "the system returns a 4xx error" | PERMITTED | Observable outcome |
+| "the system returns HTTP 400 Bad Request" | PERMITTED | Observable status code |
+| "the handler calls http.Error(w, msg, 400)" | PROHIBITED | Implementation mechanism |
+| "the system persists the record" | PERMITTED | Behavioral |
+| "the repository calls db.Exec(INSERT INTO users...)" | PROHIBITED | Implementation detail |
+| "the system retries the operation" | PERMITTED | Behavioral |
+| "the retryMiddleware wraps the handler with exponential backoff" | PROHIBITED | Implementation mechanism |
+| "the system stores the user's preferences" | PERMITTED | Behavioral |
+| "redis.Set(ctx, key, value, ttl)" | PROHIBITED | Implementation detail |
+| "the API responds within 200ms" | PERMITTED | Observable performance |
+| "the goroutine pool limits concurrency to 50" | PROHIBITED | Implementation mechanism |
+| "the system rejects requests exceeding 1MB" | PERMITTED | Observable boundary |
+
+**Rule of thumb**: Observable outcomes are PERMITTED. Implementation mechanisms
+are PROHIBITED. If the phrasing describes what a user or caller would observe,
+it belongs. If it describes what the code does internally, it does not.
+
+**Exemption**: Phase 4 (TDD Plan) and all later phases are EXEMPT from this
+guardrail. Implementation detail is expected and appropriate in those phases.
+
+---
+
 ## Phase 1 — Discovery & Requirements Gathering
+
+**Phase 1 Implementation Detail Guardrail**: MUST NOT include code syntax,
+method names, schema definitions, or framework references. Use only
+problem-domain language: actors, problems, constraints, and integration
+points. Self-check against the phrasing decision table before finalizing.
 
 Ask the user clarifying questions. At minimum, establish:
 
@@ -172,6 +218,13 @@ and pattern by name so the implementing agent can consult it.
 
 ## Phase 2 — User Stories & Acceptance Criteria
 
+**Phase 2 Implementation Detail Guardrail**: MUST NOT include method
+signatures, schema definitions, framework annotations, or internal
+function names. Acceptance scenarios MUST use behavioral language
+("the system returns an error") not implementation language ("the handler
+returns a 400 BadRequest with JSON body"). Self-check against the
+phrasing decision table before finalizing.
+
 For each distinct capability, write a user story:
 
 - Assign a priority (P0 = critical, P1 = high, P2 = medium, P3 = low, P4 = backlog)
@@ -189,7 +242,12 @@ error scenarios, and unusual situations with their expected behaviour.
 
 ## Phase 2.5 — Behavioral Contract & Boundaries
 
-After user stories are written, distill them into three complementary sections:
+After user stories are written, distill them into four complementary sections:
+
+**Phase 2.5 Implementation Detail Guardrail**: Before finalizing this phase,
+self-check all output against the phrasing decision table below. If any
+PROHIBITED phrasings are present, rewrite them using behavioral language
+before presenting the output.
 
 ### Behavioral Contract
 
@@ -201,7 +259,11 @@ statements that serve as a quick-reference behavioral contract:
 - No implementation details — observable behavior only.
 - This is a quick-reference summary, not a replacement for the detailed user stories.
 
-### Explicit Non-Behaviors
+### Explicit Non-Behaviors & Safeguards
+
+Produce a combined section with two subsections:
+
+#### Qualitative Prohibitions
 
 Using the answers from the "Non-behaviors" discovery question, write explicit
 constraints on what the system must NOT do:
@@ -210,6 +272,24 @@ constraints on what the system must NOT do:
 - Include behaviors an AI agent might "helpfully" add beyond scope.
 - Include scope boundaries that need enforcement.
 - Include security/safety boundaries.
+
+#### Machine-Verifiable Constraints
+
+Write concrete, testable constraints organized by category. Adapt the
+categories to the feature type:
+
+- **HTTP APIs**: Error codes/messages (exact HTTP status codes and response
+  bodies for boundary violations), performance bounds (with units and
+  percentiles), scope boundaries.
+- **CLI tools**: Exit codes and stderr messages, output format constraints,
+  memory/disk limits.
+- **File processors**: Format constraints, size limits, encoding requirements.
+- **Libraries**: Return type contracts, exception types, thread-safety
+  guarantees.
+
+Each constraint MUST be specific enough to write an automated test for.
+Do NOT use vague language like "appropriate error" — specify the exact
+code, message, or threshold.
 
 ### Integration Boundaries
 

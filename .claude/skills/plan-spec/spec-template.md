@@ -101,10 +101,45 @@ Boundary conditions:
 
 ---
 
-## Explicit Non-Behaviors
+## Explicit Non-Behaviors & Safeguards
+
+### Qualitative Prohibitions
 
 - The system must not [behavior] because [reason].
 - The system must not [behavior] because [reason].
+- [Include behaviors an AI agent might "helpfully" add beyond scope]
+- [Include scope boundaries that need enforcement]
+- [Include security/safety boundaries]
+
+### Machine-Verifiable Constraints
+
+> Adapt categories to the feature type. HTTP APIs get status codes and error
+> messages. CLI tools get exit codes and output format constraints. File
+> processors get format constraints and size limits. Include only categories
+> relevant to this feature.
+
+**Error Codes / Messages** (for APIs):
+- When [boundary violation], the system MUST return HTTP [status code] with body `[exact error message or format]`.
+
+**CLI Exit Codes** (for CLI tools):
+- When [condition], the tool MUST exit with code [N] and print `[message]` to stderr.
+
+**Performance Bounds**:
+- [Metric] MUST be [operator] [threshold] [unit] at [measurement condition].
+
+**Scope Boundaries**:
+- The system MUST NOT [extend to / accept / process] [boundary] because [reason].
+
+**Data Constraints**:
+- [Field/input] MUST be [constraint with exact values, ranges, or formats].
+
+### Conservative Type Design
+
+> See `docs/reference/conservative-type-design.md` for the full principle and
+> language-specific examples.
+
+Do not introduce a user-defined nominal type unless it carries invariants,
+methods, or domain semantics that the underlying built-in type cannot express.
 
 ---
 
