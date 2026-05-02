@@ -10,3 +10,6 @@ test_dashboard.py
 .dolt/
 *.db
 .beads-credential-key
+/claude_memory_dump/
+/mempalace.yaml
+/entities.json
