@@ -6,7 +6,7 @@
 
 A multi-agent system that produces high-quality software specifications through adversarial review. Specialised AI agents collaborate and compete — discovering requirements, drafting specs, reviewing through multiple lenses, revising, judging convergence, and decomposing into task graphs — while human gates ensure alignment at critical decision points.
 
-The system supports **dual-provider execution** (Claude + Codex in parallel) across discovery, drafting, and review phases, with intelligent merging of outputs. A separate **code review workflow** provides automated code auditing with fix-review loops. A **code documentation workflow** auto-generates and maintains code documentation.
+The system supports **multi-provider execution** (Claude + Codex + OpenCode in parallel) across discovery, drafting, and review phases, with intelligent merging of outputs. OpenCode supports 75+ LLM providers (Gemini, DeepSeek, Groq, local models, etc.) via a single CLI. A separate **code review workflow** provides automated code auditing with fix-review loops. A **code documentation workflow** auto-generates and maintains code documentation.
 
 ## How It Works
 
@@ -16,14 +16,14 @@ The system supports **dual-provider execution** (Claude + Codex in parallel) acr
 %%{init: {"theme": "neutral", "flowchart": {"defaultRenderer": "elk"}}}%%
 flowchart TD
     SRC([Source Documents])
-    DISC[DISCOVERY<br/>Extract actors · scope · constraints · requirements<br/><i>dual-provider: Claude + Codex</i>]
+    DISC[DISCOVERY<br/>Extract actors · scope · constraints · requirements<br/><i>multi-provider: Claude + Codex + OpenCode</i>]
     HG1[/HUMAN GATE 1<br/>Confirm / correct requirements\]
-    DRAFT[DRAFTING<br/>Produce spec + holdout test dataset<br/><i>dual-provider: Claude + Codex</i>]
+    DRAFT[DRAFTING<br/>Produce spec + holdout test dataset<br/><i>multi-provider: Claude + Codex + OpenCode</i>]
     HG2[/HUMAN GATE 2<br/>Resolve ambiguity warnings\]
 
     subgraph ADVLOOP["Adversarial Review Loop · 2–5 rounds"]
         direction TB
-        REV[REVIEWING<br/>4 parallel reviewer agents<br/>8 lenses across 4 groups + optional Codex]
+        REV[REVIEWING<br/>4 parallel reviewer agents<br/>8 lenses across 4 groups + optional Codex + OpenCode]
         REVIS[REVISING<br/>Address findings<br/>Judge block feedback on prior BLOCK]
         JUDG[JUDGING<br/>Convergence check · anti-gaming pre-checks]
     end
@@ -34,7 +34,7 @@ flowchart TD
 
     subgraph TASKLOOP["Task Review Loop · up to 3 rounds"]
         direction TB
-        TR[TASK REVIEW<br/>Dual-provider task graph quality review]
+        TR[TASK REVIEW<br/>Multi-provider task graph quality review]
         TRV[TASK REVISION<br/>Address task findings]
     end
 
@@ -82,7 +82,7 @@ flowchart TD
 
     subgraph CRLOOP["Fix-Review Loop · configurable rounds"]
         direction TB
-        CRREV[CR_REVIEWING<br/>Dual-provider code review]
+        CRREV[CR_REVIEWING<br/>Multi-provider code review]
         CRFIX[CR_FIXING<br/>Automated fix application]
         CRHGF[/CR_HUMAN_GATE_FIXES<br/>Human approval of fixes\]
     end
@@ -110,9 +110,9 @@ A workflow for auto-generating and maintaining code documentation:
 flowchart TD
     CP([Code Path])
     CDINIT[CD_INIT]
-    CDDISC[CD_DISCOVERY<br/>Inventory modules · entry points · existing docs<br/><i>dual-provider: Claude + Codex</i>]
+    CDDISC[CD_DISCOVERY<br/>Inventory modules · entry points · existing docs<br/><i>multi-provider: Claude + Codex + OpenCode</i>]
     CDHGS[/CD_HUMAN_GATE_SCOPE<br/>Confirm / adjust scope\]
-    CDDRAFT[CD_DRAFTING<br/>Generate documentation + architecture diagrams<br/><i>dual-provider: Claude + Codex</i>]
+    CDDRAFT[CD_DRAFTING<br/>Generate documentation + architecture diagrams<br/><i>multi-provider: Claude + Codex + OpenCode</i>]
     CDSAN[CD_SANITISING<br/>Secret scan · redact before human review]
     CDHGD[/CD_HUMAN_GATE_DRAFT<br/>Approve / redraft\]
 
@@ -157,9 +157,9 @@ Supports **full** and **incremental** modes. Incremental mode reads the `.codedo
 | Agent | Role | Lenses |
 |-------|------|--------|
 | Discovery | Extracts requirements from source documents | -- |
-| Discovery Merge | Intelligently merges dual-provider discovery outputs | -- |
+| Discovery Merge | Intelligently merges multi-provider discovery outputs | -- |
 | Drafter | Produces specification and holdout test data | -- |
-| Drafter Combine | Merges dual-provider drafter outputs | -- |
+| Drafter Combine | Merges multi-provider drafter outputs | -- |
 | Reviewer (Clarity) | Ambiguity, Incompleteness | AMB, INC |
 | Reviewer (Consistency) | Consistency, Feasibility | CON, FEA |
 | Reviewer (Security) | Security, Operability | SEC, OPS |
@@ -170,9 +170,9 @@ Supports **full** and **incremental** modes. Incremental mode reads the `.codedo
 | Task Reviewer | Reviews task graph for quality and completeness | -- |
 | Task Reviser | Addresses task review findings | -- |
 | Codedoc Discovery | Inventories modules, entry points, dependencies, existing docs | -- |
-| Codedoc Discovery Merge | Merges dual-provider codedoc discovery outputs | -- |
+| Codedoc Discovery Merge | Merges multi-provider codedoc discovery outputs | -- |
 | Codedoc Drafter | Generates documentation and architecture diagrams | -- |
-| Codedoc Drafter Combine | Merges dual-provider codedoc drafter outputs | -- |
+| Codedoc Drafter Combine | Merges multi-provider codedoc drafter outputs | -- |
 | Codedoc Reviewer (Accuracy) | Accuracy, Currency | ACC, CUR |
 | Codedoc Reviewer (Completeness) | Completeness, Clarity | CMP, CLA |
 | Codedoc Reviewer (Architecture) | Architecture, Structure | ARC, STR |
@@ -224,7 +224,8 @@ The only manual prerequisite is Claude CLI:
 | Dependency | Required | Install |
 |------------|----------|---------|
 | **Claude CLI** | Yes — runs all AI agents | [claude.ai/install.sh](https://claude.ai/install.sh) |
-| **Codex CLI** | No — enables dual-provider mode | [github.com/openai/codex](https://github.com/openai/codex) |
+| **Codex CLI** | No — enables multi-provider mode | [github.com/openai/codex](https://github.com/openai/codex) |
+| **OpenCode CLI** | No — enables 75+ LLM providers | [github.com/anomalyco/opencode](https://github.com/anomalyco/opencode) |
 
 ```bash
 # Verify Claude is installed and authenticated
@@ -349,7 +350,7 @@ max_retries: 2             # Retry attempts per agent on validation failure (def
 # Agent timeouts (seconds)
 # ─────────────────────────────────────────────
 agent_timeout_seconds: 300      # Discovery, drafting, taskify agents (default: 300)
-reviewer_timeout_seconds: 300   # Reviewer agents — Claude and Codex (default: 300)
+reviewer_timeout_seconds: 300   # Reviewer agents — all providers (default: 300)
 holdout_timeout_seconds: 300    # Holdout generation agents (default: 300)
 
 # ─────────────────────────────────────────────
@@ -370,12 +371,25 @@ claude_models:
   task_reviser: ""         # Task reviser agent
 
 # ─────────────────────────────────────────────
-# Dual-provider (Codex CLI) — requires codex on PATH
+# Multi-provider (Codex CLI) — requires codex on PATH
 # ─────────────────────────────────────────────
 enable_codex_reviewers: true    # Parallel Codex reviewers + holdout (default: true)
 enable_codex_discovery: false   # Parallel Codex discovery agent (default: false)
 enable_codex_drafting: false    # Parallel Codex drafting agent (default: false)
 codex_model: "gpt-5.4"         # Model ID passed to the Codex CLI (default: "gpt-5.4")
+
+# ─────────────────────────────────────────────
+# Multi-provider (OpenCode CLI) — requires opencode on PATH
+# ─────────────────────────────────────────────
+enable_opencode_reviewers: false  # Parallel OpenCode reviewers + holdout (default: false)
+enable_opencode_discovery: false  # Parallel OpenCode discovery agent (default: false)
+enable_opencode_drafting: false   # Parallel OpenCode drafting agent (default: false)
+opencode_models:
+  default: ""                     # provider/model string (e.g. "google/gemini-2.5-pro")
+  reviewer: ""                    # Model for reviewer agents
+  holdout: ""                     # Model for holdout generation
+  discovery: ""                   # Model for discovery agent
+  drafter: ""                     # Model for drafting agent
 
 # ─────────────────────────────────────────────
 # Task decomposition
@@ -426,9 +440,9 @@ codedoc:
   docs_output_dir: docs               # Output directory for generated docs (default: docs)
   backup_before_write: true           # Create .bak files before overwriting (default: true)
   drift_warning_threshold: 0.20       # Fraction of changed files that triggers a drift warning (default: 0.20)
-  enable_codex_codedoc_discovery: false  # Dual-provider discovery (default: false)
-  enable_codex_codedoc_drafting: false   # Dual-provider drafting (default: false)
-  enable_codex_reviewers: true           # Dual-provider reviewers (default: true)
+  enable_codex_codedoc_discovery: false  # Multi-provider discovery (default: false)
+  enable_codex_codedoc_drafting: false   # Multi-provider drafting (default: false)
+  enable_codex_reviewers: true           # Multi-provider reviewers (default: true)
   claude_models:
     default: ""
     discovery: ""
@@ -445,7 +459,7 @@ skill_paths:
   grill_spec: "~/.claude/skills/grill-spec"
 ```
 
-Everything else uses defaults. This gets you a single-provider Claude-only workflow with sensible round limits and budgets.
+Everything else uses defaults. This gets you Claude + Codex reviewing with sensible round limits and budgets. Set `enable_codex_reviewers: false` for Claude-only mode.
 
 ---
 
@@ -621,6 +635,7 @@ internal/specworkflow/
   statemachine.go                 State machine with guarded transitions
   claude_runner.go                Claude CLI subprocess execution
   codex_runner.go                 Codex CLI subprocess execution
+  opencode_runner.go              OpenCode CLI subprocess execution (JSONL parsing, 75+ providers)
   beads_client.go                 Beads CLI client (BeadsClientInterface + BeadsClient)
   beads_client_mock.go            Mock Beads client for tests
   issues.go                       Issue tracker with lifecycle transitions + ExportLiveState

@@ -26,13 +26,25 @@ If `claude` is not on your PATH, or authentication has expired, agents will fail
 
 ### Step 2 — Install Codex CLI (optional)
 
-Install this if you want dual-provider mode (Claude + GPT running in parallel). Follow the instructions at [github.com/openai/codex](https://github.com/openai/codex).
+Install this if you want multi-provider mode (Claude + GPT running in parallel). Follow the instructions at [github.com/openai/codex](https://github.com/openai/codex).
 
 ```bash
 codex --version   # Verify
 ```
 
 When detected at startup, the server logs: `[orchestrator] codex CLI detected — dual-provider review enabled`
+
+### Step 2b — Install OpenCode CLI (optional)
+
+Install this if you want to use additional LLM providers (Gemini, DeepSeek, Groq, local models, etc.) alongside Claude and Codex. OpenCode supports 75+ providers via a single CLI. Follow the instructions at [github.com/anomalyco/opencode](https://github.com/anomalyco/opencode).
+
+```bash
+opencode --version   # Verify
+```
+
+When detected at startup, the server logs: `[orchestrator] opencode CLI detected — opencode review enabled`
+
+Configure the model via `opencode_models.default` in `config.yaml` using the `provider/model` format (e.g. `google/gemini-2.5-pro`, `anthropic/claude-sonnet-4-5`).
 
 ### Step 3 — Run the installer
 
@@ -130,6 +142,7 @@ Open `http://localhost:8080` in your browser.
 [server] listening on :8080
 [orchestrator] Beads integration enabled         ← if bd is installed
 [orchestrator] codex CLI detected — dual-provider review enabled  ← if codex installed
+[orchestrator] opencode CLI detected — opencode review enabled    ← if opencode installed
 [server] skills loaded: planSpec="..." grillSpec="..."
 ```
 
@@ -202,7 +215,7 @@ Discovery agents read your source documents and extract actors, scope, constrain
 
 **At Gate 1:**
 - Review the extracted requirements, actors, constraints, and open questions
-- In dual-provider mode, you see per-provider outputs side-by-side with the merged result
+- In multi-provider mode, you see per-provider outputs side-by-side with the merged result
 - Answer open questions the discovery agent raised
 - Correct any misunderstandings using the inline edit fields
 - Add free-text comments for context the agent missed
@@ -221,14 +234,14 @@ After you approve Gate 1, the drafter produces a full specification document and
 
 The system runs multiple review/revise/judge iterations:
 
-- **REVIEWING**: 4 reviewer agents run in parallel (+ Codex reviewers if enabled), each examining the spec through specific lenses
+- **REVIEWING**: 4 reviewer agents run in parallel (+ Codex and/or OpenCode reviewers if enabled), each examining the spec through specific lenses
 - **REVISING**: A reviser agent addresses findings. If the previous judge BLOCKed the revision, the reviser receives the judge's full rationale and must address every flagged issue
 - **JUDGING**: The judge reads the live issue tracker (with current statuses — not a stale snapshot) and renders PASS, REVISE, or BLOCK
 
 ```mermaid
 %%{init: {"theme": "neutral", "flowchart": {"defaultRenderer": "elk"}}}%%
 flowchart LR
-    REV[REVIEWING<br/>4 parallel reviewer agents<br/>8 lenses · + Codex if enabled]
+    REV[REVIEWING<br/>4 parallel reviewer agents<br/>8 lenses · + Codex/OpenCode if enabled]
     REVIS[REVISING<br/>Address findings<br/>Receives judge rationale on BLOCK]
     JUDG{JUDGING<br/>Convergence judge}
     NEXT([Proceed to FINALIZED])
@@ -385,43 +398,46 @@ Multiple workflows can run at the same time on different features:
 
 ---
 
-## Dual-Provider Mode
+## Multi-Provider Mode
 
 ```mermaid
 %%{init: {"theme": "neutral", "flowchart": {"defaultRenderer": "elk"}}}%%
 flowchart TD
     INPUT([Source Documents / Spec])
 
-    subgraph PARALLEL["Parallel Execution (when Codex enabled)"]
+    subgraph PARALLEL["Parallel Execution (when multiple providers enabled)"]
         direction LR
         CLAUDE[Claude Agent]
         CODEX[Codex Agent]
+        OPENCODE[OpenCode Agent]
     end
 
-    MERGE[Merge / Combine Agent<br/>Intelligent synthesis of both outputs]
+    MERGE[Merge / Combine Agent<br/>Intelligent synthesis of all outputs]
     GATE[/Human Gate<br/>Per-provider outputs shown side-by-side\]
     OUT([Merged Output])
 
-    INPUT --> CLAUDE & CODEX
-    CLAUDE & CODEX --> MERGE --> GATE --> OUT
+    INPUT --> CLAUDE & CODEX & OPENCODE
+    CLAUDE & CODEX & OPENCODE --> MERGE --> GATE --> OUT
 
     classDef agent fill:#ffffff,stroke:#000000,color:#000000
     classDef gate fill:#e8e8e8,stroke:#000000,color:#000000,stroke-dasharray:5 3
     classDef terminal fill:#1a1a1a,stroke:#1a1a1a,color:#ffffff
-    class CLAUDE,CODEX,MERGE agent
+    class CLAUDE,CODEX,OPENCODE,MERGE agent
     class GATE gate
     class INPUT,OUT terminal
 ```
 
-When Codex CLI is detected and the relevant config flags are enabled, the system runs Claude and Codex agents in parallel:
+When additional CLI providers are detected and the relevant config flags are enabled, the system runs agents in parallel across up to three providers:
 
-**Discovery** (enable via `enable_codex_discovery: true`): Both providers analyse source documents independently. An intelligent merge agent combines outputs. Gate 1 shows per-provider outputs side-by-side with the merged result.
+**Discovery** (enable via `enable_codex_discovery` / `enable_opencode_discovery`): Multiple providers analyse source documents independently. An intelligent merge agent combines outputs. Gate 1 shows per-provider outputs side-by-side with the merged result.
 
-**Drafting** (enable via `enable_codex_drafting: true`): Both produce independent spec drafts. A combine agent merges them into one cohesive specification.
+**Drafting** (enable via `enable_codex_drafting` / `enable_opencode_drafting`): Multiple providers produce independent spec drafts. A combine agent merges them into one cohesive specification.
 
-**Review** (enable via `enable_codex_reviewers: true`): Four Claude reviewers run in parallel across lens groups; Codex generates holdout review data. Findings from both are merged and deduplicated.
+**Review** (enable via `enable_codex_reviewers` / `enable_opencode_reviewers`): Four Claude reviewers run in parallel across lens groups; Codex and OpenCode each add 4 more reviewers per provider (up to 12 total). Findings from all providers are merged and deduplicated.
 
-**Fallback**: If one provider fails, the system uses single-provider output. If the merge/combine agent fails, a mechanical merge is used. The workflow never blocks on a provider outage.
+**OpenCode providers**: OpenCode supports 75+ LLM providers via the `-m provider/model` flag — Gemini, DeepSeek, Groq, OpenRouter, local models, and more. Configure per-role models via `opencode_models` in `config.yaml`.
+
+**Fallback**: If one provider fails, the system uses the remaining providers' output. If the merge/combine agent fails, a mechanical merge is used. The workflow never blocks on a provider outage.
 
 ---
 
@@ -593,11 +609,22 @@ claude_models:
   task_reviewer: ""
   task_reviser: ""
 
-# Dual-provider (requires codex on PATH)
+# Multi-provider: Codex (requires codex on PATH)
 enable_codex_reviewers: true
 enable_codex_discovery: false
 enable_codex_drafting: false
 codex_model: "gpt-5.4"
+
+# Multi-provider: OpenCode (requires opencode on PATH)
+enable_opencode_reviewers: false
+enable_opencode_discovery: false
+enable_opencode_drafting: false
+opencode_models:
+  default: ""            # provider/model (e.g. "google/gemini-2.5-pro")
+  reviewer: ""
+  holdout: ""
+  discovery: ""
+  drafter: ""
 
 # Task decomposition
 taskify_max_retries: 3
@@ -638,6 +665,11 @@ max_wall_clock_minutes: 180
 enable_codex_reviewers: true
 enable_codex_discovery: true
 enable_codex_drafting: true
+enable_opencode_reviewers: true
+enable_opencode_discovery: true
+enable_opencode_drafting: true
+opencode_models:
+  default: "google/gemini-2.5-pro"
 ```
 
 **Fast iteration (cheaper, fewer rounds):**
@@ -729,6 +761,7 @@ To disable telemetry: `--otel-port 0`
 | Kill button returns 403 | Permission denied (PID owned by another user) | Expected on multi-user hosts; only processes spawned by this server can be killed |
 | Running Agents tab shows stale data after reconnect | Reconnect did not trigger re-fetch | Fixed in latest build; re-fetch fires automatically in `wasReconnect` WS branch |
 | Codex agents not running | Codex CLI not on PATH | Install Codex CLI; server auto-detects on startup |
+| OpenCode agents not running | OpenCode CLI not on PATH or `enable_opencode_reviewers` is false | Install OpenCode CLI and set `enable_opencode_reviewers: true` in config |
 | Task graph validation fails repeatedly | DAG cycles or missing required fields | Check Messages tab for `taskval` errors; manually edit task JSON if needed |
 | JSON validation failures | Agent wrapping JSON in markdown | System auto-extracts JSON; retry with error feedback happens automatically |
 | Discovery re-runs instead of reusing output | Correction loop (Gate 1 corrections) | Expected — correction loops always re-dispatch with human feedback incorporated |
