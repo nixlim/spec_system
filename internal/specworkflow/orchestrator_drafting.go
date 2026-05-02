@@ -364,8 +364,8 @@ func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, con
 	smState.DraftSource = "combined"
 	smState.DraftFailureNotice = ""
 
-	log.Printf("[orchestrator] dual-provider drafting complete: claude=%s, codex=%s, combined=%s",
-		claudeOutPath, codexOutPath, combinedOutPath)
+	log.Printf("[orchestrator] multi-provider drafting complete: %d providers succeeded, combined=%s",
+		len(successfulDrafts), combinedOutPath)
 
 	o.logTransition(StateDrafting, StateHumanGate2)
 	if err := o.sm.Transition(StateHumanGate2); err != nil {

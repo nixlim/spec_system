@@ -948,3 +948,79 @@ func TestDispatch_DualProvider_FailureTolerance(t *testing.T) {
 		t.Errorf("expected %d codex failures, got %d", expectedReviewers, len(result.Failures))
 	}
 }
+
+func TestDispatch_TripleProvider_AllSucceed(t *testing.T) {
+	claudeDir := t.TempDir()
+	codexDir := t.TempDir()
+	opencodeDir := t.TempDir()
+	claudeOutputPaths := makeOutputPaths(claudeDir)
+	codexOutputPaths := makeOutputPaths(codexDir)
+	opencodeOutputPaths := makeOutputPaths(opencodeDir)
+
+	claudeRunner := &mockAgentRunner{
+		handler: func(call mockRunCall) (int, string, float64, int64, error) {
+			lens := lensFromPath(claudeDir, call.OutputPath)
+			if err := os.WriteFile(call.OutputPath, validReviewerOutputJSON(lens), 0644); err != nil {
+				t.Fatalf("failed to write mock output: %v", err)
+			}
+			return 0, "", 0.05, 1000, nil
+		},
+	}
+	codexRunner := &mockAgentRunner{
+		handler: func(call mockRunCall) (int, string, float64, int64, error) {
+			lens := lensFromPath(codexDir, call.OutputPath)
+			if err := os.WriteFile(call.OutputPath, validReviewerOutputJSON(lens), 0644); err != nil {
+				t.Fatalf("failed to write mock output: %v", err)
+			}
+			return 0, "", 0.00, 2000, nil
+		},
+	}
+	opencodeRunner := &mockAgentRunner{
+		handler: func(call mockRunCall) (int, string, float64, int64, error) {
+			lens := lensFromPath(opencodeDir, call.OutputPath)
+			if err := os.WriteFile(call.OutputPath, validReviewerOutputJSON(lens), 0644); err != nil {
+				t.Fatalf("failed to write mock output: %v", err)
+			}
+			return 0, "", 0.03, 1500, nil
+		},
+	}
+
+	config := ReviewDispatchConfig{MaxRetries: 1, TimeoutSeconds: 30}
+	result, err := DispatchReviewers(claudeRunner, codexRunner, SpecReviewerLensGroups(), makePrompts(), claudeOutputPaths, codexOutputPaths, config, noopDelay, nil, opencodeRunner, opencodeOutputPaths)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// 3N reviewers: N claude + N codex + N opencode.
+	expectedTotal := 3 * len(SpecReviewerLensGroups())
+	if len(result.Results) != expectedTotal {
+		t.Errorf("expected %d results, got %d", expectedTotal, len(result.Results))
+	}
+	if len(result.Failures) != 0 {
+		t.Errorf("expected 0 failures, got %d", len(result.Failures))
+	}
+
+	// Verify opencode agent names are present.
+	agentNames := make(map[string]bool)
+	for _, r := range result.Results {
+		agentNames[r.AgentName] = true
+	}
+	for _, lens := range SpecReviewerLensGroups() {
+		opencodeName := "reviewer-" + lens + "-opencode"
+		if !agentNames[opencodeName] {
+			t.Errorf("missing agent %q", opencodeName)
+		}
+	}
+
+	// Verify all three runners were called.
+	expectedCalls := int64(len(SpecReviewerLensGroups()))
+	if claudeRunner.callCount.Load() != expectedCalls {
+		t.Errorf("expected %d claude calls, got %d", expectedCalls, claudeRunner.callCount.Load())
+	}
+	if codexRunner.callCount.Load() != expectedCalls {
+		t.Errorf("expected %d codex calls, got %d", expectedCalls, codexRunner.callCount.Load())
+	}
+	if opencodeRunner.callCount.Load() != expectedCalls {
+		t.Errorf("expected %d opencode calls, got %d", expectedCalls, opencodeRunner.callCount.Load())
+	}
+}

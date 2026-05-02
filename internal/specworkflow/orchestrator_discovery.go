@@ -686,7 +686,7 @@ func (o *Orchestrator) maybeInjectGate1HeuristicWarning(sourceDocPaths []string,
 func buildDiscoveryMergePrompt(claudeData, codexData []byte) string {
 	var b strings.Builder
 	b.WriteString("# Discovery Merge Agent\n\n")
-	b.WriteString("You are given two discovery analysis outputs from different AI providers (Claude and Codex) ")
+	b.WriteString("You are given two discovery analysis outputs from different AI providers ")
 	b.WriteString("that analysed the same source documents describing a software system.\n\n")
 	b.WriteString("Your task: produce a SINGLE merged discovery output that combines the best elements from both, ")
 	b.WriteString("resolving conflicts and eliminating redundancy. The result should be more complete and accurate ")
