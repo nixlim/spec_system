@@ -6,7 +6,7 @@
 
 A multi-agent system that produces high-quality software specifications through adversarial review. Specialised AI agents collaborate and compete — discovering requirements, drafting specs, reviewing through multiple lenses, revising, judging convergence, and decomposing into task graphs — while human gates ensure alignment at critical decision points.
 
-The system supports **multi-provider execution** (Claude + Codex + OpenCode in parallel) across discovery, drafting, and review phases, with intelligent merging of outputs. OpenCode supports 75+ LLM providers (Gemini, DeepSeek, Groq, local models, etc.) via a single CLI. A separate **code review workflow** provides automated code auditing with fix-review loops. A **code documentation workflow** auto-generates and maintains code documentation.
+The system supports **multi-provider execution** across discovery, drafting, and review phases, with intelligent merging of outputs. Three provider backends are supported — Claude CLI, Codex CLI, and OpenCode CLI — any combination can be used. OpenCode alone gives access to 75+ LLM providers (Gemini, DeepSeek, Groq, local models, etc.) A separate **code review workflow** provides automated code auditing with fix-review loops. A **code documentation workflow** auto-generates and maintains code documentation.
 
 ## How It Works
 
@@ -223,9 +223,11 @@ The only manual prerequisite is Claude CLI:
 
 | Dependency | Required | Install |
 |------------|----------|---------|
-| **Claude CLI** | Yes — runs all AI agents | [claude.ai/install.sh](https://claude.ai/install.sh) |
-| **Codex CLI** | No — enables multi-provider mode | [github.com/openai/codex](https://github.com/openai/codex) |
-| **OpenCode CLI** | No — enables 75+ LLM providers | [github.com/anomalyco/opencode](https://github.com/anomalyco/opencode) |
+| **Claude CLI** | Yes — primary agent backend | [claude.ai/install.sh](https://claude.ai/install.sh) |
+| **Codex CLI** | No — optional second provider | [github.com/openai/codex](https://github.com/openai/codex) |
+| **OpenCode CLI** | No — optional provider (75+ LLMs) | [github.com/anomalyco/opencode](https://github.com/anomalyco/opencode) |
+
+At minimum you need Claude CLI. Add Codex and/or OpenCode for multi-provider diversity — each adds a parallel set of agents that independently analyse the same inputs.
 
 ```bash
 # Verify Claude is installed and authenticated

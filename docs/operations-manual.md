@@ -24,25 +24,25 @@ claude auth login
 
 If `claude` is not on your PATH, or authentication has expired, agents will fail when the workflow runs.
 
-### Step 2 — Install Codex CLI (optional)
+### Step 2 — Install additional providers (optional)
 
-Install this if you want multi-provider mode (Claude + GPT running in parallel). Follow the instructions at [github.com/openai/codex](https://github.com/openai/codex).
+You can add one or both of these for multi-provider diversity. Each adds an independent set of agents that run in parallel with Claude.
+
+**Codex CLI** — adds OpenAI model coverage. Follow the instructions at [github.com/openai/codex](https://github.com/openai/codex).
 
 ```bash
 codex --version   # Verify
 ```
 
-When detected at startup, the server logs: `[orchestrator] codex CLI detected — dual-provider review enabled`
+When detected at startup: `[orchestrator] codex CLI detected — dual-provider review enabled`
 
-### Step 2b — Install OpenCode CLI (optional)
-
-Install this if you want to use additional LLM providers (Gemini, DeepSeek, Groq, local models, etc.) alongside Claude and Codex. OpenCode supports 75+ providers via a single CLI. Follow the instructions at [github.com/anomalyco/opencode](https://github.com/anomalyco/opencode).
+**OpenCode CLI** — adds access to 75+ LLM providers (Gemini, DeepSeek, Groq, local models, etc.) via a single binary. Follow the instructions at [github.com/anomalyco/opencode](https://github.com/anomalyco/opencode).
 
 ```bash
 opencode --version   # Verify
 ```
 
-When detected at startup, the server logs: `[orchestrator] opencode CLI detected — opencode review enabled`
+When detected at startup: `[orchestrator] opencode CLI detected — opencode review enabled`
 
 Configure the model via `opencode_models.default` in `config.yaml` using the `provider/model` format (e.g. `google/gemini-2.5-pro`, `anthropic/claude-sonnet-4-5`).
 
