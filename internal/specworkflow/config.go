@@ -82,6 +82,40 @@ func (m ClaudeModelConfig) For(role string) string {
 }
 
 // ---------------------------------------------------------------------------
+// OpenCodeModelConfig
+// ---------------------------------------------------------------------------
+
+// OpenCodeModelConfig holds per-role model overrides for OpenCode agent
+// invocations. Each field is a "provider/model" string (e.g.
+// "anthropic/claude-sonnet-4-5", "google/gemini-2.5-pro").
+type OpenCodeModelConfig struct {
+	Default   string `yaml:"default"`
+	Reviewer  string `yaml:"reviewer"`
+	Holdout   string `yaml:"holdout"`
+	Discovery string `yaml:"discovery"`
+	Drafter   string `yaml:"drafter"`
+}
+
+// For returns the model configured for role, falling back to Default.
+func (m OpenCodeModelConfig) For(role string) string {
+	var specific string
+	switch role {
+	case "reviewer":
+		specific = m.Reviewer
+	case "holdout":
+		specific = m.Holdout
+	case "discovery":
+		specific = m.Discovery
+	case "drafter":
+		specific = m.Drafter
+	}
+	if specific != "" {
+		return specific
+	}
+	return m.Default
+}
+
+// ---------------------------------------------------------------------------
 // SpecWorkflowConfig
 // ---------------------------------------------------------------------------
 
@@ -141,6 +175,17 @@ type SpecWorkflowConfig struct {
 	// TaskifyMaxRetries is the maximum number of retry attempts for
 	// taskify when output fails schema/DAG validation.
 	TaskifyMaxRetries int `yaml:"taskify_max_retries"`
+	// EnableOpenCodeReviewers controls whether OpenCode CLI agents are used
+	// alongside claude and codex for review and holdout generation.
+	EnableOpenCodeReviewers bool `yaml:"enable_opencode_reviewers"`
+	// EnableOpenCodeDiscovery controls whether OpenCode CLI is used alongside
+	// Claude for the discovery phase.
+	EnableOpenCodeDiscovery bool `yaml:"enable_opencode_discovery"`
+	// EnableOpenCodeDrafting controls whether OpenCode CLI is used alongside
+	// Claude for the drafting phase.
+	EnableOpenCodeDrafting bool `yaml:"enable_opencode_drafting"`
+	// OpenCodeModels holds per-role model overrides for OpenCode agent invocations.
+	OpenCodeModels OpenCodeModelConfig `yaml:"opencode_models"`
 	// TaskReviewMaxRounds is the maximum number of task review/revision
 	// rounds before findings pass to the human gate regardless of severity.
 	TaskReviewMaxRounds int `yaml:"task_review_max_rounds"`

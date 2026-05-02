@@ -55,6 +55,16 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 		}
 	}
 
+	// Build opencode output paths when opencode runner is available.
+	var opencodeOutputPaths map[string]string
+	if o.opencodeRunner != nil {
+		opencodeOutputPaths = make(map[string]string)
+		for _, lens := range lensGroups {
+			letter := reviewerGroupLetter[lens]
+			opencodeOutputPaths[lens] = filepath.Join(specDir, fmt.Sprintf("review-%s-opencode-round-%d.json", letter, state.Round))
+		}
+	}
+
 	// Emit dispatch events and track active agents so the dashboard shows
 	// which agents are currently running.
 	for _, lens := range lensGroups {
@@ -69,11 +79,17 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 			o.emitter.Emit(NewAgentDispatchEvent(name, state.Round))
 		}
 	}
+	if o.opencodeRunner != nil {
+		for _, lens := range lensGroups {
+			name := "reviewer-" + lens + "-opencode"
+			o.SetAgentStatus(name, "running")
+			o.emitter.Emit(NewAgentDispatchEvent(name, state.Round))
+		}
+	}
 
-	// Dispatch reviewers in parallel (N claude + optionally N codex, where
-	// N = len(SpecReviewerLensGroups())). The onComplete callback fires in
-	// real-time as each agent finishes, updating the dashboard immediately
-	// rather than waiting for all to complete.
+	// Dispatch reviewers in parallel (N claude + optionally N codex + optionally
+	// N opencode, where N = len(SpecReviewerLensGroups())). The onComplete
+	// callback fires in real-time as each agent finishes.
 	dispatchCfg := ReviewDispatchConfig{
 		MaxRetries:     o.config.MaxRetries,
 		TimeoutSeconds: o.config.ReviewerTimeoutSeconds,
@@ -92,6 +108,7 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 				o.emitter.Emit(NewAgentErrorEvent(r.AgentName, r.Error.Type, r.Error.Detail, r.Error.RetryCount, r.Error.MaxRetries))
 			}
 		},
+		o.opencodeRunner, opencodeOutputPaths,
 	)
 
 	if err != nil {
@@ -176,10 +193,10 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 }
 
 // dispatchHoldoutGeneration dispatches holdout agents (1 claude + optionally
-// 1 codex) in parallel, merges their markdown outputs with provider
+// codex and opencode) in parallel, merges their markdown outputs with provider
 // attribution, and writes the merged holdout file. If only one provider
-// fails, the workflow proceeds with single-provider holdouts. If both
-// fail, returns an error for escalation.
+// fails, the workflow proceeds with reduced holdouts. If all fail, returns
+// an error for escalation.
 func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specDir string, merged *MergedFindings) error {
 	specPath := o.currentSpecPath(state)
 	mergedFindingsPath := filepath.Join(specDir, fmt.Sprintf("merged-findings-round-%d.json", state.Round))
@@ -189,8 +206,16 @@ func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specD
 		maxAttempts = 1
 	}
 
+	providerCount := 1 // claude always
+	if o.codexHoldoutRunner != nil {
+		providerCount++
+	}
+	if o.opencodeHoldoutRunner != nil {
+		providerCount++
+	}
+
 	var wg sync.WaitGroup
-	resultsCh := make(chan holdoutDispatchResult, 2)
+	resultsCh := make(chan holdoutDispatchResult, providerCount)
 
 	// Track and emit dispatch events for holdout agents.
 	o.SetAgentStatus("holdout-claude", "running")
@@ -198,6 +223,10 @@ func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specD
 	if o.codexHoldoutRunner != nil {
 		o.SetAgentStatus("holdout-codex", "running")
 		o.emitter.Emit(NewAgentDispatchEvent("holdout-codex", state.Round))
+	}
+	if o.opencodeHoldoutRunner != nil {
+		o.SetAgentStatus("holdout-opencode", "running")
+		o.emitter.Emit(NewAgentDispatchEvent("holdout-opencode", state.Round))
 	}
 
 	// Claude holdout agent — uses o.runner.Run() directly with configured
@@ -221,12 +250,24 @@ func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specD
 		}()
 	}
 
+	// OpenCode holdout agent (when available).
+	if o.opencodeHoldoutRunner != nil {
+		opencodeJSONPath := filepath.Join(specDir, fmt.Sprintf("holdout-opencode-round-%d.json", state.Round))
+		opencodeMDPath := filepath.Join(specDir, fmt.Sprintf("holdouts-opencode-round-%d.md", state.Round))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			opencodeRunner := taggedRunner(o.opencodeHoldoutRunner, "holdout-opencode")
+			resultsCh <- o.runHoldoutProvider("opencode", opencodeRunner, specPath, mergedFindingsPath, state.Round, opencodeJSONPath, opencodeMDPath, timeout, maxAttempts)
+		}()
+	}
+
 	wg.Wait()
 	close(resultsCh)
 
 	// Collect results and emit completion events.
-	var claudeOutput, codexOutput *HoldoutOutput
-	var claudeMD, codexMD string
+	var claudeOutput, codexOutput, opencodeOutput *HoldoutOutput
+	var claudeMD, codexMD, opencodeMD string
 	for r := range resultsCh {
 		state.CumulativeCostUSD += r.cost
 		if r.err != nil {
@@ -244,17 +285,26 @@ func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specD
 		case "codex":
 			codexOutput = r.output
 			codexMD = r.md
+		case "opencode":
+			opencodeOutput = r.output
+			opencodeMD = r.md
 		}
 	}
 
 	// Merge holdout outputs with provider attribution.
 	claudeOK := claudeOutput != nil
 	codexOK := codexOutput != nil
-	if !claudeOK && !codexOK {
+	opencodeOK := opencodeOutput != nil
+	_ = opencodeOutput // used via opencodeOK
+	if !claudeOK && !codexOK && !opencodeOK {
 		return fmt.Errorf("holdout generation failed: all providers failed — escalation required")
 	}
 
+	// Include opencode markdown in the merge when available.
 	mergedMD := MergeHoldoutMarkdown(state.Round, claudeMD, codexMD, claudeOK, codexOK)
+	if opencodeOK && opencodeMD != "" {
+		mergedMD += "\n\n## OpenCode Holdout Analysis\n\n" + opencodeMD
+	}
 	mergedPath := filepath.Join(specDir, fmt.Sprintf("holdouts-round-%d.md", state.Round))
 	if err := os.WriteFile(mergedPath, []byte(mergedMD), 0o644); err != nil {
 		return fmt.Errorf("write merged holdouts: %w", err)

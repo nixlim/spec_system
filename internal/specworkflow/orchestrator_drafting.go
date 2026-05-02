@@ -48,10 +48,11 @@ func (o *Orchestrator) handleDrafting(state *WorkflowStateJSON, specDir string) 
 	// Determine drafting version counter (increments on re-drafts).
 	version := state.Gate2RedraftCount + 1
 
-	// Dual-provider path. Each provider gets its own prompt with a per-provider
+	// Multi-provider path. Each provider gets its own prompt with a per-provider
 	// versioned output path so the runners can read what the agents actually
 	// wrote, instead of racing on the shared canonical drafter-output.json.
-	if o.config.EnableCodexDrafting && o.codexDraftingRunner != nil {
+	if (o.config.EnableCodexDrafting && o.codexDraftingRunner != nil) ||
+		(o.config.EnableOpenCodeDrafting && o.opencodeDraftingRunner != nil) {
 		return o.handleDualDrafting(state, specDir, confirmedReqsPath, userAnswers, contextDocs, version)
 	}
 
@@ -119,6 +120,7 @@ func (o *Orchestrator) handleSingleDrafting(state *WorkflowStateJSON, specDir, p
 func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, confirmedReqsPath string, userAnswers map[string]string, contextDocs []string, version int) error {
 	claudeOutPath := filepath.Join(specDir, VersionedFilename("drafter-output", "claude", version, ".json"))
 	codexOutPath := filepath.Join(specDir, VersionedFilename("drafter-output", "codex", version, ".json"))
+	opencodeOutPath := filepath.Join(specDir, VersionedFilename("drafter-output", "opencode", version, ".json"))
 	timeout := o.config.AgentTimeoutSeconds
 
 	// Build per-provider prompts pointing at the per-provider output paths.
@@ -130,10 +132,14 @@ func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, con
 	if err != nil {
 		return fmt.Errorf("build codex drafter prompt: %w", err)
 	}
+	opencodePrompt, err := o.promptBuilder.BuildDrafterPrompt(confirmedReqsPath, userAnswers, contextDocs, opencodeOutPath)
+	if err != nil {
+		return fmt.Errorf("build opencode drafter prompt: %w", err)
+	}
 
-	// Dispatch both drafters in parallel.
+	// Dispatch drafters in parallel.
 	var wg sync.WaitGroup
-	var claudeResult, codexResult drafterResult
+	var claudeResult, codexResult, opencodeResult drafterResult
 
 	// Build a schema-bound Claude runner for structured output.
 	var drafterClaudeRunner AgentRunner = o.runnerFor("drafter")
@@ -141,7 +147,7 @@ func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, con
 		drafterClaudeRunner = cr.WithJSONSchema(string(DrafterOutputSchema()))
 	}
 
-	wg.Add(2)
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		claudeRunner := taggedRunner(drafterClaudeRunner, "drafter-claude")
@@ -157,34 +163,77 @@ func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, con
 		}
 	}()
 
-	go func() {
-		defer wg.Done()
-		codexRunner := taggedRunner(o.codexDraftingRunner, "drafter-codex")
-		exitCode, stderr, cost, duration, runErr := codexRunner.Run(codexPrompt, codexOutPath, timeout)
-		codexResult = drafterResult{provider: "codex", outPath: codexOutPath, cost: cost, duration: duration}
-		if runErr != nil {
-			codexResult.err = fmt.Errorf("drafter-codex failed: %v", runErr)
-			return
-		}
-		failureType := DetectFailureType(exitCode, stderr, codexOutPath)
-		if failureType != "" {
-			codexResult.err = fmt.Errorf("drafter-codex failed: %s", failureType)
-		}
-	}()
+	if o.codexDraftingRunner != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			codexRunner := taggedRunner(o.codexDraftingRunner, "drafter-codex")
+			exitCode, stderr, cost, duration, runErr := codexRunner.Run(codexPrompt, codexOutPath, timeout)
+			codexResult = drafterResult{provider: "codex", outPath: codexOutPath, cost: cost, duration: duration}
+			if runErr != nil {
+				codexResult.err = fmt.Errorf("drafter-codex failed: %v", runErr)
+				return
+			}
+			failureType := DetectFailureType(exitCode, stderr, codexOutPath)
+			if failureType != "" {
+				codexResult.err = fmt.Errorf("drafter-codex failed: %s", failureType)
+			}
+		}()
+	}
+
+	if o.opencodeDraftingRunner != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ocRunner := taggedRunner(o.opencodeDraftingRunner, "drafter-opencode")
+			exitCode, stderr, cost, duration, runErr := ocRunner.Run(opencodePrompt, opencodeOutPath, timeout)
+			opencodeResult = drafterResult{provider: "opencode", outPath: opencodeOutPath, cost: cost, duration: duration}
+			if runErr != nil {
+				opencodeResult.err = fmt.Errorf("drafter-opencode failed: %v", runErr)
+				return
+			}
+			failureType := DetectFailureType(exitCode, stderr, opencodeOutPath)
+			if failureType != "" {
+				opencodeResult.err = fmt.Errorf("drafter-opencode failed: %s", failureType)
+			}
+		}()
+	}
 
 	wg.Wait()
 
 	// Accumulate cost.
 	smState := o.sm.State()
-	smState.CumulativeCostUSD += claudeResult.cost + codexResult.cost
-	smState.AgentInvocations += 2
+	smState.CumulativeCostUSD += claudeResult.cost + codexResult.cost + opencodeResult.cost
+	invocations := 1 // claude always
+	if o.codexDraftingRunner != nil {
+		invocations++
+	}
+	if o.opencodeDraftingRunner != nil {
+		invocations++
+	}
+	smState.AgentInvocations += invocations
 
-	claudeOK := claudeResult.err == nil
-	codexOK := codexResult.err == nil
+	// Collect successful results.
+	var successfulDrafts []drafterResult
+	if claudeResult.err == nil {
+		successfulDrafts = append(successfulDrafts, claudeResult)
+	}
+	if o.codexDraftingRunner != nil && codexResult.err == nil {
+		successfulDrafts = append(successfulDrafts, codexResult)
+	}
+	if o.opencodeDraftingRunner != nil && opencodeResult.err == nil {
+		successfulDrafts = append(successfulDrafts, opencodeResult)
+	}
 
-	// Both failed → escalate.
-	if !claudeOK && !codexOK {
-		reason := fmt.Sprintf("both drafters failed: claude=%v; codex=%v", claudeResult.err, codexResult.err)
+	// All failed → escalate.
+	if len(successfulDrafts) == 0 {
+		reason := fmt.Sprintf("all drafters failed: claude=%v", claudeResult.err)
+		if o.codexDraftingRunner != nil {
+			reason += fmt.Sprintf("; codex=%v", codexResult.err)
+		}
+		if o.opencodeDraftingRunner != nil {
+			reason += fmt.Sprintf("; opencode=%v", opencodeResult.err)
+		}
 		log.Printf("[orchestrator] %s", reason)
 		o.escalateFrom(StateDrafting)
 		return nil
@@ -193,19 +242,9 @@ func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, con
 	// Determine the final output path for drafter-output.json (used by gate 2).
 	finalOutPath := filepath.Join(specDir, "drafter-output.json")
 
-	// One failed → use survivor.
-	if !claudeOK || !codexOK {
-		var survivor drafterResult
-		var failedProvider string
-		if claudeOK {
-			survivor = claudeResult
-			failedProvider = "codex"
-			log.Printf("[orchestrator] Codex drafter failed, using Claude draft: %v", codexResult.err)
-		} else {
-			survivor = codexResult
-			failedProvider = "claude"
-			log.Printf("[orchestrator] Claude drafter failed, using Codex draft: %v", claudeResult.err)
-		}
+	// Single survivor → use directly.
+	if len(successfulDrafts) == 1 {
+		survivor := successfulDrafts[0]
 
 		// Validate survivor output.
 		data, err := os.ReadFile(survivor.outPath)
@@ -222,14 +261,24 @@ func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, con
 			return fmt.Errorf("write drafter-output.json: %w", err)
 		}
 
-		// Record draft source for gate 2 UI with failure notice.
-		failureNotice := fmt.Sprintf("%s drafter failed — reviewing %s draft only", failedProvider, survivor.provider)
+		// Build failure notice listing failed providers.
+		var failedProviders []string
+		if claudeResult.err != nil {
+			failedProviders = append(failedProviders, "claude")
+		}
+		if o.codexDraftingRunner != nil && codexResult.err != nil {
+			failedProviders = append(failedProviders, "codex")
+		}
+		if o.opencodeDraftingRunner != nil && opencodeResult.err != nil {
+			failedProviders = append(failedProviders, "opencode")
+		}
 		smState.DraftSource = "single_survivor"
-		smState.DraftFailureNotice = failureNotice
+		smState.DraftFailureNotice = fmt.Sprintf("%s drafter(s) failed — reviewing %s draft only",
+			strings.Join(failedProviders, ", "), survivor.provider)
 
-		// Emit UI notice about the failure.
 		o.emitter.Emit(NewDraftingEvent("single_provider_fallback",
-			fmt.Sprintf("%s drafter failed — using %s draft only", failedProvider, survivor.provider)))
+			fmt.Sprintf("%s drafter(s) failed — using %s draft only",
+				strings.Join(failedProviders, ", "), survivor.provider)))
 
 		o.logTransition(StateDrafting, StateHumanGate2)
 		if err := o.sm.Transition(StateHumanGate2); err != nil {
@@ -238,28 +287,33 @@ func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, con
 		return nil
 	}
 
-	// Both succeeded → validate both, then combine via Claude reviser.
-	claudeData, err := os.ReadFile(claudeOutPath)
+	// Multiple succeeded → validate and combine via Claude reviser.
+	// Use the first two successful drafts for the agent-based combine,
+	// then fold in any additional drafts via concatenation.
+	first := successfulDrafts[0]
+	second := successfulDrafts[1]
+
+	claudeData, err := os.ReadFile(first.outPath)
 	if err != nil {
-		return fmt.Errorf("read claude drafter output: %w", err)
+		return fmt.Errorf("read %s drafter output: %w", first.provider, err)
 	}
-	var claudeDraft DrafterOutput
-	if err := json.Unmarshal(claudeData, &claudeDraft); err != nil {
-		return fmt.Errorf("parse claude drafter output: %w", err)
+	var firstDraft DrafterOutput
+	if err := json.Unmarshal(claudeData, &firstDraft); err != nil {
+		return fmt.Errorf("parse %s drafter output: %w", first.provider, err)
 	}
 
-	codexData, err := os.ReadFile(codexOutPath)
+	codexData, err := os.ReadFile(second.outPath)
 	if err != nil {
-		return fmt.Errorf("read codex drafter output: %w", err)
+		return fmt.Errorf("read %s drafter output: %w", second.provider, err)
 	}
-	var codexDraft DrafterOutput
-	if err := json.Unmarshal(codexData, &codexDraft); err != nil {
-		return fmt.Errorf("parse codex drafter output: %w", err)
+	var secondDraft DrafterOutput
+	if err := json.Unmarshal(codexData, &secondDraft); err != nil {
+		return fmt.Errorf("parse %s drafter output: %w", second.provider, err)
 	}
 
-	// Dispatch Claude reviser to combine both drafts.
+	// Dispatch Claude reviser to combine drafts.
 	combinedOutPath := filepath.Join(specDir, VersionedCombinedFilename("drafter-output", version, ".json"))
-	combinePrompt := buildCombinePrompt(claudeOutPath, codexOutPath, combinedOutPath)
+	combinePrompt := buildCombinePrompt(first.outPath, second.outPath, combinedOutPath)
 
 	combineRunner := taggedRunner(o.runnerFor("drafter"), "drafter-combine")
 	combineExitCode, combineStderr, combineCost, _, combineErr := combineRunner.Run(combinePrompt, combinedOutPath, o.config.AgentTimeoutSeconds)
@@ -285,6 +339,18 @@ func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, con
 		}
 	}
 
+	// Fold in third provider's output if present.
+	if len(successfulDrafts) >= 3 {
+		combinedData, readErr := os.ReadFile(combinedOutPath)
+		if readErr == nil {
+			thirdData, thirdReadErr := os.ReadFile(successfulDrafts[2].outPath)
+			if thirdReadErr == nil {
+				merged := concatenateDrafts(combinedData, thirdData)
+				_ = os.WriteFile(combinedOutPath, merged, 0o644)
+			}
+		}
+	}
+
 	// Read combined output and copy to canonical path.
 	combinedData, err := os.ReadFile(combinedOutPath)
 	if err != nil {
@@ -298,8 +364,8 @@ func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, con
 	smState.DraftSource = "combined"
 	smState.DraftFailureNotice = ""
 
-	log.Printf("[orchestrator] dual-provider drafting complete: claude=%s, codex=%s, combined=%s",
-		claudeOutPath, codexOutPath, combinedOutPath)
+	log.Printf("[orchestrator] multi-provider drafting complete: %d providers succeeded, combined=%s",
+		len(successfulDrafts), combinedOutPath)
 
 	o.logTransition(StateDrafting, StateHumanGate2)
 	if err := o.sm.Transition(StateHumanGate2); err != nil {
