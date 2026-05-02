@@ -293,6 +293,7 @@ func TestRegression_SpecDispatchReviewersWithAllGroups(t *testing.T) {
 		runner, nil, lensGroups,
 		prompts, outputPaths, nil,
 		config, func(d time.Duration) {}, nil,
+		nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("DispatchReviewers: %v", err)

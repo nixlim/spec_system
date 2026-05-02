@@ -171,6 +171,8 @@ func DispatchReviewers(
 	config ReviewDispatchConfig,
 	delayFn DelayFunc,
 	onComplete AgentCompleteFunc,
+	opencodeRunner AgentRunner,
+	opencodeOutputPaths map[string]string,
 ) (*ReviewDispatchResult, error) {
 	if delayFn == nil {
 		delayFn = time.Sleep
@@ -245,6 +247,40 @@ func DispatchReviewers(
 					results = append(results, result)
 				}
 			}(codexRunner, agentName, lens, prompt, outPath)
+		}
+	}
+
+	// Launch opencode reviewers when available.
+	if opencodeRunner != nil && opencodeOutputPaths != nil {
+		for _, lens := range lensGroups {
+			prompt, ok := prompts[lens]
+			if !ok {
+				continue
+			}
+			outPath, ok := opencodeOutputPaths[lens]
+			if !ok {
+				return nil, fmt.Errorf("missing opencode output path for lens group %q", lens)
+			}
+
+			agentName := "reviewer-" + lens + "-opencode"
+			agentRunner := taggedRunner(opencodeRunner, agentName)
+			wg.Add(1)
+			go func(r AgentRunner, name, lensGroup, prompt, outPath string) {
+				defer wg.Done()
+
+				result := runReviewerWithRetries(r, name, lensGroup, prompt, outPath, config, delayFn)
+
+				if onComplete != nil {
+					onComplete(result)
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if result.Error != nil {
+					failures = append(failures, result)
+				} else {
+					results = append(results, result)
+				}
+			}(agentRunner, agentName, lens, prompt, outPath)
 		}
 	}
 

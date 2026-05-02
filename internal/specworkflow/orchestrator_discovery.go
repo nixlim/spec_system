@@ -190,8 +190,9 @@ func (o *Orchestrator) handleDiscovery(goal GoalInput, state *WorkflowStateJSON,
 		return fmt.Errorf("build discovery prompt: %w", err)
 	}
 
-	// Dual-provider path: dispatch both Claude and Codex in parallel.
-	if o.config.EnableCodexDiscovery && o.codexDiscoveryRunner != nil {
+	// Multi-provider path: dispatch Claude + Codex + optionally OpenCode in parallel.
+	if (o.config.EnableCodexDiscovery && o.codexDiscoveryRunner != nil) ||
+		(o.config.EnableOpenCodeDiscovery && o.opencodeDiscoveryRunner != nil) {
 		return o.handleDualDiscovery(prompt, state, specDir, discoveryRound, goal.SourceDocPaths)
 	}
 
@@ -294,10 +295,23 @@ func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJS
 	// Track and emit dispatch events.
 	o.SetAgentStatus("discovery-claude", "running")
 	o.emitter.Emit(NewAgentDispatchEvent("discovery-claude", state.Round))
-	o.SetAgentStatus("discovery-codex", "running")
-	o.emitter.Emit(NewAgentDispatchEvent("discovery-codex", state.Round))
+	if o.codexDiscoveryRunner != nil {
+		o.SetAgentStatus("discovery-codex", "running")
+		o.emitter.Emit(NewAgentDispatchEvent("discovery-codex", state.Round))
+	}
+	if o.opencodeDiscoveryRunner != nil {
+		o.SetAgentStatus("discovery-opencode", "running")
+		o.emitter.Emit(NewAgentDispatchEvent("discovery-opencode", state.Round))
+	}
 
-	resultsCh := make(chan discoveryResult, 2)
+	providerCount := 1 // claude always
+	if o.codexDiscoveryRunner != nil {
+		providerCount++
+	}
+	if o.opencodeDiscoveryRunner != nil {
+		providerCount++
+	}
+	resultsCh := make(chan discoveryResult, providerCount)
 	var wg sync.WaitGroup
 
 	// Build a schema-bound Claude runner for structured output.
@@ -324,43 +338,73 @@ func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJS
 		resultsCh <- discoveryResult{provider: "claude", cost: cost, duration: duration, err: dispatchErr}
 	}()
 
-	// Codex discovery agent.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		o.logger.LogAgentDispatch("discovery-codex", "discovery-codex", state.Round)
-		exitCode, stderr, cost, duration, runErr := o.codexDiscoveryRunner.Run(prompt, codexOutPath, timeout)
-		var dispatchErr error
-		if runErr != nil {
-			dispatchErr = runErr
-		} else {
-			failureType := DetectFailureType(exitCode, stderr, codexOutPath)
-			if failureType != "" {
-				dispatchErr = fmt.Errorf("discovery-codex failed: %s", failureType)
+	// Codex discovery agent (when available).
+	if o.codexDiscoveryRunner != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			o.logger.LogAgentDispatch("discovery-codex", "discovery-codex", state.Round)
+			exitCode, stderr, cost, duration, runErr := o.codexDiscoveryRunner.Run(prompt, codexOutPath, timeout)
+			var dispatchErr error
+			if runErr != nil {
+				dispatchErr = runErr
+			} else {
+				failureType := DetectFailureType(exitCode, stderr, codexOutPath)
+				if failureType != "" {
+					dispatchErr = fmt.Errorf("discovery-codex failed: %s", failureType)
+				}
 			}
-		}
-		resultsCh <- discoveryResult{provider: "codex", cost: cost, duration: duration, err: dispatchErr}
-	}()
+			resultsCh <- discoveryResult{provider: "codex", cost: cost, duration: duration, err: dispatchErr}
+		}()
+	}
+
+	// OpenCode discovery agent (when available).
+	opencodeOutPath := filepath.Join(specDir, VersionedFilename("discovery-output", "opencode", discoveryRound, ".json"))
+	if o.opencodeDiscoveryRunner != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			o.logger.LogAgentDispatch("discovery-opencode", "discovery-opencode", state.Round)
+			opencodeRunner := taggedRunner(o.opencodeDiscoveryRunner, "discovery-opencode")
+			exitCode, stderr, cost, duration, runErr := opencodeRunner.Run(prompt, opencodeOutPath, timeout)
+			var dispatchErr error
+			if runErr != nil {
+				dispatchErr = runErr
+			} else {
+				failureType := DetectFailureType(exitCode, stderr, opencodeOutPath)
+				if failureType != "" {
+					dispatchErr = fmt.Errorf("discovery-opencode failed: %s", failureType)
+				}
+			}
+			resultsCh <- discoveryResult{provider: "opencode", cost: cost, duration: duration, err: dispatchErr}
+		}()
+	}
 
 	wg.Wait()
 	close(resultsCh)
 
-	// Collect results and accumulate cost after both goroutines complete
+	// Collect results and accumulate cost after all goroutines complete
 	// to avoid data races on shared state fields.
-	var claudeResult, codexResult *discoveryResult
+	var claudeResult, codexResult, opencodeResult *discoveryResult
 	for r := range resultsCh {
 		r := r
 		state.AgentInvocations++
 		state.CumulativeCostUSD += r.cost
-		if r.provider == "claude" {
+		switch r.provider {
+		case "claude":
 			claudeResult = &r
-		} else {
+		case "codex":
 			codexResult = &r
+		case "opencode":
+			opencodeResult = &r
 		}
 	}
 
 	// Emit completion events.
 	emitDiscoveryComplete := func(provider string, r *discoveryResult) {
+		if r == nil {
+			return
+		}
 		success := r.err == nil
 		if success {
 			o.SetAgentStatus("discovery-"+provider, "done")
@@ -372,12 +416,13 @@ func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJS
 	}
 	emitDiscoveryComplete("claude", claudeResult)
 	emitDiscoveryComplete("codex", codexResult)
+	emitDiscoveryComplete("opencode", opencodeResult)
 
 	// Parse successful outputs.
-	var claudeOutput, codexOutput *DiscoveryOutput
-	var claudeData, codexData []byte
+	var claudeOutput, codexOutput, opencodeOutput *DiscoveryOutput
+	var claudeData, codexData, opencodeData []byte
 
-	if claudeResult.err == nil {
+	if claudeResult != nil && claudeResult.err == nil {
 		co, data, parseErr := parseAndValidateDiscoveryOutput(claudeOutPath)
 		if parseErr != nil {
 			log.Printf("[orchestrator] discovery-claude: output parse/validation failed: %v", parseErr)
@@ -388,7 +433,7 @@ func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJS
 		}
 	}
 
-	if codexResult.err == nil {
+	if codexResult != nil && codexResult.err == nil {
 		co, data, parseErr := parseAndValidateDiscoveryOutput(codexOutPath)
 		if parseErr != nil {
 			log.Printf("[orchestrator] discovery-codex: output parse/validation failed: %v", parseErr)
@@ -399,26 +444,63 @@ func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJS
 		}
 	}
 
-	// Both failed -> escalate.
-	if claudeOutput == nil && codexOutput == nil {
-		reason := fmt.Sprintf("both discovery agents failed: claude=%v, codex=%v", claudeResult.err, codexResult.err)
+	if opencodeResult != nil && opencodeResult.err == nil {
+		co, data, parseErr := parseAndValidateDiscoveryOutput(opencodeOutPath)
+		if parseErr != nil {
+			log.Printf("[orchestrator] discovery-opencode: output parse/validation failed: %v", parseErr)
+			opencodeResult.err = parseErr
+		} else {
+			opencodeOutput = co
+			opencodeData = data
+		}
+	}
+
+	// All failed -> escalate.
+	if claudeOutput == nil && codexOutput == nil && opencodeOutput == nil {
+		reason := "all discovery agents failed:"
+		if claudeResult != nil {
+			reason += fmt.Sprintf(" claude=%v", claudeResult.err)
+		}
+		if codexResult != nil {
+			reason += fmt.Sprintf(" codex=%v", codexResult.err)
+		}
+		if opencodeResult != nil {
+			reason += fmt.Sprintf(" opencode=%v", opencodeResult.err)
+		}
 		log.Printf("[orchestrator] %s", reason)
 		o.escalateFrom(StateDiscovery)
 		return nil
+	}
+
+	// Collect all successful outputs for merging.
+	type providerOutput struct {
+		output *DiscoveryOutput
+		data   []byte
+		name   string
+	}
+	var successfulOutputs []providerOutput
+	if claudeOutput != nil {
+		successfulOutputs = append(successfulOutputs, providerOutput{claudeOutput, claudeData, "claude"})
+	}
+	if codexOutput != nil {
+		successfulOutputs = append(successfulOutputs, providerOutput{codexOutput, codexData, "codex"})
+	}
+	if opencodeOutput != nil {
+		successfulOutputs = append(successfulOutputs, providerOutput{opencodeOutput, opencodeData, "opencode"})
 	}
 
 	// Determine final output.
 	var finalOutput *DiscoveryOutput
 	var finalData []byte
 
-	if claudeOutput != nil && codexOutput != nil {
-		// Both succeeded -> intelligent agent-based merge.
+	if len(successfulOutputs) >= 2 {
+		// Multiple providers succeeded -> merge pairwise.
+		// Start with first two via agent-based merge, then fold in remaining.
 		mergedPath := filepath.Join(specDir, VersionedMergedFilename("discovery-output", discoveryRound, ".json"))
-		mergedData, mergeErr := o.mergeDiscoveryWithAgent(claudeData, codexData, mergedPath, state)
+		mergedData, mergeErr := o.mergeDiscoveryWithAgent(successfulOutputs[0].data, successfulOutputs[1].data, mergedPath, state)
 		if mergeErr != nil {
-			// Fall back to mechanical merge on agent failure.
 			log.Printf("[orchestrator] agent-based merge failed (%v), falling back to mechanical merge", mergeErr)
-			finalOutput = MergeDiscoveryOutputs(claudeOutput, codexOutput)
+			finalOutput = MergeDiscoveryOutputs(successfulOutputs[0].output, successfulOutputs[1].output)
 			fb, _ := json.MarshalIndent(finalOutput, "", "  ")
 			finalData = fb
 		} else {
@@ -428,20 +510,21 @@ func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJS
 				finalOutput = &fo
 			}
 		}
+		// Fold in third provider if present via mechanical merge.
+		if len(successfulOutputs) == 3 && finalOutput != nil {
+			finalOutput = MergeDiscoveryOutputs(finalOutput, successfulOutputs[2].output)
+			fb, _ := json.MarshalIndent(finalOutput, "", "  ")
+			finalData = fb
+		}
 		if finalOutput != nil {
-			log.Printf("[orchestrator] dual-provider discovery merged: %d actors, %d priorities, %d open questions",
+			log.Printf("[orchestrator] multi-provider discovery merged: %d actors, %d priorities, %d open questions",
 				len(finalOutput.Actors), len(finalOutput.Priorities), len(finalOutput.OpenQuestions))
 		}
-	} else if claudeOutput != nil {
-		// Only Claude succeeded.
-		finalOutput = claudeOutput
-		finalData = claudeData
-		log.Printf("[orchestrator] Codex discovery failed, using Claude-only output")
 	} else {
-		// Only Codex succeeded.
-		finalOutput = codexOutput
-		finalData = codexData
-		log.Printf("[orchestrator] Claude discovery failed, using Codex-only output")
+		// Single provider succeeded.
+		finalOutput = successfulOutputs[0].output
+		finalData = successfulOutputs[0].data
+		log.Printf("[orchestrator] only %s discovery succeeded, using its output", successfulOutputs[0].name)
 	}
 	// Gate 1 heuristic: inject synthetic warning into OpenQuestions when
 	// discovery produced few substantive questions against a large source
@@ -473,6 +556,9 @@ func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJS
 	}
 	if codexData != nil {
 		_ = os.WriteFile(codexOutPath, codexData, 0o644)
+	}
+	if opencodeData != nil {
+		_ = os.WriteFile(opencodeOutPath, opencodeData, 0o644)
 	}
 
 	o.logTransition(StateDiscovery, StateHumanGate1)

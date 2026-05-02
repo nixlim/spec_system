@@ -55,6 +55,16 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 		}
 	}
 
+	// Build opencode output paths when opencode runner is available.
+	var opencodeOutputPaths map[string]string
+	if o.opencodeRunner != nil {
+		opencodeOutputPaths = make(map[string]string)
+		for _, lens := range lensGroups {
+			letter := reviewerGroupLetter[lens]
+			opencodeOutputPaths[lens] = filepath.Join(specDir, fmt.Sprintf("review-%s-opencode-round-%d.json", letter, state.Round))
+		}
+	}
+
 	// Emit dispatch events and track active agents so the dashboard shows
 	// which agents are currently running.
 	for _, lens := range lensGroups {
@@ -69,11 +79,17 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 			o.emitter.Emit(NewAgentDispatchEvent(name, state.Round))
 		}
 	}
+	if o.opencodeRunner != nil {
+		for _, lens := range lensGroups {
+			name := "reviewer-" + lens + "-opencode"
+			o.SetAgentStatus(name, "running")
+			o.emitter.Emit(NewAgentDispatchEvent(name, state.Round))
+		}
+	}
 
-	// Dispatch reviewers in parallel (N claude + optionally N codex, where
-	// N = len(SpecReviewerLensGroups())). The onComplete callback fires in
-	// real-time as each agent finishes, updating the dashboard immediately
-	// rather than waiting for all to complete.
+	// Dispatch reviewers in parallel (N claude + optionally N codex + optionally
+	// N opencode, where N = len(SpecReviewerLensGroups())). The onComplete
+	// callback fires in real-time as each agent finishes.
 	dispatchCfg := ReviewDispatchConfig{
 		MaxRetries:     o.config.MaxRetries,
 		TimeoutSeconds: o.config.ReviewerTimeoutSeconds,
@@ -92,6 +108,7 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 				o.emitter.Emit(NewAgentErrorEvent(r.AgentName, r.Error.Type, r.Error.Detail, r.Error.RetryCount, r.Error.MaxRetries))
 			}
 		},
+		o.opencodeRunner, opencodeOutputPaths,
 	)
 
 	if err != nil {

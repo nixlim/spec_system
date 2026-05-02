@@ -187,10 +187,14 @@ type Orchestrator struct {
 	skills          *SkillCache
 	progressTracker *ProgressTracker
 	runner          AgentRunner
-	codexRunner          AgentRunner
-	codexHoldoutRunner   AgentRunner
-	codexDiscoveryRunner AgentRunner
-	codexDraftingRunner  AgentRunner
+	codexRunner            AgentRunner
+	codexHoldoutRunner     AgentRunner
+	codexDiscoveryRunner   AgentRunner
+	codexDraftingRunner    AgentRunner
+	opencodeRunner          AgentRunner
+	opencodeHoldoutRunner   AgentRunner
+	opencodeDiscoveryRunner AgentRunner
+	opencodeDraftingRunner  AgentRunner
 	cancelled       atomic.Bool
 	runCtx          context.Context
 	runCancel       context.CancelFunc
@@ -615,6 +619,69 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 		}
 	}
 
+	// Detect opencode CLI availability when opencode reviewers are enabled.
+	var opencodeRunner AgentRunner
+	var opencodeHoldoutRunner AgentRunner
+	if cfg.Config.EnableOpenCodeReviewers {
+		lookPathOC := cfg.LookPathFunc
+		if lookPathOC == nil {
+			lookPathOC = exec.LookPath
+		}
+		if _, err := lookPathOC("opencode"); err == nil {
+			ocr := DefaultOpenCodeRunner(cfg.Config.OpenCodeModels.For("reviewer"), cfg.WorkspaceDir, ReviewerOutputSchema())
+			ocr.Tracker = cfg.ProcessTracker
+			ocr.Feature = cfg.FeatureName
+			ocr.Role = "reviewer"
+			opencodeRunner = ocr
+			och := DefaultOpenCodeRunner(cfg.Config.OpenCodeModels.For("holdout"), cfg.WorkspaceDir, HoldoutOutputSchema())
+			och.Tracker = cfg.ProcessTracker
+			och.Feature = cfg.FeatureName
+			och.Role = "holdout"
+			opencodeHoldoutRunner = och
+			log.Printf("[orchestrator] opencode CLI detected — triple-provider review enabled")
+		} else {
+			log.Printf("[orchestrator] WARNING: opencode CLI not found — opencode reviewers disabled")
+		}
+	}
+
+	// Detect opencode CLI availability for drafting when enabled.
+	var opencodeDraftingRunner AgentRunner
+	if cfg.Config.EnableOpenCodeDrafting {
+		lookPathOCD := cfg.LookPathFunc
+		if lookPathOCD == nil {
+			lookPathOCD = exec.LookPath
+		}
+		if _, err := lookPathOCD("opencode"); err == nil {
+			ocdr := DefaultOpenCodeRunner(cfg.Config.OpenCodeModels.For("drafter"), cfg.WorkspaceDir, DrafterOutputSchema())
+			ocdr.Tracker = cfg.ProcessTracker
+			ocdr.Feature = cfg.FeatureName
+			ocdr.Role = "drafter"
+			opencodeDraftingRunner = ocdr
+			log.Printf("[orchestrator] opencode CLI detected — triple-provider drafting enabled")
+		} else {
+			log.Printf("[orchestrator] opencode CLI not available for drafting")
+		}
+	}
+
+	// Detect opencode CLI availability for discovery when enabled.
+	var opencodeDiscoveryRunner AgentRunner
+	if cfg.Config.EnableOpenCodeDiscovery {
+		lookPathOCDis := cfg.LookPathFunc
+		if lookPathOCDis == nil {
+			lookPathOCDis = exec.LookPath
+		}
+		if _, err := lookPathOCDis("opencode"); err == nil {
+			ocdis := DefaultOpenCodeRunner(cfg.Config.OpenCodeModels.For("discovery"), cfg.WorkspaceDir, DiscoveryOutputSchema())
+			ocdis.Tracker = cfg.ProcessTracker
+			ocdis.Feature = cfg.FeatureName
+			ocdis.Role = "discovery"
+			opencodeDiscoveryRunner = ocdis
+			log.Printf("[orchestrator] opencode CLI detected — triple-provider discovery enabled")
+		} else {
+			log.Printf("[orchestrator] opencode CLI not available for discovery")
+		}
+	}
+
 	// Validate the agent team configuration to ensure all required agents
 	// are defined. This catches misconfiguration at construction time rather
 	// than at dispatch time.
@@ -723,10 +790,14 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 		skills:          skills,
 		progressTracker: NewProgressTracker(),
 		runner:          cfg.Runner,
-		codexRunner:          codexRunner,
-		codexHoldoutRunner:   codexHoldoutRunner,
-		codexDiscoveryRunner: codexDiscoveryRunner,
-		codexDraftingRunner:  codexDraftingRunner,
+		codexRunner:            codexRunner,
+		codexHoldoutRunner:     codexHoldoutRunner,
+		codexDiscoveryRunner:   codexDiscoveryRunner,
+		codexDraftingRunner:    codexDraftingRunner,
+		opencodeRunner:          opencodeRunner,
+		opencodeHoldoutRunner:   opencodeHoldoutRunner,
+		opencodeDiscoveryRunner: opencodeDiscoveryRunner,
+		opencodeDraftingRunner:  opencodeDraftingRunner,
 		beadsClient:     beadsClient,
 		costProvider:    cfg.CostProvider,
 		workspaceDir:    cfg.WorkspaceDir,
