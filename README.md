@@ -381,7 +381,18 @@ enable_codex_drafting: false    # Parallel Codex drafting agent (default: false)
 codex_model: "gpt-5.4"         # Model ID passed to the Codex CLI (default: "gpt-5.4")
 
 # ─────────────────────────────────────────────
-# Multi-provider (OpenCode CLI) — requires opencode on PATH
+# Primary provider selection
+# ─────────────────────────────────────────────
+# Set to "opencode" to use OpenCode CLI as the primary provider for ALL roles
+# instead of Claude CLI. Users without Claude CLI can run the entire workflow
+# via OpenCode with any of its 75+ supported LLM backends.
+# Valid values: "claude" (default), "opencode"
+primary_provider: "claude"
+
+# ─────────────────────────────────────────────
+# Multi-provider (OpenCode CLI as secondary) — requires opencode on PATH
+# NOTE: enable_opencode_* flags are for running OpenCode as a SECONDARY
+# provider alongside Claude. They cannot be used when primary_provider is "opencode".
 # ─────────────────────────────────────────────
 enable_opencode_reviewers: false  # Parallel OpenCode reviewers + holdout (default: false)
 enable_opencode_discovery: false  # Parallel OpenCode discovery agent (default: false)
@@ -390,8 +401,13 @@ opencode_models:
   default: ""                     # provider/model string (e.g. "google/gemini-2.5-pro")
   reviewer: ""                    # Model for reviewer agents
   holdout: ""                     # Model for holdout generation
+  reviser: ""                     # Model for spec revision agent
+  judge: ""                       # Model for convergence judge
   discovery: ""                   # Model for discovery agent
   drafter: ""                     # Model for drafting agent
+  taskify: ""                     # Model for task decomposition
+  task_reviewer: ""               # Model for task review
+  task_reviser: ""                # Model for task revision
 
 # ─────────────────────────────────────────────
 # Task decomposition

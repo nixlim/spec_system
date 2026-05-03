@@ -609,13 +609,20 @@ claude_models:
   task_reviewer: ""
   task_reviser: ""
 
+# Primary provider selection
+# Set to "opencode" to use OpenCode CLI instead of Claude CLI for all roles.
+# Default: "claude" (or empty, which defaults to "claude").
+primary_provider: ""
+
 # Multi-provider: Codex (requires codex on PATH)
 enable_codex_reviewers: true
 enable_codex_discovery: false
 enable_codex_drafting: false
 codex_model: "gpt-5.4"
 
-# Multi-provider: OpenCode (requires opencode on PATH)
+# Multi-provider: OpenCode as secondary (requires opencode on PATH)
+# NOTE: enable_opencode_* flags CANNOT be used when primary_provider is "opencode"
+# (would cause filename collisions on versioned output files).
 enable_opencode_reviewers: false
 enable_opencode_discovery: false
 enable_opencode_drafting: false
@@ -623,8 +630,13 @@ opencode_models:
   default: ""            # provider/model (e.g. "google/gemini-2.5-pro")
   reviewer: ""
   holdout: ""
+  reviser: ""
+  judge: ""
   discovery: ""
   drafter: ""
+  taskify: ""
+  task_reviewer: ""
+  task_reviser: ""
 
 # Task decomposition
 taskify_max_retries: 3
@@ -665,11 +677,25 @@ max_wall_clock_minutes: 180
 enable_codex_reviewers: true
 enable_codex_discovery: true
 enable_codex_drafting: true
-enable_opencode_reviewers: true
+enable_opencode_reviewers: true    # Only when primary_provider is "claude"
 enable_opencode_discovery: true
 enable_opencode_drafting: true
 opencode_models:
   default: "google/gemini-2.5-pro"
+```
+
+**OpenCode-only (no Claude CLI required):**
+```yaml
+primary_provider: "opencode"
+opencode_models:
+  default: "google/gemini-2.5-pro"
+  reviewer: "google/gemini-2.5-pro"
+  judge: "anthropic/claude-sonnet-4-5"
+  discovery: "google/gemini-2.5-pro"
+  drafter: "anthropic/claude-sonnet-4-5"
+  reviser: "anthropic/claude-sonnet-4-5"
+  taskify: "google/gemini-2.5-pro"
+enable_codex_reviewers: true       # Codex still available as secondary
 ```
 
 **Fast iteration (cheaper, fewer rounds):**
