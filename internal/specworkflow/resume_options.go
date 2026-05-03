@@ -205,6 +205,7 @@ func pickDefaultMode(s StageResumeOptions) ResumeMode {
 func probeDiscoveryResume(specDir string, round int) *StageResumeOptions {
 	canonicalPath := filepath.Join(specDir, "discovery-output.json")
 	claudePath := filepath.Join(specDir, VersionedFilename("discovery-output", "claude", round, ".json"))
+	opencodePath := filepath.Join(specDir, VersionedFilename("discovery-output", "opencode", round, ".json"))
 	codexPath := filepath.Join(specDir, VersionedFilename("discovery-output", "codex", round, ".json"))
 
 	opts := &StageResumeOptions{
@@ -229,12 +230,18 @@ func probeDiscoveryResume(specDir string, round int) *StageResumeOptions {
 
 	// Per-provider outputs: try current round first, then fall back to round 1
 	// (matches the existing checkDiscoveryArtefacts behaviour).
+	// Check both "claude" and "opencode" names for the primary provider output
+	// to support workflows started with either provider.
 	for _, r := range []int{round, 1} {
 		c := filepath.Join(specDir, VersionedFilename("discovery-output", "claude", r, ".json"))
+		oc := filepath.Join(specDir, VersionedFilename("discovery-output", "opencode", r, ".json"))
 		x := filepath.Join(specDir, VersionedFilename("discovery-output", "codex", r, ".json"))
 		if _, err := os.Stat(c); err == nil {
 			opts.HasClaude = true
 			claudePath = c
+		} else if _, err := os.Stat(oc); err == nil {
+			opts.HasClaude = true
+			claudePath = oc
 		}
 		if _, err := os.Stat(x); err == nil {
 			opts.HasCodex = true
@@ -246,6 +253,7 @@ func probeDiscoveryResume(specDir string, round int) *StageResumeOptions {
 	}
 	_ = claudePath
 	_ = codexPath
+	_ = opencodePath
 
 	if opts.HasClaude && opts.HasCodex {
 		// Insert replay_merge just after skip_to_gate (if present) or at head.
@@ -297,10 +305,14 @@ func probeDraftingResume(specDir string, round int) *StageResumeOptions {
 	// Per-provider drafter outputs: try current-round and round-1 versioned
 	// filenames. The drafter versions are indexed by Gate2RedraftCount+1, but
 	// we probe round==Round first then fall back to 1.
+	// Check both "claude" and "opencode" names for the primary provider output.
 	for _, r := range []int{round, 1} {
 		c := filepath.Join(specDir, VersionedFilename("drafter-output", "claude", r, ".json"))
+		oc := filepath.Join(specDir, VersionedFilename("drafter-output", "opencode", r, ".json"))
 		x := filepath.Join(specDir, VersionedFilename("drafter-output", "codex", r, ".json"))
 		if _, err := os.Stat(c); err == nil {
+			opts.HasClaude = true
+		} else if _, err := os.Stat(oc); err == nil {
 			opts.HasClaude = true
 		}
 		if _, err := os.Stat(x); err == nil {

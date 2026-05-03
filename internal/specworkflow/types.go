@@ -329,4 +329,7 @@ type WorkflowStateJSON struct {
 	// Stored in both workflow-state.json and KV ({feature}:run_id).
 	// On recovery, KV and file values are compared to confirm same run (FR-040–042).
 	RunID string `json:"run_id,omitempty"`
+	// PrimaryProvider records which CLI was used as the primary runner
+	// ("claude" or "opencode"). Prevents provider mismatch on resume.
+	PrimaryProvider string `json:"primary_provider,omitempty"`
 }

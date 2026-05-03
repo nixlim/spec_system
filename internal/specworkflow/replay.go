@@ -15,13 +15,20 @@ import (
 // and writes the merged result to discovery-output.json. Falls back to
 // mechanical merge on agent failure.
 func ReplayDiscoveryMerge(runner AgentRunner, specDir string, round int, timeoutSeconds int) (string, error) {
+	// Check both "claude" and "opencode" names for the primary provider output.
 	claudePath := filepath.Join(specDir, VersionedFilename("discovery-output", "claude", round, ".json"))
+	if _, err := os.Stat(claudePath); err != nil {
+		altPath := filepath.Join(specDir, VersionedFilename("discovery-output", "opencode", round, ".json"))
+		if _, altErr := os.Stat(altPath); altErr == nil {
+			claudePath = altPath
+		}
+	}
 	codexPath := filepath.Join(specDir, VersionedFilename("discovery-output", "codex", round, ".json"))
 
 	// Read and validate both provider outputs.
 	claudeOutput, claudeData, err := parseAndValidateDiscoveryOutput(claudePath)
 	if err != nil {
-		return "", fmt.Errorf("read claude discovery output: %w", err)
+		return "", fmt.Errorf("read primary provider discovery output: %w", err)
 	}
 	codexOutput, codexData, err := parseAndValidateDiscoveryOutput(codexPath)
 	if err != nil {
@@ -32,8 +39,8 @@ func ReplayDiscoveryMerge(runner AgentRunner, specDir string, round int, timeout
 	mergedPath := filepath.Join(specDir, VersionedMergedFilename("discovery-output", round, ".json"))
 
 	var mergeRunner AgentRunner = runner
-	if cr, ok := runner.(*ClaudeRunner); ok {
-		mergeRunner = cr.ForJSONOnly(string(DiscoveryOutputSchema()))
+	if jo, ok := runner.(JSONOnlyRunner); ok {
+		mergeRunner = jo.ForJSONOnlyMode(DiscoveryOutputSchema())
 	}
 
 	// Dispatch with validation+retry (2 attempts).
@@ -150,13 +157,20 @@ func ReplayReviewMerge(specDir string, round int) (string, error) {
 // drafter output files, dispatches the combine agent, and writes the combined
 // result to drafter-output.json.
 func ReplayDraftingCombine(runner AgentRunner, specDir string, version int, timeoutSeconds int) (string, error) {
+	// Check both "claude" and "opencode" names for the primary provider output.
 	claudeOutPath := filepath.Join(specDir, VersionedFilename("drafter-output", "claude", version, ".json"))
+	if _, err := os.Stat(claudeOutPath); err != nil {
+		altPath := filepath.Join(specDir, VersionedFilename("drafter-output", "opencode", version, ".json"))
+		if _, altErr := os.Stat(altPath); altErr == nil {
+			claudeOutPath = altPath
+		}
+	}
 	codexOutPath := filepath.Join(specDir, VersionedFilename("drafter-output", "codex", version, ".json"))
 
 	// Validate both files exist and are valid JSON.
 	claudeData, err := os.ReadFile(claudeOutPath)
 	if err != nil {
-		return "", fmt.Errorf("read claude drafter output: %w", err)
+		return "", fmt.Errorf("read primary provider drafter output: %w", err)
 	}
 	var claudeDraft DrafterOutput
 	if err := json.Unmarshal(claudeData, &claudeDraft); err != nil {

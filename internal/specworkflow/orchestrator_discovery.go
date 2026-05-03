@@ -73,12 +73,18 @@ func checkDiscoveryArtefacts(specDir string, round int) *DiscoveryResumeData {
 	}
 
 	// Check per-provider outputs (try current round, then round 1 fallback).
+	// Check both "claude" and "opencode" names for the primary provider output.
 	for _, r := range []int{round, 1} {
 		claudePath := filepath.Join(specDir, VersionedFilename("discovery-output", "claude", r, ".json"))
-		codexPath := filepath.Join(specDir, VersionedFilename("discovery-output", "codex", r, ".json"))
 		if _, err := os.Stat(claudePath); err == nil {
 			data.HasClaudeOutput = true
+		} else {
+			ocPath := filepath.Join(specDir, VersionedFilename("discovery-output", "opencode", r, ".json"))
+			if _, err := os.Stat(ocPath); err == nil {
+				data.HasClaudeOutput = true
+			}
 		}
+		codexPath := filepath.Join(specDir, VersionedFilename("discovery-output", "codex", r, ".json"))
 		if _, err := os.Stat(codexPath); err == nil {
 			data.HasCodexOutput = true
 		}
@@ -211,10 +217,10 @@ func (o *Orchestrator) handleSingleDiscovery(prompt string, state *WorkflowState
 		maxAttempts = 2
 	}
 
-	// Use --json-schema to enforce structured output when the runner supports it.
+	// Enforce structured output when the runner supports it.
 	discoveryRunner := o.runnerFor("discovery")
-	if cr, ok := discoveryRunner.(*ClaudeRunner); ok {
-		discoveryRunner = cr.WithJSONSchema(string(DiscoveryOutputSchema()))
+	if se, ok := discoveryRunner.(SchemaEnforcer); ok {
+		discoveryRunner = se.WithSchemaEnforcement(DiscoveryOutputSchema())
 	}
 
 	var lastValidationErrors []string
@@ -289,7 +295,7 @@ func (o *Orchestrator) handleSingleDiscovery(prompt string, state *WorkflowState
 func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJSON, specDir string, discoveryRound int, sourceDocPaths []string) error {
 	timeout := o.config.AgentTimeoutSeconds
 
-	claudeOutPath := filepath.Join(specDir, VersionedFilename("discovery-output", "claude", discoveryRound, ".json"))
+	claudeOutPath := filepath.Join(specDir, VersionedFilename("discovery-output", o.primaryProviderName(), discoveryRound, ".json"))
 	codexOutPath := filepath.Join(specDir, VersionedFilename("discovery-output", "codex", discoveryRound, ".json"))
 
 	// Track and emit dispatch events.
@@ -314,10 +320,10 @@ func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJS
 	resultsCh := make(chan discoveryResult, providerCount)
 	var wg sync.WaitGroup
 
-	// Build a schema-bound Claude runner for structured output.
+	// Build a schema-bound primary runner for structured output.
 	var discoveryClaudeRunner AgentRunner = o.runnerFor("discovery")
-	if cr, ok := discoveryClaudeRunner.(*ClaudeRunner); ok {
-		discoveryClaudeRunner = cr.WithJSONSchema(string(DiscoveryOutputSchema()))
+	if se, ok := discoveryClaudeRunner.(SchemaEnforcer); ok {
+		discoveryClaudeRunner = se.WithSchemaEnforcement(DiscoveryOutputSchema())
 	}
 
 	// Claude discovery agent.
@@ -731,11 +737,11 @@ func (o *Orchestrator) mergeDiscoveryWithAgent(claudeData, codexData []byte, out
 
 	basePrompt := buildDiscoveryMergePrompt(claudeData, codexData)
 
-	// Use ForJSONOnly: disable tools and enforce --json-schema. The merge agent
+	// Use JSON-only mode: disable tools and enforce schema. The merge agent
 	// receives all data inline and only needs to produce JSON — no file access needed.
 	var mergeRunner AgentRunner = o.runnerFor("discovery")
-	if cr, ok := mergeRunner.(*ClaudeRunner); ok {
-		mergeRunner = cr.ForJSONOnly(string(DiscoveryOutputSchema()))
+	if jo, ok := mergeRunner.(JSONOnlyRunner); ok {
+		mergeRunner = jo.ForJSONOnlyMode(DiscoveryOutputSchema())
 	}
 
 	maxAttempts := o.config.MaxRetries
@@ -1038,7 +1044,7 @@ func (o *Orchestrator) buildDiscoveryGateData(merged *DiscoveryOutput, specDir s
 	}
 
 	discoveryRound := state.Gate1CorrectionCount + 1
-	claudePath := filepath.Join(specDir, VersionedFilename("discovery-output", "claude", discoveryRound, ".json"))
+	claudePath := filepath.Join(specDir, VersionedFilename("discovery-output", o.primaryProviderName(), discoveryRound, ".json"))
 	codexPath := filepath.Join(specDir, VersionedFilename("discovery-output", "codex", discoveryRound, ".json"))
 
 	// If neither per-provider file exists, this was a single-provider run.

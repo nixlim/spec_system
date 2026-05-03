@@ -36,7 +36,7 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 
 	for _, lens := range lensGroups {
 		letter := reviewerGroupLetter[lens]
-		outPath := filepath.Join(specDir, fmt.Sprintf("review-%s-claude-round-%d.json", letter, state.Round))
+		outPath := filepath.Join(specDir, fmt.Sprintf("review-%s-%s-round-%d.json", letter, o.primaryProviderName(), state.Round))
 		p, err := o.promptBuilder.BuildReviewerPrompt(lens, state.Round, specPath, outPath)
 		if err != nil {
 			return fmt.Errorf("build reviewer prompt for %s: %w", lens, err)
@@ -192,7 +192,7 @@ func (o *Orchestrator) handleReviewing(state *WorkflowStateJSON, specDir string)
 	return nil
 }
 
-// dispatchHoldoutGeneration dispatches holdout agents (1 claude + optionally
+// dispatchHoldoutGeneration dispatches holdout agents (1 primary + optionally
 // codex and opencode) in parallel, merges their markdown outputs with provider
 // attribution, and writes the merged holdout file. If only one provider
 // fails, the workflow proceeds with reduced holdouts. If all fail, returns
@@ -206,7 +206,7 @@ func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specD
 		maxAttempts = 1
 	}
 
-	providerCount := 1 // claude always
+	providerCount := 1 // primary always
 	if o.codexHoldoutRunner != nil {
 		providerCount++
 	}
@@ -218,8 +218,9 @@ func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specD
 	resultsCh := make(chan holdoutDispatchResult, providerCount)
 
 	// Track and emit dispatch events for holdout agents.
-	o.SetAgentStatus("holdout-claude", "running")
-	o.emitter.Emit(NewAgentDispatchEvent("holdout-claude", state.Round))
+	holdoutPrimaryLabel := "holdout-" + o.primaryProviderName()
+	o.SetAgentStatus(holdoutPrimaryLabel, "running")
+	o.emitter.Emit(NewAgentDispatchEvent(holdoutPrimaryLabel, state.Round))
 	if o.codexHoldoutRunner != nil {
 		o.SetAgentStatus("holdout-codex", "running")
 		o.emitter.Emit(NewAgentDispatchEvent("holdout-codex", state.Round))
@@ -229,14 +230,15 @@ func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specD
 		o.emitter.Emit(NewAgentDispatchEvent("holdout-opencode", state.Round))
 	}
 
-	// Claude holdout agent — uses o.runner.Run() directly with configured
+	// Primary provider holdout agent — uses o.runner.Run() directly with configured
 	// holdout timeout plus explicit JSON contract validation.
-	claudeJSONPath := filepath.Join(specDir, fmt.Sprintf("holdout-claude-round-%d.json", state.Round))
-	claudeMDPath := filepath.Join(specDir, fmt.Sprintf("holdouts-claude-round-%d.md", state.Round))
+	primaryName := o.primaryProviderName()
+	primaryJSONPath := filepath.Join(specDir, fmt.Sprintf("holdout-%s-round-%d.json", primaryName, state.Round))
+	primaryMDPath := filepath.Join(specDir, fmt.Sprintf("holdouts-%s-round-%d.md", primaryName, state.Round))
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		resultsCh <- o.runHoldoutProvider("claude", o.runnerFor("holdout"), specPath, mergedFindingsPath, state.Round, claudeJSONPath, claudeMDPath, timeout, maxAttempts)
+		resultsCh <- o.runHoldoutProvider(primaryName, o.runnerFor("holdout"), specPath, mergedFindingsPath, state.Round, primaryJSONPath, primaryMDPath, timeout, maxAttempts)
 	}()
 
 	// Codex holdout agent (when available).
@@ -250,7 +252,8 @@ func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specD
 		}()
 	}
 
-	// OpenCode holdout agent (when available).
+	// OpenCode holdout agent (when available — only as secondary, not when
+	// opencode is already the primary provider).
 	if o.opencodeHoldoutRunner != nil {
 		opencodeJSONPath := filepath.Join(specDir, fmt.Sprintf("holdout-opencode-round-%d.json", state.Round))
 		opencodeMDPath := filepath.Join(specDir, fmt.Sprintf("holdouts-opencode-round-%d.md", state.Round))
@@ -265,9 +268,10 @@ func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specD
 	wg.Wait()
 	close(resultsCh)
 
-	// Collect results and emit completion events.
-	var claudeOutput, codexOutput, opencodeOutput *HoldoutOutput
-	var claudeMD, codexMD, opencodeMD string
+	// Collect results and emit completion events. Match primary provider
+	// results by the primaryName rather than a hardcoded "claude" literal.
+	var primaryOutput, codexOutput, opencodeOutput *HoldoutOutput
+	var primaryMD, codexMD, opencodeMD string
 	for r := range resultsCh {
 		state.CumulativeCostUSD += r.cost
 		if r.err != nil {
@@ -279,29 +283,29 @@ func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specD
 		o.SetAgentStatus("holdout-"+r.provider, "done")
 		o.emitter.Emit(NewAgentCompleteEvent("holdout-"+r.provider, state.Round, true, 0, r.cost))
 		switch r.provider {
-		case "claude":
-			claudeOutput = r.output
-			claudeMD = r.md
+		case primaryName:
+			primaryOutput = r.output
+			primaryMD = r.md
 		case "codex":
 			codexOutput = r.output
 			codexMD = r.md
-		case "opencode":
+		default:
 			opencodeOutput = r.output
 			opencodeMD = r.md
 		}
 	}
 
 	// Merge holdout outputs with provider attribution.
-	claudeOK := claudeOutput != nil
+	primaryOK := primaryOutput != nil
 	codexOK := codexOutput != nil
 	opencodeOK := opencodeOutput != nil
 	_ = opencodeOutput // used via opencodeOK
-	if !claudeOK && !codexOK && !opencodeOK {
+	if !primaryOK && !codexOK && !opencodeOK {
 		return fmt.Errorf("holdout generation failed: all providers failed — escalation required")
 	}
 
-	// Include opencode markdown in the merge when available.
-	mergedMD := MergeHoldoutMarkdown(state.Round, claudeMD, codexMD, claudeOK, codexOK)
+	// Merge markdown from all available providers.
+	mergedMD := MergeHoldoutMarkdown(state.Round, primaryMD, codexMD, primaryOK, codexOK)
 	if opencodeOK && opencodeMD != "" {
 		mergedMD += "\n\n## OpenCode Holdout Analysis\n\n" + opencodeMD
 	}
@@ -313,7 +317,7 @@ func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specD
 		return fmt.Errorf("merged holdout markdown missing: %w", err)
 	}
 
-	finalOutput := mergeHoldoutOutputs(state.Round, mergedPath, claudeOutput, codexOutput)
+	finalOutput := mergeHoldoutOutputs(state.Round, mergedPath, primaryOutput, codexOutput)
 	if errs := ValidateHoldoutOutput(&finalOutput, state.Round, mergedPath); len(errs) > 0 {
 		msgs := make([]string, len(errs))
 		for i, err := range errs {
@@ -331,8 +335,8 @@ func (o *Orchestrator) dispatchHoldoutGeneration(state *WorkflowStateJSON, specD
 		return fmt.Errorf("write merged holdout output: %w", err)
 	}
 
-	log.Printf("[orchestrator] holdout generation complete: claude=%v codex=%v merged=%s",
-		claudeOK, codexOK, mergedPath)
+	log.Printf("[orchestrator] holdout generation complete: %s=%v codex=%v merged=%s",
+		primaryName, primaryOK, codexOK, mergedPath)
 	_ = merged.TotalAfterDedup
 	return nil
 }

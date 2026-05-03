@@ -66,11 +66,10 @@ func (o *Orchestrator) handleDrafting(state *WorkflowStateJSON, specDir string) 
 		log.Printf("[orchestrator] Codex unavailable, falling back to Claude-only drafting")
 	}
 
-	// Single-provider (Claude only) — current behavior.
-	// Use --json-schema to enforce structured output when the runner supports it.
+	// Single-provider path — enforce structured output when the runner supports it.
 	drafterRunner := o.runnerFor("drafter")
-	if cr, ok := drafterRunner.(*ClaudeRunner); ok {
-		drafterRunner = cr.WithJSONSchema(string(DrafterOutputSchema()))
+	if se, ok := drafterRunner.(SchemaEnforcer); ok {
+		drafterRunner = se.WithSchemaEnforcement(DrafterOutputSchema())
 	}
 	err = o.handleSingleDrafting(state, specDir, prompt, drafterRunner)
 	return err
@@ -118,7 +117,7 @@ func (o *Orchestrator) handleSingleDrafting(state *WorkflowStateJSON, specDir, p
 //     parsing stdout (a markdown summary) and report invalid_json even
 //     when the spec was successfully drafted on disk.
 func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, confirmedReqsPath string, userAnswers map[string]string, contextDocs []string, version int) error {
-	claudeOutPath := filepath.Join(specDir, VersionedFilename("drafter-output", "claude", version, ".json"))
+	claudeOutPath := filepath.Join(specDir, VersionedFilename("drafter-output", o.primaryProviderName(), version, ".json"))
 	codexOutPath := filepath.Join(specDir, VersionedFilename("drafter-output", "codex", version, ".json"))
 	opencodeOutPath := filepath.Join(specDir, VersionedFilename("drafter-output", "opencode", version, ".json"))
 	timeout := o.config.AgentTimeoutSeconds
@@ -141,10 +140,10 @@ func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, con
 	var wg sync.WaitGroup
 	var claudeResult, codexResult, opencodeResult drafterResult
 
-	// Build a schema-bound Claude runner for structured output.
+	// Build a schema-bound primary runner for structured output.
 	var drafterClaudeRunner AgentRunner = o.runnerFor("drafter")
-	if cr, ok := drafterClaudeRunner.(*ClaudeRunner); ok {
-		drafterClaudeRunner = cr.WithJSONSchema(string(DrafterOutputSchema()))
+	if se, ok := drafterClaudeRunner.(SchemaEnforcer); ok {
+		drafterClaudeRunner = se.WithSchemaEnforcement(DrafterOutputSchema())
 	}
 
 	wg.Add(1)

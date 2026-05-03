@@ -502,29 +502,59 @@ func (o *Orchestrator) RunWorkflow(goal GoalInput) error {
 	}
 }
 
-// runnerFor returns an AgentRunner for the given role. For ClaudeRunner, it
-// always returns a clone with the run context and (if configured) a per-role
-// model override applied, so Cancel() kills the subprocess immediately.
+// runnerFor returns an AgentRunner for the given role with per-role model
+// overrides, role tagging, and cancellation context applied. Works with any
+// AgentRunner implementation (Claude, OpenCode, etc.) via optional interfaces.
 func (o *Orchestrator) runnerFor(role string) AgentRunner {
-	cr, ok := o.runner.(*ClaudeRunner)
-	if !ok {
-		return o.runner
+	runner := o.runner
+
+	// Clone first for telemetry attribution — this must happen before
+	// model/context injection so those values aren't lost by the clone.
+	if tagger, ok := runner.(AgentTagger); ok {
+		runner = tagger.CloneForAgent(role)
 	}
-	clone := cr
-	if model := o.config.ClaudeModels.For(role); model != "" {
-		clone = cr.WithModel(model)
-	} else {
-		c := *cr
-		clone = &c
+
+	// Apply per-role model override via the ModelOverrider interface.
+	if model := o.modelForRole(role); model != "" {
+		if mo, ok := runner.(ModelOverrider); ok {
+			runner = mo.WithModelOverride(model)
+		}
 	}
-	clone.Role = role
+
+	// Inject cancellation context via the ContextInjector interface.
 	o.mu.Lock()
 	ctx := o.runCtx
 	o.mu.Unlock()
 	if ctx != nil {
-		clone.Ctx = ctx
+		if ci, ok := runner.(ContextInjector); ok {
+			runner = ci.WithContext(ctx)
+		}
 	}
-	return clone
+	return runner
+}
+
+// modelForRole returns the model string for a given role, consulting
+// the appropriate config based on the primary provider.
+func (o *Orchestrator) modelForRole(role string) string {
+	if o.config.PrimaryProvider == "opencode" {
+		return o.config.OpenCodeModels.For(role)
+	}
+	return o.config.ClaudeModels.For(role)
+}
+
+// primaryProviderName returns the label used in versioned filenames for
+// the primary provider.
+func (o *Orchestrator) primaryProviderName() string {
+	return normalizePrimaryProvider(o.config.PrimaryProvider)
+}
+
+// normalizePrimaryProvider returns "opencode" when the value is "opencode",
+// and "claude" for any other value (including empty string).
+func normalizePrimaryProvider(p string) string {
+	if p == "opencode" {
+		return "opencode"
+	}
+	return "claude"
 }
 
 // newOrchestrator contains the full construction logic for NewOrchestrator.
@@ -723,12 +753,25 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 		// Initialise fresh workflow state.
 		now := time.Now().UTC().Format(time.RFC3339)
 		ws = &WorkflowStateJSON{
-			State:          StateInit,
-			Round:          1,
-			FeatureName:    cfg.FeatureName,
-			StartedAt:      now,
-			UpdatedAt:      now,
-			SkillChecksums: skills.GetChecksums(),
+			State:           StateInit,
+			Round:           1,
+			FeatureName:     cfg.FeatureName,
+			StartedAt:       now,
+			UpdatedAt:       now,
+			SkillChecksums:  skills.GetChecksums(),
+			PrimaryProvider: normalizePrimaryProvider(cfg.Config.PrimaryProvider),
+		}
+	}
+
+	// On resume, reject provider mismatch to prevent broken workflows.
+	if existingState != nil {
+		persisted := normalizePrimaryProvider(existingState.PrimaryProvider)
+		configured := normalizePrimaryProvider(cfg.Config.PrimaryProvider)
+		if persisted != configured {
+			return nil, fmt.Errorf(
+				"cannot resume workflow: started with primary_provider=%q but config now specifies %q",
+				persisted, configured,
+			)
 		}
 	}
 
@@ -780,6 +823,11 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 		ws.FindingsSummary = tracker.GetFindingSummary()
 	}
 
+	// Use cfg.Runner as-is — the caller (API layer via DefaultPrimaryRunner)
+	// is responsible for constructing the correct runner based on PrimaryProvider.
+	primaryRunner := cfg.Runner
+	log.Printf("[orchestrator] primary provider: %s", normalizePrimaryProvider(cfg.Config.PrimaryProvider))
+
 	orch := &Orchestrator{
 		config:          cfg.Config,
 		sm:              sm,
@@ -789,7 +837,7 @@ func newOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 		promptBuilder:   promptBuilder,
 		skills:          skills,
 		progressTracker: NewProgressTracker(),
-		runner:          cfg.Runner,
+		runner:          primaryRunner,
 		codexRunner:            codexRunner,
 		codexHoldoutRunner:     codexHoldoutRunner,
 		codexDiscoveryRunner:   codexDiscoveryRunner,

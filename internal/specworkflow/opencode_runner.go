@@ -365,6 +365,36 @@ func (r *OpenCodeRunner) CloneForAgent(agentName string) AgentRunner {
 	}
 }
 
+// WithModelOverride implements the ModelOverrider interface.
+func (r *OpenCodeRunner) WithModelOverride(model string) AgentRunner {
+	clone := *r
+	clone.Model = model
+	return &clone
+}
+
+// WithSchemaEnforcement implements the SchemaEnforcer interface.
+func (r *OpenCodeRunner) WithSchemaEnforcement(schemaBytes []byte) AgentRunner {
+	clone := *r
+	clone.SchemaBytes = schemaBytes
+	return &clone
+}
+
+// ForJSONOnlyMode implements the JSONOnlyRunner interface. For OpenCode,
+// schema enforcement and JSON-only mode are equivalent — both embed the
+// schema in the prompt preamble.
+func (r *OpenCodeRunner) ForJSONOnlyMode(schemaBytes []byte) AgentRunner {
+	clone := *r
+	clone.SchemaBytes = schemaBytes
+	return &clone
+}
+
+// WithContext returns a copy of the runner with the given parent context.
+func (r *OpenCodeRunner) WithContext(ctx context.Context) AgentRunner {
+	clone := *r
+	clone.Ctx = ctx
+	return &clone
+}
+
 // DefaultOpenCodeRunner returns an OpenCodeRunner configured with standard defaults.
 func DefaultOpenCodeRunner(model string, workspaceDir string, schemaBytes []byte) *OpenCodeRunner {
 	return &OpenCodeRunner{

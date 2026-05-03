@@ -110,10 +110,25 @@ func (r *ClaudeRunner) WithModel(model string) *ClaudeRunner {
 // WithContext returns a copy of the runner with the given parent context set.
 // When the context is cancelled, any running subprocess is killed immediately.
 // The original runner is not modified.
-func (r *ClaudeRunner) WithContext(ctx context.Context) *ClaudeRunner {
+func (r *ClaudeRunner) WithContext(ctx context.Context) AgentRunner {
 	clone := *r
 	clone.Ctx = ctx
 	return &clone
+}
+
+// WithModelOverride implements the ModelOverrider interface.
+func (r *ClaudeRunner) WithModelOverride(model string) AgentRunner {
+	return r.WithModel(model)
+}
+
+// WithSchemaEnforcement implements the SchemaEnforcer interface.
+func (r *ClaudeRunner) WithSchemaEnforcement(schemaBytes []byte) AgentRunner {
+	return r.WithJSONSchema(string(schemaBytes))
+}
+
+// ForJSONOnlyMode implements the JSONOnlyRunner interface.
+func (r *ClaudeRunner) ForJSONOnlyMode(schemaBytes []byte) AgentRunner {
+	return r.ForJSONOnly(string(schemaBytes))
 }
 
 // ForJSONOnly returns a copy of the runner configured for pure JSON production:

@@ -89,11 +89,16 @@ func (m ClaudeModelConfig) For(role string) string {
 // invocations. Each field is a "provider/model" string (e.g.
 // "anthropic/claude-sonnet-4-5", "google/gemini-2.5-pro").
 type OpenCodeModelConfig struct {
-	Default   string `yaml:"default"`
-	Reviewer  string `yaml:"reviewer"`
-	Holdout   string `yaml:"holdout"`
-	Discovery string `yaml:"discovery"`
-	Drafter   string `yaml:"drafter"`
+	Default      string `yaml:"default"`
+	Reviewer     string `yaml:"reviewer"`
+	Holdout      string `yaml:"holdout"`
+	Reviser      string `yaml:"reviser"`
+	Judge        string `yaml:"judge"`
+	Discovery    string `yaml:"discovery"`
+	Drafter      string `yaml:"drafter"`
+	Taskify      string `yaml:"taskify"`
+	TaskReviewer string `yaml:"task_reviewer"`
+	TaskReviser  string `yaml:"task_reviser"`
 }
 
 // For returns the model configured for role, falling back to Default.
@@ -104,10 +109,20 @@ func (m OpenCodeModelConfig) For(role string) string {
 		specific = m.Reviewer
 	case "holdout":
 		specific = m.Holdout
+	case "reviser":
+		specific = m.Reviser
+	case "judge":
+		specific = m.Judge
 	case "discovery":
 		specific = m.Discovery
 	case "drafter":
 		specific = m.Drafter
+	case "taskify":
+		specific = m.Taskify
+	case "task_reviewer":
+		specific = m.TaskReviewer
+	case "task_reviser":
+		specific = m.TaskReviser
 	}
 	if specific != "" {
 		return specific
@@ -175,6 +190,9 @@ type SpecWorkflowConfig struct {
 	// TaskifyMaxRetries is the maximum number of retry attempts for
 	// taskify when output fails schema/DAG validation.
 	TaskifyMaxRetries int `yaml:"taskify_max_retries"`
+	// PrimaryProvider selects the CLI used as the primary agent runner for
+	// all roles. Valid values: "claude" (default), "opencode".
+	PrimaryProvider string `yaml:"primary_provider"`
 	// EnableOpenCodeReviewers controls whether OpenCode CLI agents are used
 	// alongside claude and codex for review and holdout generation.
 	EnableOpenCodeReviewers bool `yaml:"enable_opencode_reviewers"`
@@ -282,6 +300,22 @@ func (c *SpecWorkflowConfig) Validate() error {
 	}
 	if c.KillEscalationTimeoutSeconds <= 0 {
 		return fmt.Errorf("kill_escalation_timeout_seconds must be > 0, got %d", c.KillEscalationTimeoutSeconds)
+	}
+	if c.PrimaryProvider != "" && c.PrimaryProvider != "claude" && c.PrimaryProvider != "opencode" {
+		return fmt.Errorf("primary_provider must be \"claude\" or \"opencode\", got %q", c.PrimaryProvider)
+	}
+	// Reject enabling OpenCode as a secondary provider when it's already the primary —
+	// this would cause filename collisions on versioned output files.
+	if c.PrimaryProvider == "opencode" {
+		if c.EnableOpenCodeReviewers {
+			return fmt.Errorf("enable_opencode_reviewers cannot be true when primary_provider is \"opencode\" (would cause filename collisions)")
+		}
+		if c.EnableOpenCodeDiscovery {
+			return fmt.Errorf("enable_opencode_discovery cannot be true when primary_provider is \"opencode\" (would cause filename collisions)")
+		}
+		if c.EnableOpenCodeDrafting {
+			return fmt.Errorf("enable_opencode_drafting cannot be true when primary_provider is \"opencode\" (would cause filename collisions)")
+		}
 	}
 	if c.SkillPaths.PlanSpec != "" {
 		if _, err := os.Stat(c.SkillPaths.PlanSpec); err != nil {

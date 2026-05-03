@@ -380,9 +380,7 @@ func (m *WorkflowManager) ResumeFromGate(featureName string) (*specworkflow.Orch
 	if beadsErr != nil {
 		return nil, fmt.Errorf("create orchestrator: %w", beadsErr)
 	}
-	runner := specworkflow.DefaultClaudeRunner(m.workspaceDir, m.otelPort, featureName, m.config.ClaudeModels.Default)
-	runner.Tracker = m.processTracker
-	runner.Feature = featureName
+	runner := specworkflow.DefaultPrimaryRunner(m.config, m.workspaceDir, m.otelPort, featureName, m.processTracker)
 	orchConfig := specworkflow.OrchestratorConfig{
 		WorkspaceDir:   m.workspaceDir,
 		FeatureName:    featureName,
@@ -563,9 +561,7 @@ func HandleStartWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create beads client: %v", beadsErr))
 			return
 		}
-		startRunner := specworkflow.DefaultClaudeRunner(wsDir, manager.otelPort, req.FeatureName, manager.config.ClaudeModels.Default)
-		startRunner.Tracker = manager.processTracker
-		startRunner.Feature = req.FeatureName
+		startRunner := specworkflow.DefaultPrimaryRunner(manager.config, wsDir, manager.otelPort, req.FeatureName, manager.processTracker)
 		orchConfig := specworkflow.OrchestratorConfig{
 			WorkspaceDir:   wsDir,
 			FeatureName:    req.FeatureName,
@@ -1439,9 +1435,7 @@ func HandleResumeWorkflow(manager *WorkflowManager) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create beads client: %v", beadsErr))
 			return
 		}
-		resumeRunner := specworkflow.DefaultClaudeRunner(manager.workspaceDir, manager.otelPort, req.FeatureName, manager.config.ClaudeModels.Default)
-		resumeRunner.Tracker = manager.processTracker
-		resumeRunner.Feature = req.FeatureName
+		resumeRunner := specworkflow.DefaultPrimaryRunner(manager.config, manager.workspaceDir, manager.otelPort, req.FeatureName, manager.processTracker)
 		orchConfig := specworkflow.OrchestratorConfig{
 			WorkspaceDir:   manager.workspaceDir,
 			FeatureName:    req.FeatureName,
@@ -1515,11 +1509,9 @@ func findInferredStage(opts *specworkflow.ResumeOptions) (specworkflow.StageResu
 // DISCOVERY (via ReplayDiscoveryMerge). Returns a human-readable status
 // message on success.
 func runReplayForStage(stageOpt specworkflow.StageResumeOptions, manager *WorkflowManager, featureName, specDir string, state *specworkflow.WorkflowStateJSON) (string, error) {
-	// Build a Claude runner matching the one the orchestrator would use
+	// Build a runner matching the one the orchestrator would use
 	// for merge/combine work so tracker wiring and telemetry are consistent.
-	replayRunner := specworkflow.DefaultClaudeRunner(manager.workspaceDir, manager.otelPort, featureName, manager.config.ClaudeModels.Default)
-	replayRunner.Tracker = manager.processTracker
-	replayRunner.Feature = featureName
+	replayRunner := specworkflow.DefaultPrimaryRunner(manager.config, manager.workspaceDir, manager.otelPort, featureName, manager.processTracker)
 
 	timeout := manager.config.AgentTimeoutSeconds
 	round := 1
@@ -2282,11 +2274,8 @@ func HandleReplayPhase(manager *WorkflowManager) http.HandlerFunc {
 		switch req.Phase {
 		case "discovery_merge":
 			round := state.Gate1CorrectionCount + 1
-			// Discovery merge requires an agent runner.
-			runner := specworkflow.DefaultClaudeRunner(workspace, manager.otelPort, req.FeatureName, manager.config.ClaudeModels.Default)
-			runner.Tracker = manager.processTracker
-			runner.Feature = req.FeatureName
-			runner.Role = "discovery-merge"
+			baseRunner := specworkflow.DefaultPrimaryRunner(manager.config, workspace, manager.otelPort, req.FeatureName, manager.processTracker)
+			runner := specworkflow.TaggedRunnerPublic(baseRunner, "discovery-merge")
 			timeout := manager.config.AgentTimeoutSeconds
 			if timeout == 0 {
 				timeout = 120
@@ -2295,10 +2284,8 @@ func HandleReplayPhase(manager *WorkflowManager) http.HandlerFunc {
 
 		case "drafting_combine":
 			version := state.Gate2RedraftCount + 1
-			runner := specworkflow.DefaultClaudeRunner(workspace, manager.otelPort, req.FeatureName, manager.config.ClaudeModels.Default)
-			runner.Tracker = manager.processTracker
-			runner.Feature = req.FeatureName
-			runner.Role = "drafting-combine"
+			baseRunner := specworkflow.DefaultPrimaryRunner(manager.config, workspace, manager.otelPort, req.FeatureName, manager.processTracker)
+			runner := specworkflow.TaggedRunnerPublic(baseRunner, "drafting-combine")
 			timeout := manager.config.AgentTimeoutSeconds
 			if timeout == 0 {
 				timeout = 120

@@ -6,6 +6,7 @@
 package specworkflow
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +40,31 @@ type AgentTagger interface {
 	CloneForAgent(agentName string) AgentRunner
 }
 
+// ModelOverrider is an optional interface that AgentRunner implementations can
+// satisfy to produce copies with a different model configured.
+type ModelOverrider interface {
+	WithModelOverride(model string) AgentRunner
+}
+
+// SchemaEnforcer is an optional interface that AgentRunner implementations can
+// satisfy to produce copies with schema enforcement enabled. For Claude this
+// uses --json-schema; for OpenCode it embeds the schema in the prompt preamble.
+type SchemaEnforcer interface {
+	WithSchemaEnforcement(schemaBytes []byte) AgentRunner
+}
+
+// JSONOnlyRunner is an optional interface for runners that can be configured
+// to produce pure JSON without tool use (used by merge/combine agents).
+type JSONOnlyRunner interface {
+	ForJSONOnlyMode(schemaBytes []byte) AgentRunner
+}
+
+// ContextInjector is an optional interface that AgentRunner implementations
+// can satisfy to produce copies with a parent context for cancellation.
+type ContextInjector interface {
+	WithContext(ctx context.Context) AgentRunner
+}
+
 // taggedRunner returns a per-agent runner if the runner supports AgentTagger,
 // otherwise returns the original runner unchanged.
 func taggedRunner(runner AgentRunner, agentName string) AgentRunner {
@@ -46,6 +72,12 @@ func taggedRunner(runner AgentRunner, agentName string) AgentRunner {
 		return tagger.CloneForAgent(agentName)
 	}
 	return runner
+}
+
+// TaggedRunnerPublic is the exported version of taggedRunner for use by
+// packages outside specworkflow (e.g. the API layer).
+func TaggedRunnerPublic(runner AgentRunner, agentName string) AgentRunner {
+	return taggedRunner(runner, agentName)
 }
 
 // CostProvider abstracts read access to cumulative cost data from an external

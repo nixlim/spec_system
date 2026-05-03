@@ -41,9 +41,9 @@ func (o *Orchestrator) handleTaskReview(state *WorkflowStateJSON, specDir string
 	timeout := o.config.AgentTimeoutSeconds
 
 	// Output paths — all inside the workspace (specDir).
-	claudeOutPath := filepath.Join(specDir, VersionedFilename("task-review", "claude", round, ".json"))
+	claudeOutPath := filepath.Join(specDir, VersionedFilename("task-review", o.primaryProviderName(), round, ".json"))
 	codexOutPath := filepath.Join(specDir, VersionedFilename("task-review", "codex", round, ".json"))
-	claudeMDPath := filepath.Join(specDir, fmt.Sprintf("task-review-report-claude-round-%d.md", round))
+	claudeMDPath := filepath.Join(specDir, fmt.Sprintf("task-review-report-%s-round-%d.md", o.primaryProviderName(), round))
 	codexMDPath := filepath.Join(specDir, fmt.Sprintf("task-review-report-codex-round-%d.md", round))
 
 	// Build task review prompts with explicit output paths so agents write only inside the workspace.

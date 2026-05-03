@@ -153,9 +153,8 @@ func ValidateTeamConfig(config TeamConfig) error {
 			return fmt.Errorf("agent %q: codex provider only supported for reviewer role", agent.Name)
 		}
 
-		// Non-codex agents must use "claude".
-		if agent.Provider != "claude" && agent.Provider != "codex" {
-			return fmt.Errorf("agent %q: provider must be %q or %q, got %q", agent.Name, "claude", "codex", agent.Provider)
+		if agent.Provider != "claude" && agent.Provider != "codex" && agent.Provider != "opencode" {
+			return fmt.Errorf("agent %q: provider must be %q, %q, or %q, got %q", agent.Name, "claude", "codex", "opencode", agent.Provider)
 		}
 	}
 
