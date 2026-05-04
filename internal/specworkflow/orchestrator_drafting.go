@@ -136,6 +136,18 @@ func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, con
 		return fmt.Errorf("build opencode drafter prompt: %w", err)
 	}
 
+	// Track and emit dispatch events so the UI shows per-agent indicators.
+	o.SetAgentStatus("drafter-claude", "running")
+	o.emitter.Emit(NewAgentDispatchEvent("drafter-claude", state.Round))
+	if o.codexDraftingRunner != nil {
+		o.SetAgentStatus("drafter-codex", "running")
+		o.emitter.Emit(NewAgentDispatchEvent("drafter-codex", state.Round))
+	}
+	if o.opencodeDraftingRunner != nil {
+		o.SetAgentStatus("drafter-opencode", "running")
+		o.emitter.Emit(NewAgentDispatchEvent("drafter-opencode", state.Round))
+	}
+
 	// Dispatch drafters in parallel.
 	var wg sync.WaitGroup
 	var claudeResult, codexResult, opencodeResult drafterResult
@@ -199,6 +211,24 @@ func (o *Orchestrator) handleDualDrafting(state *WorkflowStateJSON, specDir, con
 	}
 
 	wg.Wait()
+
+	// Emit completion events.
+	emitDrafterComplete := func(provider string, r drafterResult, wasDispatched bool) {
+		if !wasDispatched {
+			return
+		}
+		success := r.err == nil
+		if success {
+			o.SetAgentStatus("drafter-"+provider, "done")
+		} else {
+			o.SetAgentStatus("drafter-"+provider, "failed")
+			log.Printf("[orchestrator] drafter-%s failed: %v", provider, r.err)
+		}
+		o.emitter.Emit(NewAgentCompleteEvent("drafter-"+provider, state.Round, success, r.duration, r.cost))
+	}
+	emitDrafterComplete("claude", claudeResult, true)
+	emitDrafterComplete("codex", codexResult, o.codexDraftingRunner != nil)
+	emitDrafterComplete("opencode", opencodeResult, o.opencodeDraftingRunner != nil)
 
 	// Accumulate cost.
 	smState := o.sm.State()
