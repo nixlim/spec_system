@@ -1565,11 +1565,28 @@
   }
 
   /**
+   * Builds a fingerprint from the current question/assumption texts so we can
+   * detect when discovery output changed between correction rounds.
+   */
+  function computeGate1Fingerprint(panel) {
+    var parts = [];
+    $$(".gate-question-text", panel).forEach(function (el) {
+      parts.push(el.textContent.trim());
+    });
+    $$(".gate-assumption-answer", panel).forEach(function (ta) {
+      var li = ta.closest("li");
+      if (li) parts.push(li.textContent.substring(0, 80));
+    });
+    return simpleHash(parts.join("|"));
+  }
+
+  /**
    * Collects all editable form state from a gate panel into a plain object.
    * Works for both Gate 1 and Gate 2.
    */
   function collectGate1FormState(panel) {
     var state = {};
+    state._fingerprint = computeGate1Fingerprint(panel);
     // Open question answers (by data-question-idx)
     var answers = {};
     $$(".gate-answer", panel).forEach(function (ta) {
@@ -3564,17 +3581,12 @@
         var qHash = simpleHash(qText);
         var ta = qDiv.querySelector(".gate-answer");
         if (!ta) return;
-        // Try hash-keyed match first (new format)
+        // Match by question text hash only — index-based fallback removed
+        // because after a correction round the questions change and positional
+        // matching causes stale answers to bleed into unrelated questions.
         if (oqAnswers[qHash]) {
           var entry = oqAnswers[qHash];
           ta.value = typeof entry === "object" ? entry.answer : entry;
-        } else {
-          // Fallback: try legacy index-based match
-          var idx = ta.dataset.questionIdx;
-          if (oqAnswers[idx]) {
-            var legacyEntry = oqAnswers[idx];
-            ta.value = typeof legacyEntry === "object" ? legacyEntry.answer : legacyEntry;
-          }
         }
       });
 
@@ -3585,24 +3597,25 @@
         var strongEl = li.querySelector("strong");
         var aText = strongEl && strongEl.nextSibling ? strongEl.nextSibling.textContent.trim() : "";
         var aHash = simpleHash(aText);
-        // Try hash-keyed match first (new format)
         if (asAnswers[aHash]) {
           var entry = asAnswers[aHash];
           ta.value = typeof entry === "object" ? entry.answer : entry;
-        } else {
-          // Fallback: try legacy index-based match
-          var idx = ta.dataset.assumptionIdx;
-          if (asAnswers[idx]) {
-            var legacyEntry = asAnswers[idx];
-            ta.value = typeof legacyEntry === "object" ? legacyEntry.answer : legacyEntry;
-          }
         }
       });
     }
 
     // Restore saved form state from localStorage (survives refresh/restart).
     // Applied after pre-fill from corrections so user's latest input wins.
+    // Fingerprint the current questions so stale drafts from a prior
+    // correction round (different questions at same indexes) are discarded.
     var savedGate1 = gateFormLoad(taskId, "gate1");
+    if (savedGate1) {
+      var currentFingerprint = computeGate1Fingerprint(panel);
+      if (savedGate1._fingerprint && savedGate1._fingerprint !== currentFingerprint) {
+        gateFormClear(taskId, "gate1");
+        savedGate1 = null;
+      }
+    }
     restoreGate1FormState(panel, savedGate1);
 
     // Install auto-save on every input/change.
