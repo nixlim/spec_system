@@ -191,18 +191,18 @@ func (o *Orchestrator) handleDiscovery(goal GoalInput, state *WorkflowStateJSON,
 	// (gate1-corrections-1.json, gate1-corrections-2.json, ...).
 	discoveryCtx := loadCorrectionHistory(specDir)
 
+	// Multi-provider path: dispatch Claude + Codex + optionally OpenCode in parallel.
+	// Each provider gets its own prompt with a unique output path to avoid races.
+	if (o.config.EnableCodexDiscovery && o.codexDiscoveryRunner != nil) ||
+		(o.config.EnableOpenCodeDiscovery && o.opencodeDiscoveryRunner != nil) {
+		return o.handleDualDiscovery(state, specDir, discoveryRound, goal, discoveryCtx)
+	}
+
+	// Single-provider path.
 	prompt, err := o.promptBuilder.BuildDiscoveryPrompt(goal.SourceDocPaths, goal.CodePath, &goal, discoveryCtx...)
 	if err != nil {
 		return fmt.Errorf("build discovery prompt: %w", err)
 	}
-
-	// Multi-provider path: dispatch Claude + Codex + optionally OpenCode in parallel.
-	if (o.config.EnableCodexDiscovery && o.codexDiscoveryRunner != nil) ||
-		(o.config.EnableOpenCodeDiscovery && o.opencodeDiscoveryRunner != nil) {
-		return o.handleDualDiscovery(prompt, state, specDir, discoveryRound, goal.SourceDocPaths)
-	}
-
-	// Single-provider path (current behavior).
 	return o.handleSingleDiscovery(prompt, state, specDir, discoveryRound, goal.SourceDocPaths)
 }
 
@@ -292,8 +292,9 @@ func (o *Orchestrator) handleSingleDiscovery(prompt string, state *WorkflowState
 
 // handleDualDiscovery dispatches both Claude and Codex discovery agents in
 // parallel, merges successful outputs, and handles fallback/escalation.
-func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJSON, specDir string, discoveryRound int, sourceDocPaths []string) error {
+func (o *Orchestrator) handleDualDiscovery(state *WorkflowStateJSON, specDir string, discoveryRound int, goal GoalInput, discoveryCtx []DiscoveryContext) error {
 	timeout := o.config.AgentTimeoutSeconds
+	sourceDocPaths := goal.SourceDocPaths
 
 	claudeOutPath := filepath.Join(specDir, VersionedFilename("discovery-output", o.primaryProviderName(), discoveryRound, ".json"))
 	codexOutPath := filepath.Join(specDir, VersionedFilename("discovery-output", "codex", discoveryRound, ".json"))
@@ -320,6 +321,16 @@ func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJS
 	resultsCh := make(chan discoveryResult, providerCount)
 	var wg sync.WaitGroup
 
+	// Build per-provider prompts so each agent writes to its own output path.
+	claudePrompt, err := o.promptBuilder.BuildDiscoveryPromptWithOutput(sourceDocPaths, goal.CodePath, &goal, claudeOutPath, discoveryCtx...)
+	if err != nil {
+		return fmt.Errorf("build discovery prompt (primary): %w", err)
+	}
+	codexPrompt, err := o.promptBuilder.BuildDiscoveryPromptWithOutput(sourceDocPaths, goal.CodePath, &goal, codexOutPath, discoveryCtx...)
+	if err != nil {
+		return fmt.Errorf("build discovery prompt (codex): %w", err)
+	}
+
 	// Build a schema-bound primary runner for structured output.
 	var discoveryClaudeRunner AgentRunner = o.runnerFor("discovery")
 	if se, ok := discoveryClaudeRunner.(SchemaEnforcer); ok {
@@ -331,7 +342,7 @@ func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJS
 	go func() {
 		defer wg.Done()
 		o.logger.LogAgentDispatch("discovery-claude", "discovery-claude", state.Round)
-		exitCode, stderr, cost, duration, runErr := discoveryClaudeRunner.Run(prompt, claudeOutPath, timeout)
+		exitCode, stderr, cost, duration, runErr := discoveryClaudeRunner.Run(claudePrompt, claudeOutPath, timeout)
 		var dispatchErr error
 		if runErr != nil {
 			dispatchErr = runErr
@@ -350,7 +361,7 @@ func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJS
 		go func() {
 			defer wg.Done()
 			o.logger.LogAgentDispatch("discovery-codex", "discovery-codex", state.Round)
-			exitCode, stderr, cost, duration, runErr := o.codexDiscoveryRunner.Run(prompt, codexOutPath, timeout)
+			exitCode, stderr, cost, duration, runErr := o.codexDiscoveryRunner.Run(codexPrompt, codexOutPath, timeout)
 			var dispatchErr error
 			if runErr != nil {
 				dispatchErr = runErr
@@ -367,12 +378,16 @@ func (o *Orchestrator) handleDualDiscovery(prompt string, state *WorkflowStateJS
 	// OpenCode discovery agent (when available).
 	opencodeOutPath := filepath.Join(specDir, VersionedFilename("discovery-output", "opencode", discoveryRound, ".json"))
 	if o.opencodeDiscoveryRunner != nil {
+		opencodePrompt, ocErr := o.promptBuilder.BuildDiscoveryPromptWithOutput(sourceDocPaths, goal.CodePath, &goal, opencodeOutPath, discoveryCtx...)
+		if ocErr != nil {
+			return fmt.Errorf("build discovery prompt (opencode): %w", ocErr)
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			o.logger.LogAgentDispatch("discovery-opencode", "discovery-opencode", state.Round)
 			opencodeRunner := taggedRunner(o.opencodeDiscoveryRunner, "discovery-opencode")
-			exitCode, stderr, cost, duration, runErr := opencodeRunner.Run(prompt, opencodeOutPath, timeout)
+			exitCode, stderr, cost, duration, runErr := opencodeRunner.Run(opencodePrompt, opencodeOutPath, timeout)
 			var dispatchErr error
 			if runErr != nil {
 				dispatchErr = runErr

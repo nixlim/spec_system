@@ -122,6 +122,9 @@ func main() {
 		log.Fatalf("spec workflow startup configuration invalid: %v", err)
 	}
 
+	// Ensure outvalid is available for agent validation prompts.
+	ensureOutvalid()
+
 	log.Printf("[codedoc] config loaded (max_rounds=%d, mode=%s, cost_budget=$%.2f)",
 		cdConfig.MaxRounds, cdConfig.DefaultMode, cdConfig.MaxCostUSD)
 
@@ -566,4 +569,56 @@ func detectDefaultSkillPaths() specworkflow.SkillPaths {
 func isDir(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
+}
+
+// ensureOutvalid checks whether the outvalid binary is available on PATH.
+// If not found, it looks for bin/outvalid in the project directory and
+// installs it to ~/.local/bin (creating the directory if needed).
+func ensureOutvalid() {
+	if _, err := exec.LookPath("outvalid"); err == nil {
+		return
+	}
+
+	// Find outvalid in the project's bin/ directory.
+	exePath, _ := os.Executable()
+	projectRoot := filepath.Dir(filepath.Dir(exePath))
+	candidate := filepath.Join(projectRoot, "bin", "outvalid")
+
+	// Also check relative to cwd (common when running via `go run`).
+	if _, err := os.Stat(candidate); err != nil {
+		cwd, _ := os.Getwd()
+		candidate = filepath.Join(cwd, "bin", "outvalid")
+		if _, err := os.Stat(candidate); err != nil {
+			log.Printf("[main] WARNING: outvalid not found on PATH or in bin/. Agents may fail validation steps. Install with: cp bin/outvalid ~/.local/bin/")
+			return
+		}
+	}
+
+	// Install to ~/.local/bin.
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Printf("[main] WARNING: outvalid not on PATH and cannot determine home dir: %v", err)
+		return
+	}
+	destDir := filepath.Join(homeDir, ".local", "bin")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		log.Printf("[main] WARNING: failed to create %s: %v", destDir, err)
+		return
+	}
+	destPath := filepath.Join(destDir, "outvalid")
+	src, err := os.ReadFile(candidate)
+	if err != nil {
+		log.Printf("[main] WARNING: failed to read %s: %v", candidate, err)
+		return
+	}
+	if err := os.WriteFile(destPath, src, 0o755); err != nil {
+		log.Printf("[main] WARNING: failed to install outvalid to %s: %v", destPath, err)
+		return
+	}
+	log.Printf("[main] installed outvalid to %s", destPath)
+
+	// Verify it's now findable (user may need ~/.local/bin on PATH).
+	if _, err := exec.LookPath("outvalid"); err != nil {
+		log.Printf("[main] NOTE: outvalid installed to %s but not on PATH. Add ~/.local/bin to your PATH or agents will use the absolute path from the prompt.", destDir)
+	}
 }

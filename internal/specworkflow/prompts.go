@@ -100,14 +100,26 @@ func (pb *PromptBuilder) collectCoverageSourceDocs() []string {
 // schemaRelPath is relative to workflow-templates/ (e.g. "specworkflow/reviewer-output.schema.json").
 func (pb *PromptBuilder) outvalidBlock(schemaRelPath, draftPath, writeTo string) string {
 	schemaPath := filepath.Join(pb.projectRoot(), "workflow-templates", schemaRelPath)
+	outvalidBin := pb.resolveOutvalid()
 	var b strings.Builder
 	b.WriteString("### Validate and write\n\n")
 	fmt.Fprintf(&b, "1. Write your JSON to: `%s`\n", draftPath)
 	b.WriteString("2. Run:\n\n")
-	fmt.Fprintf(&b, "```bash\noutvalid --schema %s \\\n         --input %s \\\n         --writeTo %s\n```\n\n",
-		schemaPath, draftPath, writeTo)
+	fmt.Fprintf(&b, "```bash\n%s --schema %s \\\n         --input %s \\\n         --writeTo %s\n```\n\n",
+		outvalidBin, schemaPath, draftPath, writeTo)
 	b.WriteString("If validation fails: read the numbered errors, fix your draft, and retry (max 3 attempts).\n")
 	return b.String()
+}
+
+// resolveOutvalid returns the absolute path to the outvalid binary if it
+// exists in the project's bin/ directory, falling back to the bare command
+// name (relies on PATH) otherwise.
+func (pb *PromptBuilder) resolveOutvalid() string {
+	candidate := filepath.Join(pb.projectRoot(), "bin", "outvalid")
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate
+	}
+	return "outvalid"
 }
 
 // specDir returns the directory under workspaceDir where spec artefacts for
@@ -136,6 +148,14 @@ type DiscoveryContext struct {
 }
 
 func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string, codePath string, goal *GoalInput, ctx ...DiscoveryContext) (string, error) {
+	return pb.BuildDiscoveryPromptWithOutput(sourceDocPaths, codePath, goal, "", ctx...)
+}
+
+// BuildDiscoveryPromptWithOutput is like BuildDiscoveryPrompt but allows the
+// caller to override the output JSON path. This is used by dual-provider
+// discovery so each parallel agent writes to its own per-provider versioned
+// target file instead of racing on the shared discovery-output.json.
+func (pb *PromptBuilder) BuildDiscoveryPromptWithOutput(sourceDocPaths []string, codePath string, goal *GoalInput, outputPathOverride string, ctx ...DiscoveryContext) (string, error) {
 	specTemplate, err := pb.skills.GetSkillContent(SpecTemplate)
 	if err != nil {
 		return "", fmt.Errorf("loading spec template for discovery: %w", err)
@@ -329,6 +349,9 @@ func (pb *PromptBuilder) BuildDiscoveryPrompt(sourceDocPaths []string, codePath 
 
 	// Output schema + outvalid instruction.
 	outPath := filepath.Join(pb.specDir(), "discovery-output.json")
+	if outputPathOverride != "" {
+		outPath = outputPathOverride
+	}
 	draftPath := outPath + ".draft.json"
 
 	b.WriteString("## Output Requirements\n\n")
