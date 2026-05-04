@@ -45,7 +45,7 @@ func TestCodexRunner_BuildCommand(t *testing.T) {
 	args := r.buildArgs("/tmp/schema.json", "/tmp/output.json")
 
 	expected := []string{
-		"exec", "--full-auto",
+		"exec", "--sandbox", "workspace-write", "--skip-git-repo-check",
 		"-m", "gpt-5.4",
 		"--output-schema", "/tmp/schema.json",
 		"--output-last-message", "/tmp/output.json",

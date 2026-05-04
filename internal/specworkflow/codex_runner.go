@@ -43,7 +43,7 @@ type CodexRunner struct {
 // string means no schema constraint is applied.
 // outputPath is where codex writes its last message.
 func (r *CodexRunner) buildArgs(schemaPath string, outputPath string) []string {
-	args := []string{"exec", "--full-auto"}
+	args := []string{"exec", "--sandbox", "workspace-write", "--skip-git-repo-check"}
 
 	if r.Model != "" {
 		args = append(args, "-m", r.Model)
